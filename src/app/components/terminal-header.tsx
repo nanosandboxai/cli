@@ -130,12 +130,7 @@ export function TerminalHeader({ navItems = [] }: TerminalHeaderProps) {
             );
           })}
 
-          {/* Cursor after all items are typed */}
-          {isTypingDone && navItems.length > 0 && (
-            <span className="inline-block w-2 h-4 bg-white animate-pulse ml-1"></span>
-          )}
-
-          {/* Cursor when no nav items */}
+          {/* Cursor only when no nav items (fallback) */}
           {navItems.length === 0 && (
             <span className="inline-block w-2 h-4 bg-white animate-pulse ml-1"></span>
           )}
