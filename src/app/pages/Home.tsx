@@ -15,12 +15,10 @@ export default function Home() {
               NANOSANDBOX
             </h1>
             <p className="text-white text-lg mb-2">
-              Isolated Code Agent Management CLI
+              VM-Isolated Sandboxes for AI Code Agents
             </p>
             <p className="text-[#888] text-sm leading-relaxed">
-              Deploy, manage, and orchestrate code agents in separate sandboxed <br />
-              environments within a single project. Built for developers who need <br />
-              isolation, reproducibility, and control.
+              Deploy AI agents in hardware-isolated microVMs with sub-second boot times. OCI image support, cross-platform (macOS, Linux, Windows), and built-in multi-agent TUI for concurrent development workflows.
             </p>
           </div>
         </div>
@@ -31,22 +29,23 @@ export default function Home() {
         <div className="space-y-4">
           <div>
             <p className="text-[#888] text-sm mb-3">
-              Install NanoSandbox with a single command. Works on Linux, macOS, and Windows (WSL).
+              Install nanosb with a single command. Works on macOS (Apple Silicon) and Linux.
             </p>
             <InstallTabs />
           </div>
 
           <div className="border-t border-[#333] pt-4">
             <p className="text-[#888] text-sm mb-2"># Verify installation</p>
-            <CodeBlock code="nanosandbox --version" />
+            <CodeBlock code="nanosb --version" />
           </div>
 
           <div className="border-t border-[#333] pt-4">
             <p className="text-[#888] text-sm mb-2"># Quick start</p>
-            <CodeBlock code={`nanosandbox init my-project
-cd my-project
-nanosandbox agent create my-agent
-nanosandbox agent start my-agent`} />
+            <CodeBlock code={`nanosb pull python:3.12-slim
+nanosb run python:3.12-slim python -c "print('Hello from a microVM')"
+
+# Or launch the interactive TUI
+nanosb`} />
           </div>
         </div>
       </TerminalSection>
@@ -59,57 +58,57 @@ nanosandbox agent start my-agent`} />
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Isolated Environments</span>
-                <p className="text-[#888] text-xs">Containerized sandboxes with dedicated resources</p>
+                <span className="text-white">VM-Level Isolation</span>
+                <p className="text-[#888] text-xs">Each sandbox runs in its own microVM via libkrun with an independent kernel</p>
               </div>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Multi-Agent Projects</span>
-                <p className="text-[#888] text-xs">Manage multiple agents in one project structure</p>
+                <span className="text-white">Sub-Second Boot Times</span>
+                <p className="text-[#888] text-xs">Optimized libkrun startup for near-instant sandbox creation</p>
               </div>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Zero Configuration</span>
-                <p className="text-[#888] text-xs">Deploy agents instantly with automatic setup</p>
+                <span className="text-white">OCI Image Support</span>
+                <p className="text-[#888] text-xs">Pull from Docker Hub, GHCR, or any private registry</p>
               </div>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Inter-Agent Communication</span>
-                <p className="text-[#888] text-xs">Built-in networking for secure agent coordination</p>
+                <span className="text-white">Multi-Agent TUI</span>
+                <p className="text-[#888] text-xs">Run multiple AI agents concurrently in panel-based terminal UI</p>
               </div>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Config as Code</span>
-                <p className="text-[#888] text-xs">YAML/JSON definitions for version control</p>
+                <span className="text-white">Project Mounting</span>
+                <p className="text-[#888] text-xs">VirtioFS mounts with automatic git integration and branch tracking</p>
               </div>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Security First</span>
-                <p className="text-[#888] text-xs">Sandboxed execution with secrets management</p>
+                <span className="text-white">MCP Server Support</span>
+                <p className="text-[#888] text-xs">Model Context Protocol integration for agent tooling</p>
               </div>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Version Control</span>
-                <p className="text-[#888] text-xs">Snapshot states and instant rollbacks</p>
+                <span className="text-white">Cross-Platform</span>
+                <p className="text-[#888] text-xs">macOS Apple Silicon (HVF), Linux (KVM), Windows (HCS)</p>
               </div>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff6b6b]">✓</span>
               <div>
-                <span className="text-white">Auto-Restart Policies</span>
-                <p className="text-[#888] text-xs">Health checks and automatic recovery</p>
+                <span className="text-white">Streaming I/O</span>
+                <p className="text-[#888] text-xs">Real-time output streaming with backpressure handling</p>
               </div>
             </div>
           </div>
@@ -119,48 +118,40 @@ nanosandbox agent start my-agent`} />
         <TerminalSection title="Common Commands" id="commands">
           <div className="space-y-2 text-sm">
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox init</span>
-              <span className="text-[#888]">Initialize new project</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb pull &lt;IMAGE&gt;</span>
+              <span className="text-[#888]">Pull an OCI image from a registry</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent create</span>
-              <span className="text-[#888]">Create new agent</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb run &lt;IMAGE&gt; [CMD]</span>
+              <span className="text-[#888]">Run a command in a new sandbox</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent start</span>
-              <span className="text-[#888]">Start agent container</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb exec &lt;ID&gt; &lt;CMD&gt;</span>
+              <span className="text-[#888]">Execute command in running sandbox</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent stop</span>
-              <span className="text-[#888]">Stop running agent</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb ps</span>
+              <span className="text-[#888]">List running sandboxes</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent list</span>
-              <span className="text-[#888]">List all agents</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb stop &lt;SANDBOX&gt;</span>
+              <span className="text-[#888]">Stop a running sandbox</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent logs</span>
-              <span className="text-[#888]">View agent logs</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb rm &lt;SANDBOX&gt;</span>
+              <span className="text-[#888]">Remove a sandbox</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent exec</span>
-              <span className="text-[#888]">Execute command in agent</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb images</span>
+              <span className="text-[#888]">List cached images</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent install</span>
-              <span className="text-[#888]">Install dependencies</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb doctor</span>
+              <span className="text-[#888]">Check runtime prerequisites</span>
             </div>
             <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent inspect</span>
-              <span className="text-[#888]">View agent details</span>
-            </div>
-            <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent restart</span>
-              <span className="text-[#888]">Restart agent</span>
-            </div>
-            <div className="flex gap-2 text-xs">
-              <span className="text-[#888] w-40">nanosandbox agent remove</span>
-              <span className="text-[#888]">Remove agent</span>
+              <span className="text-white w-44 flex-shrink-0">nanosb cleanup</span>
+              <span className="text-[#888]">Clean up stale project clones</span>
             </div>
           </div>
         </TerminalSection>
@@ -171,117 +162,79 @@ nanosandbox agent start my-agent`} />
         <div className="grid md:grid-cols-2 gap-6 text-sm">
           <div className="space-y-4">
             <div>
-              <h3 className="text-[#ff6b6b] mb-2">▸ Process Isolation</h3>
+              <h3 className="text-[#ff6b6b] mb-2">▸ VM-Based Isolation</h3>
               <p className="text-[#888] text-xs leading-relaxed">
-                Each agent runs in its own isolated process space with dedicated CPU and
-                memory allocations. Crashes or memory leaks in one agent don't affect others.
-                System-level separation ensures complete independence.
+                Each sandbox runs in its own microVM with an independent kernel via libkrun direct FFI. Not namespace-based — real hardware-level isolation. Crashes in one sandbox cannot affect others.
               </p>
             </div>
             <div>
-              <h3 className="text-[#ff6b6b] mb-2">▸ Dependency Management</h3>
+              <h3 className="text-[#ff6b6b] mb-2">▸ Hardware Virtualization</h3>
               <p className="text-[#888] text-xs leading-relaxed">
-                Agents can use different versions of the same library without conflicts.
-                Each environment has its own package registry and runtime. Install Python 3.8
-                for one agent and 3.11 for another without interference.
+                Platform-native hypervisors: KVM on Linux, Hypervisor.framework (HVF) on macOS Apple Silicon, and HCS with Hyper-V on Windows. No Docker daemon required.
               </p>
             </div>
           </div>
           <div className="space-y-4">
             <div>
-              <h3 className="text-[#ff6b6b] mb-2">▸ Network Segmentation</h3>
+              <h3 className="text-[#ff6b6b] mb-2">▸ TSI Networking</h3>
               <p className="text-[#888] text-xs leading-relaxed">
-                Virtual networks ensure agents can only communicate through defined interfaces.
-                External network access can be restricted per agent. Built-in service discovery
-                and DNS resolution for inter-agent communication.
+                Transparent Socket Impersonation allows VMs to make outbound connections seamlessly. Guest DNS routed through host. Configurable network scopes: none, group, public, or full access.
               </p>
             </div>
             <div>
-              <h3 className="text-[#ff6b6b] mb-2">▸ Volume Isolation</h3>
+              <h3 className="text-[#ff6b6b] mb-2">▸ OCI Image Handling</h3>
               <p className="text-[#888] text-xs leading-relaxed">
-                File systems are isolated by default. Share specific directories between agents
-                using explicit volume mounts defined in your config. Prevents unauthorized
-                file access and data leakage between agents.
+                Pure Rust OCI image pulling with layer caching. Platform-aware image selection (linux/amd64, linux/arm64). All layers merged into a single read-only rootfs mounted inside the VM.
               </p>
             </div>
           </div>
         </div>
       </TerminalSection>
 
-      {/* Example Workflow */}
-      <TerminalSection title="Example Workflow" id="example" className="mb-6">
+      {/* TUI Workflow */}
+      <TerminalSection title="TUI Workflow" id="example" className="mb-6">
         <div className="text-sm">
           <p className="text-[#888] mb-3">
-            Create a multi-agent project with data processing and API service agents:
+            Launch the interactive TUI to manage multiple AI agents in isolated sandboxes:
           </p>
           <CodeBlock
-            code={`# Initialize project
-nanosandbox init analytics-platform && cd analytics-platform
+            code={`# Launch the TUI (auto-detects git project)
+nanosb
 
-# Create data processor agent (Python)
-nanosandbox agent create data-processor --runtime python:3.11
-nanosandbox agent install data-processor pandas numpy scikit-learn
+# Add an AI agent with project mounting
+/add claude --project /path/to/project --branch feat/my-feature
 
-# Create API service agent (Node.js)
-nanosandbox agent create api-service --runtime node:20
-nanosandbox agent install api-service express axios
+# Chat with the agent directly in the panel
+> Implement the user authentication module
 
-# Configure inter-agent networking
-nanosandbox network create analytics-net
-nanosandbox network connect analytics-net data-processor api-service
+# Manage multiple agents
+/add goose --project /path/to/project
+/focus 0                    # Switch between panels
 
-# Start all agents
-nanosandbox agent start data-processor
-nanosandbox agent start api-service
+# View and sync project changes
+/diff                       # Show uncommitted changes
+/gitsync on                 # Enable automatic git sync
 
-# Monitor logs
-nanosandbox agent logs data-processor --follow
-nanosandbox agent logs api-service --tail 100
+# Manage MCP servers
+/mcp list                   # List configured servers
+/mcp add memory npx @anthropic/memory-server
 
-# View agent status
-nanosandbox agent list --status`}
+# Monitor sandboxes
+/sandboxes                  # Toggle sandbox sidebar
+
+# Cleanup
+/kill 0                     # Destroy sandbox and panel`}
           />
         </div>
       </TerminalSection>
 
-      {/* Advanced Features */}
-      <div className="grid md:grid-cols-3 gap-6 mb-6">
-        <TerminalSection title="Snapshots" id="snapshots">
-          <div className="text-xs space-y-2">
-            <p className="text-[#888]">
-              Create point-in-time snapshots of agent states for instant rollback and disaster recovery.
-            </p>
-            <CodeBlock code={`nanosandbox agent snapshot create my-agent
-nanosandbox agent snapshot restore my-agent snap-001`} />
-          </div>
-        </TerminalSection>
-
-        <TerminalSection title="Health Checks" id="health">
-          <div className="text-xs space-y-2">
-            <p className="text-[#888]">
-              Configure automatic health monitoring with custom scripts and restart policies.
-            </p>
-            <CodeBlock code={`nanosandbox agent config my-agent --health-check /health --interval 30s`} />
-          </div>
-        </TerminalSection>
-
-        <TerminalSection title="Interactive Shell" id="shell">
-          <div className="text-xs space-y-2">
-            <p className="text-[#888]">
-              Attach to running agents and execute commands directly in their isolated environment.
-            </p>
-            <CodeBlock code={`nanosandbox agent exec my-agent --interactive /bin/bash`} />
-          </div>
-        </TerminalSection>
-      </div>
-
       {/* Footer */}
       <div className="border border-[#444] bg-black p-4 font-mono text-center">
         <div className="flex items-center justify-center gap-8 text-xs text-[#888] mb-2">
-          <a href="#" className="hover:text-[#ff6b6b] transition-colors">Documentation</a>
-          <a href="#" className="hover:text-[#ff6b6b] transition-colors">GitHub</a>
-          <a href="#" className="hover:text-[#ff6b6b] transition-colors">Community</a>
-          <a href="#" className="hover:text-[#ff6b6b] transition-colors">License: MIT</a>
+          <a href="/docs" className="hover:text-[#ff6b6b] transition-colors">Documentation</a>
+          <a href="https://github.com/anthropics/nanosandbox" className="hover:text-[#ff6b6b] transition-colors">GitHub</a>
+          <a href="/agents" className="hover:text-[#ff6b6b] transition-colors">Agents</a>
+          <a href="/mcp" className="hover:text-[#ff6b6b] transition-colors">MCP</a>
         </div>
         <p className="text-[#666] text-xs">
           NanoSandbox © 2026 | Open Source Project
