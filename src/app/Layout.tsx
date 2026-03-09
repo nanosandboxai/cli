@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation } from "react-router";
+import { Outlet } from "react-router";
 import { TerminalHeader } from "./components/terminal-header";
 
 const navItems = [
@@ -10,33 +10,9 @@ const navItems = [
 ];
 
 export default function Layout() {
-  const location = useLocation();
-
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white">
-      <TerminalHeader />
-
-      {/* Terminal Tab Nav */}
-      <nav className="border-b border-[#444] bg-black">
-        <div className="container mx-auto px-4 max-w-7xl flex items-center gap-0 font-mono text-sm">
-          {navItems.map((item) => {
-            const isActive = location.pathname === item.path;
-            return (
-              <Link
-                key={item.path}
-                to={item.path}
-                className={`px-4 py-2 border-r border-[#444] transition-colors ${
-                  isActive
-                    ? "text-[#ff6b6b] bg-[#1a1a1a] border-b-2 border-b-[#ff6b6b]"
-                    : "text-[#888] hover:text-white hover:bg-[#111]"
-                }`}
-              >
-                {item.label}
-              </Link>
-            );
-          })}
-        </div>
-      </nav>
+      <TerminalHeader navItems={navItems} />
 
       <main className="container mx-auto px-4 py-6 max-w-7xl">
         <Outlet />
