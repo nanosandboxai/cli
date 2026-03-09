@@ -6,7 +6,7 @@ export function InstallTabs() {
 
   const bashInstall = `curl -fsSL https://install.nanosandbox.dev/install.sh | sh`;
   const powershellInstall = `# PowerShell installation coming soon
-# Follow updates at https://github.com/nanosandbox/nanosandbox`;
+# Follow updates at https://github.com/anthropics/nanosandbox`;
 
   return (
     <div>
