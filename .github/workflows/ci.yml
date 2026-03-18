@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feature/**]
+    tags: [v*]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Use git CLI for fetches so we can inject PAT auth for the private runtime.
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+jobs:
+  # ==========================================================================
+  # Build + Test
+  # ==========================================================================
+  build:
+    name: Build CLI (macOS arm64)
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Auth for private runtime crate ────────────────────────
+      - name: Configure git auth for private runtime
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+
+      # ── Toolchain ─────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ── System dependencies ───────────────────────────────────
+      - name: Install libkrun
+        run: brew install krunvm
+
+      # ── Build ─────────────────────────────────────────────────
+      - name: Build release binary
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Run tests
+        run: cargo test --target aarch64-apple-darwin
+
+      - name: Verify binary
+        run: |
+          ls -la target/aarch64-apple-darwin/release/nanosb
+          file target/aarch64-apple-darwin/release/nanosb
+          target/aarch64-apple-darwin/release/nanosb --version
+
+      # ── Codesign (macOS) ──────────────────────────────────────
+      - name: Codesign binary
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          codesign --sign - \
+            --entitlements entitlements.plist \
+            --force \
+            target/aarch64-apple-darwin/release/nanosb
+
+      # ── Release ───────────────────────────────────────────────
+      - name: Prepare release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cp target/aarch64-apple-darwin/release/nanosb nanosb
+          chmod +x scripts/install/*.sh
+          cp scripts/install/install.sh install.sh
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG_NAME" \
+            --title "nanosandbox $TAG_NAME" \
+            --generate-notes \
+            nanosb \
+            install.sh \
+            scripts/install/macos.sh \
+            scripts/install/linux.sh \
+            scripts/install/gvproxy.sh \
+            scripts/install/uninstall.sh
+
+      # ── Artifacts (for PRs / non-release builds) ──────────────
+      - name: Upload build artifacts
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanosb-macos-arm64
+          path: |
+            target/aarch64-apple-darwin/release/nanosb
+            scripts/install/
