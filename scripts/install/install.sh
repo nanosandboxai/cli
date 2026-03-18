@@ -8,7 +8,7 @@
 #   3. Codesigns the binary on macOS
 #
 # Usage:
-#   curl -fsSL https://github.com/devdone-labs/nanosandbox-cli/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/nanosandboxai/cli/releases/latest/download/install.sh | bash
 #
 # Environment variables:
 #   NANOSB_VERSION   - Version to install (default: "latest")
@@ -26,7 +26,7 @@ set -e
 # =============================================================================
 
 NANOSB_VERSION="${NANOSB_VERSION:-latest}"
-RELEASE_REPO="devdone-labs/nanosandbox-cli"
+RELEASE_REPO="nanosandboxai/cli"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 GVPROXY_VERSION="v0.8.7"
 GVPROXY_REPO="https://github.com/containers/gvisor-tap-vsock/releases/download"
