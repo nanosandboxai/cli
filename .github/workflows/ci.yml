@@ -50,7 +50,9 @@ jobs:
 
       # ── System dependencies ───────────────────────────────────
       - name: Install libkrun
-        run: brew install krunvm
+        run: |
+          brew tap slp/krun
+          brew install libkrun
 
       # ── Build ─────────────────────────────────────────────────
       - name: Build release binary
