@@ -15,7 +15,7 @@ path = "src/main.rs"
 # Private runtime crate — requires git auth (SSH key or PAT).
 # For local dev, override with: [patch.'ssh://git@github.com/nanosandboxai/runtime.git']
 #   nanosandbox = { path = "../runtime" }
-nanosandbox = { git = "ssh://git@github.com/nanosandboxai/runtime.git", branch = "feature/cli-separation" }
+nanosandbox = { git = "ssh://git@github.com/nanosandboxai/runtime.git", branch = "main" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
