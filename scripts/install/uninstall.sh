@@ -232,7 +232,7 @@ else
     echo "All nanosandbox runtime dependencies have been removed."
     echo ""
     echo "To reinstall:"
-    echo "  curl -fsSL https://github.com/devdone-labs/nanosandbox-cli/releases/latest/download/install.sh | bash"
+    echo "  curl -fsSL https://github.com/nanosandboxai/cli/releases/latest/download/install.sh | bash"
     echo ""
     echo "Verify with:"
     echo "  nanosb doctor"

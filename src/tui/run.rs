@@ -2389,7 +2389,7 @@ const KNOWN_AGENTS: &[&str] = &["claude", "codex", "goose", "cursor"];
 ///
 /// Extracts a known agent name from image patterns like:
 /// - `localhost:5050/agent-claude:latest` → `"claude"`
-/// - `ghcr.io/devdone-labs/agents-registry/codex:v1` → `"codex"`
+/// - `ghcr.io/nanosandboxai/agents-registry/codex:v1` → `"codex"`
 /// - `nanosb-goose:latest` → `"goose"`
 /// Parse raw SSH bytes as NDJSON and update the headless state.
 ///
@@ -3960,11 +3960,11 @@ mod tests {
     #[test]
     fn test_detect_agent_type_ghcr() {
         assert_eq!(
-            detect_agent_type_from_image("ghcr.io/devdone-labs/agents-registry/claude:v1.0"),
+            detect_agent_type_from_image("ghcr.io/nanosandboxai/agents-registry/claude:v1.0"),
             Some("claude".to_string())
         );
         assert_eq!(
-            detect_agent_type_from_image("ghcr.io/devdone-labs/agents-registry/codex:latest"),
+            detect_agent_type_from_image("ghcr.io/nanosandboxai/agents-registry/codex:latest"),
             Some("codex".to_string())
         );
     }

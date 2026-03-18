@@ -13,6 +13,7 @@
 # Environment variables:
 #   NANOSB_VERSION   - Version to install (default: "latest")
 #   INSTALL_DIR      - Binary install directory (default: ~/.local/bin)
+#   NANOSB_BINARY    - Path to a local binary to install (skips download)
 #
 # Supported platforms:
 #   - macOS Apple Silicon (arm64) — full support (binary + deps)
@@ -72,11 +73,25 @@ info "Detected platform: ${OS} ${ARCH}"
 download_binary() {
     header "Installing nanosb binary"
 
+    mkdir -p "$INSTALL_DIR"
+
+    # If a local binary is provided, use it directly (for testing)
+    if [[ -n "$NANOSB_BINARY" ]]; then
+        if [[ ! -f "$NANOSB_BINARY" ]]; then
+            error "NANOSB_BINARY set but file not found: $NANOSB_BINARY"
+        fi
+        info "Installing nanosb from local path: $NANOSB_BINARY"
+        cp "$NANOSB_BINARY" "${INSTALL_DIR}/nanosb"
+        chmod +x "${INSTALL_DIR}/nanosb"
+        success "nanosb installed at ${INSTALL_DIR}/nanosb"
+        return 0
+    fi
+
     if [[ "$OS" != "Darwin" || "$ARCH" != "arm64" ]]; then
         warn "Pre-built binaries are currently available for macOS arm64 only."
         warn "For other platforms, build from source:"
-        warn "  git clone https://github.com/devdone-labs/dd-nanosandbox.git"
-        warn "  cd dd-nanosandbox && cargo build --release --features cli"
+        warn "  git clone https://github.com/nanosandboxai/runtime.git"
+        warn "  cd runtime && cargo build --release --features cli"
         return 0
     fi
 
@@ -98,8 +113,6 @@ download_binary() {
             info "Reinstalling latest version..."
         fi
     fi
-
-    mkdir -p "$INSTALL_DIR"
 
     info "Downloading nanosb from ${url}..."
     if curl -fsSL "$url" -o "${INSTALL_DIR}/nanosb"; then
