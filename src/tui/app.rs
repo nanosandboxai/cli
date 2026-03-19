@@ -303,6 +303,8 @@ pub struct AgentPanel {
     pub port_forward_children: Vec<std::process::Child>,
     /// Animation tick counter for the loading border sweep.
     pub loading_tick: u16,
+    /// Human-readable progress message shown below the logo during loading.
+    pub loading_message: Option<String>,
     /// Error message shown below the logo when sandbox creation or SSH fails.
     pub loading_error: Option<String>,
     /// Whether a reconnect is in progress (suppresses auto-kill on disconnect).
@@ -355,6 +357,7 @@ impl AgentPanel {
             forwarded_ports: HashSet::new(),
             port_forward_children: Vec::new(),
             loading_tick: 0,
+            loading_message: None,
             loading_error: None,
             reconnecting: false,
             visible: true,
