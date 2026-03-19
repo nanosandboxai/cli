@@ -1327,12 +1327,12 @@ fn render_loading_animation(
     let box_width: u16 = 7;
     let box_height: u16 = 3;
 
-    // Account for error message below logo.
-    let total_height = if panel.loading_error.is_some() {
-        box_height + 2
-    } else {
-        box_height
-    };
+    // Account for progress/error messages below logo.
+    let has_message = panel.loading_message.is_some();
+    let has_error = panel.loading_error.is_some();
+    let total_height = box_height
+        + if has_message { 2 } else { 0 }
+        + if has_error { 2 } else { 0 };
 
     // Center the block in the area.
     if area.width < box_width || area.height < total_height {
@@ -1415,10 +1415,27 @@ fn render_loading_animation(
         frame.render_widget(span, Rect::new(x + col, bot_y, 1, 1));
     }
 
-    // ── Error message below logo ──
+    // ── Progress message below logo ──
+    let mut next_y = bot_y + 2;
+    if let Some(ref msg) = panel.loading_message {
+        if next_y < area.y + area.height {
+            let max_width = area.width as usize;
+            let truncated = if msg.len() > max_width {
+                format!("{}...", &msg[..max_width.saturating_sub(3)])
+            } else {
+                msg.clone()
+            };
+            let msg_widget = Paragraph::new(truncated)
+                .style(Style::new().fg(theme.accent))
+                .alignment(Alignment::Center);
+            frame.render_widget(msg_widget, Rect::new(area.x, next_y, area.width, 1));
+            next_y += 2;
+        }
+    }
+
+    // ── Error message below progress ──
     if let Some(ref error) = panel.loading_error {
-        let error_y = bot_y + 2;
-        if error_y < area.y + area.height {
+        if next_y < area.y + area.height {
             let max_width = area.width as usize;
             let truncated = if error.len() > max_width {
                 format!("{}...", &error[..max_width.saturating_sub(3)])
@@ -1428,7 +1445,7 @@ fn render_loading_animation(
             let error_widget = Paragraph::new(truncated)
                 .style(Style::new().fg(theme.error))
                 .alignment(Alignment::Center);
-            frame.render_widget(error_widget, Rect::new(area.x, error_y, area.width, 1));
+            frame.render_widget(error_widget, Rect::new(area.x, next_y, area.width, 1));
         }
     }
 }

@@ -235,9 +235,10 @@ pub async fn run_tui(
                     CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => {}
                 }
             }
-            AppEvent::SandboxCreating { panel_idx, .. } => {
-                // Loading animation replaces status messages; nothing to do.
-                let _ = panel_idx;
+            AppEvent::SandboxCreating { panel_idx, message } => {
+                if let Some(panel) = app.panels.get_mut(panel_idx) {
+                    panel.loading_message = Some(message);
+                }
             }
             AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount } => {
                 // Get SSH info before storing sandbox
@@ -251,6 +252,7 @@ pub async fn run_tui(
                 if let Some(panel) = app.panels.get_mut(panel_idx) {
                     panel.sandbox = Some(sandbox);
                     panel.sandbox_id_short = short_id.clone();
+                    panel.loading_message = Some("Connecting via SSH...".into());
                     // Only set project_mount from sandbox if the panel doesn't
                     // already have one (resumed sessions set it up front).
                     if project_mount.is_some() {
@@ -326,6 +328,7 @@ pub async fn run_tui(
                         PanelMode::Terminal
                     };
                     panel.reconnecting = false;
+                    panel.loading_message = None;
                     panel.loading_error = None;
                 }
             }
@@ -2929,6 +2932,10 @@ fn add_agent(
     let tx = tx.clone();
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
+        let _ = tx.send(AppEvent::SandboxCreating {
+            panel_idx,
+            message: "Pulling image...".into(),
+        });
         let create_result = if let Some(im) = image_manager {
             Sandbox::create_with_manager(config, im).await
         } else {
@@ -2937,6 +2944,10 @@ fn add_agent(
         match create_result {
             Ok(mut sandbox) => {
                 let short_id = sandbox.id()[..8.min(sandbox.id().len())].to_string();
+                let _ = tx.send(AppEvent::SandboxCreating {
+                    panel_idx,
+                    message: "Booting microVM...".into(),
+                });
 
                 match sandbox.start().await {
                     Ok(()) => {
@@ -3039,6 +3050,10 @@ fn add_agent_from_config(
     let tx = tx.clone();
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
+        let _ = tx.send(AppEvent::SandboxCreating {
+            panel_idx,
+            message: "Pulling image...".into(),
+        });
         let create_result = if let Some(im) = image_manager {
             Sandbox::create_with_manager(config, im).await
         } else {
@@ -3047,6 +3062,10 @@ fn add_agent_from_config(
         match create_result {
             Ok(mut sandbox) => {
                 let short_id = sandbox.id()[..8.min(sandbox.id().len())].to_string();
+                let _ = tx.send(AppEvent::SandboxCreating {
+                    panel_idx,
+                    message: "Booting microVM...".into(),
+                });
 
                 match sandbox.start().await {
                     Ok(()) => {
@@ -3177,6 +3196,10 @@ fn resume_session(
         let tx = tx.clone();
         let image_manager = app.image_manager.clone();
         tokio::spawn(async move {
+            let _ = tx.send(AppEvent::SandboxCreating {
+                panel_idx,
+                message: "Pulling image...".into(),
+            });
             let create_result = if let Some(im) = image_manager {
                 Sandbox::create_with_manager(config, im).await
             } else {
@@ -3185,6 +3208,10 @@ fn resume_session(
             match create_result {
                 Ok(mut sandbox) => {
                     let short_id = sandbox.id()[..8.min(sandbox.id().len())].to_string();
+                    let _ = tx.send(AppEvent::SandboxCreating {
+                        panel_idx,
+                        message: "Booting microVM...".into(),
+                    });
 
                     match sandbox.start().await {
                         Ok(()) => {
