@@ -7,7 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Use git CLI for fetches so we can inject PAT auth for the private runtime.
   CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
@@ -26,7 +25,7 @@ jobs:
       # ── Auth for private runtime crate ────────────────────────
       - name: Configure git auth for private runtime
         run: |
-          git config --global url."https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/runtime".insteadOf "https://github.com/nanosandboxai/runtime"
 
       # ── Toolchain ─────────────────────────────────────────────
       - name: Install Rust toolchain
@@ -53,7 +52,7 @@ jobs:
 
       # ── Update runtime to latest main ────────────────────────
       - name: Update runtime dependency
-        run: cargo update -p nanosandbox
+        run: cargo update
 
       # ── Build ─────────────────────────────────────────────────
       - name: Build release binary
