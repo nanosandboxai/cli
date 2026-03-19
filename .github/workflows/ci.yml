@@ -51,6 +51,10 @@ jobs:
           brew tap slp/krun
           brew install libkrun
 
+      # ── Update runtime to latest main ────────────────────────
+      - name: Update runtime dependency
+        run: cargo update -p nanosandbox
+
       # ── Build ─────────────────────────────────────────────────
       - name: Build release binary
         run: cargo build --release --target aarch64-apple-darwin
