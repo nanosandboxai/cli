@@ -266,6 +266,15 @@ mod cli {
             tracing_subscriber::fmt()
                 .with_env_filter("nanosandbox=debug")
                 .init();
+        } else if cli.command.is_some() {
+            // Install a silent logger so that the runtime's
+            // env_logger::try_init_from_env() (inside Sandbox::create / libkrun)
+            // finds one already present and skips installing its own default
+            // logger that would print INFO messages to stderr.
+            let _ = env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("off"),
+            )
+            .try_init();
         }
 
         match cli.command {

@@ -38,7 +38,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     );
 
     let (body_area, global_input_area, status_area) = if show_header {
-        let header_height = 4;
+        let header_height = if is_branded { 7 } else { 4 };
         let [header_area, body_area, global_input_area, status_area] = Layout::vertical([
             Constraint::Length(header_height),
             Constraint::Fill(1),
@@ -99,62 +99,100 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// Render the header with a Unicode box logo and sparkles.
+/// Render the header with a Unicode box logo matching the nanosandbox brand.
+///
+/// ```text
+/// ╭─────────╮
+/// │ ✦ ✦ ✦   │
+/// │  ❯ ━━━  │
+/// │ ❯ ──    │
+/// ╰─────────╯
+/// ```
 fn render_header(frame: &mut Frame, area: Rect, theme: &Theme) {
     let b = Style::new().fg(theme.text_muted);
     let s = Style::new().fg(theme.accent);
     let w = Style::new().fg(theme.text).add_modifier(Modifier::BOLD);
     let header = Paragraph::new(vec![
-        Line::from(vec![Span::styled("\u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}", b)]),
+        Line::from(vec![Span::styled("\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}", s)]),
         Line::from(vec![
-            Span::styled("\u{2502} ", b),
+            Span::styled("\u{2502} ", s),
             Span::styled("\u{2726}", s),
             Span::styled(" ", b),
             Span::styled("\u{2726}", s),
             Span::styled(" ", b),
             Span::styled("\u{2726}", s),
-            Span::styled(" \u{2502}", b),
+            Span::styled("   \u{2502}", s),
         ]),
         Line::from(vec![
-            Span::styled("\u{2502}  ", b),
-            Span::styled("</>", w),
-            Span::styled("  \u{2502}", b),
+            Span::styled("\u{2502}  ", s),
+            Span::styled("\u{276f}", w),
+            Span::styled(" ", b),
+            Span::styled("\u{2501}\u{2501}\u{2501}", s),
+            Span::styled("  \u{2502}", s),
         ]),
-        Line::from(vec![Span::styled("\u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}", b)]),
+        Line::from(vec![
+            Span::styled("\u{2502} ", s),
+            Span::styled("\u{276f}", w),
+            Span::styled(" ", b),
+            Span::styled("\u{2500}\u{2500}", b),
+            Span::styled("    \u{2502}", s),
+        ]),
+        Line::from(vec![Span::styled("\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}", s)]),
     ])
     .alignment(Alignment::Center);
     frame.render_widget(header, area);
 }
 
 /// Render the branded nanosandbox hero header with logo, title, and tagline.
+///
+/// ```text
+///   ╭─────────╮
+///   │ ✦ ✦ ✦   │
+///   │  ❯ ━━━  │   NANOSANDBOX
+///   │ ❯ ──    │   Sandboxes for AI Code Agents
+///   ╰─────────╯
+/// ```
 fn render_branded_header(frame: &mut Frame, area: Rect, theme: &Theme) {
     let a = Style::new().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let b = Style::new().fg(theme.text_muted);
     let w = Style::new().fg(theme.text).add_modifier(Modifier::BOLD);
-
-    //  ╭─────╮
-    //  │ </> │   NANOSANDBOX
-    //  ╰─────╯   Sandboxes for AI Code Agents
 
     let pad = "  ";
     let gap = "   ";
     let lines = vec![
         Line::from(vec![
             Span::raw(pad),
-            Span::styled("\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}", a),
+            Span::styled("\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}", a),
         ]),
         Line::from(vec![
             Span::raw(pad),
             Span::styled("\u{2502} ", a),
-            Span::styled("</>", a),
-            Span::styled(" \u{2502}", a),
+            Span::styled("\u{2726} \u{2726} \u{2726}", a),
+            Span::styled("   \u{2502}", a),
+        ]),
+        Line::from(vec![
+            Span::raw(pad),
+            Span::styled("\u{2502}  ", a),
+            Span::styled("\u{276f}", w),
+            Span::styled(" ", b),
+            Span::styled("\u{2501}\u{2501}\u{2501}", a),
+            Span::styled("  \u{2502}", a),
             Span::raw(gap),
             Span::styled("NANOSANDBOX", a),
         ]),
         Line::from(vec![
             Span::raw(pad),
-            Span::styled("\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}", a),
+            Span::styled("\u{2502} ", a),
+            Span::styled("\u{276f}", w),
+            Span::styled(" ", b),
+            Span::styled("\u{2500}\u{2500}", b),
+            Span::styled("    \u{2502}", a),
             Span::raw(gap),
             Span::styled("Sandboxes for AI Code Agents", w),
+        ]),
+        Line::from(vec![
+            Span::raw(pad),
+            Span::styled("\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}", a),
         ]),
         Line::from(""),
     ];
@@ -1313,19 +1351,27 @@ fn render_scrollbar(
     frame.render_stateful_widget(scrollbar, inner_area, &mut state);
 }
 
-/// Render the loading animation: centered `</>` logo with sweeping border accent.
+/// Render the loading animation: centered logo with sweeping border accent.
 ///
-/// The logo box is 7 chars wide and 3 chars tall (using rounded Unicode corners).
-/// A 3-cell accent segment sweeps clockwise around the 16-position perimeter,
-/// advancing one step per tick (250ms) for a 4-second revolution.
+/// ```text
+/// ╭─────────╮
+/// │ ✦ ✦ ✦   │
+/// │  ❯ ━━━  │
+/// │ ❯ ──    │
+/// ╰─────────╯
+/// ```
+///
+/// The logo box is 11 chars wide and 5 chars tall (using rounded Unicode corners).
+/// A 4-cell accent segment sweeps clockwise around the 28-position perimeter,
+/// advancing one step per tick (250ms) for a 7-second revolution.
 fn render_loading_animation(
     frame: &mut Frame,
     area: Rect,
     panel: &AgentPanel,
     theme: &Theme,
 ) {
-    let box_width: u16 = 7;
-    let box_height: u16 = 3;
+    let box_width: u16 = 11;
+    let box_height: u16 = 5;
 
     // Account for progress/error messages below logo.
     let has_message = panel.loading_message.is_some();
@@ -1341,10 +1387,10 @@ fn render_loading_animation(
     let x = area.x + (area.width - box_width) / 2;
     let y = area.y + (area.height - total_height) / 2;
 
-    // Perimeter: top(7) + right(1) + bottom(7) + left(1) = 16 cells.
+    // Perimeter: top(11) + right(3) + bottom(11) + left(3) = 28 cells.
     let perimeter: u16 = (box_width + box_height - 2) * 2;
     let accent_pos = panel.loading_tick % perimeter;
-    let accent_len: u16 = 4;
+    let accent_len: u16 = 5;
 
     let is_accent = |p: u16| -> bool {
         for offset in 0..accent_len {
@@ -1360,12 +1406,12 @@ fn render_loading_animation(
     let bold_text = Style::new().fg(theme.text).add_modifier(Modifier::BOLD);
 
     // Perimeter position mapping (clockwise starting top-left):
-    //   Top:    positions 0..7       (left to right)
-    //   Right:  position 7           (middle of right side)
-    //   Bottom: positions 8..15      (right to left)
-    //   Left:   position 15          (middle of left side)
+    //   Top:    positions 0..11      (left to right)
+    //   Right:  positions 11..14     (top to bottom, 3 inner rows)
+    //   Bottom: positions 14..25     (right to left)
+    //   Left:   positions 25..28     (bottom to top, 3 inner rows)
 
-    // ── Top row: ╭─────╮ ──
+    // ── Top row: ╭─────────╮ ──
     for col in 0..box_width {
         let perim_pos = col;
         let style = if is_accent(perim_pos) { accent } else { muted };
@@ -1378,33 +1424,84 @@ fn render_loading_animation(
         frame.render_widget(span, Rect::new(x + col, y, 1, 1));
     }
 
-    // ── Middle row: │ </> │ ──
-    let mid_y = y + 1;
-    // Left border (perimeter position = perimeter - 1 = 15)
-    let left_pos = perimeter - 1;
-    let left_style = if is_accent(left_pos) { accent } else { muted };
-    frame.render_widget(
-        Paragraph::new("\u{2502}").style(left_style),
-        Rect::new(x, mid_y, 1, 1),
-    );
-    // Logo text: " </> "
-    frame.render_widget(
-        Paragraph::new(" </> ").style(bold_text),
-        Rect::new(x + 1, mid_y, 5, 1),
-    );
-    // Right border (perimeter position = box_width = 7)
-    let right_pos = box_width;
-    let right_style = if is_accent(right_pos) { accent } else { muted };
-    frame.render_widget(
-        Paragraph::new("\u{2502}").style(right_style),
-        Rect::new(x + box_width - 1, mid_y, 1, 1),
-    );
+    // ── Inner rows (3 rows) ──
+    // Row contents: sparkles, prompt+accent line, prompt+muted line
+    let inner_rows = box_height - 2; // 3
+    for row in 0..inner_rows {
+        let row_y = y + 1 + row;
 
-    // ── Bottom row: ╰─────╯ ── (right to left in perimeter)
-    let bot_y = y + 2;
+        // Left border
+        let left_pos = perimeter - 1 - row;
+        let left_style = if is_accent(left_pos) { accent } else { muted };
+        frame.render_widget(
+            Paragraph::new("\u{2502}").style(left_style),
+            Rect::new(x, row_y, 1, 1),
+        );
+
+        // Right border
+        let right_pos = box_width + row;
+        let right_style = if is_accent(right_pos) { accent } else { muted };
+        frame.render_widget(
+            Paragraph::new("\u{2502}").style(right_style),
+            Rect::new(x + box_width - 1, row_y, 1, 1),
+        );
+
+        // Inner content (9 chars between borders)
+        let inner_x = x + 1;
+        let inner_w = box_width - 2;
+        match row {
+            // Row 0: " ✦ ✦ ✦   "
+            0 => {
+                let sparkle_line = Line::from(vec![
+                    Span::styled(" ", muted),
+                    Span::styled("\u{2726}", accent),
+                    Span::styled(" ", muted),
+                    Span::styled("\u{2726}", accent),
+                    Span::styled(" ", muted),
+                    Span::styled("\u{2726}", accent),
+                    Span::styled("   ", muted),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(sparkle_line),
+                    Rect::new(inner_x, row_y, inner_w, 1),
+                );
+            }
+            // Row 1: "  ❯ ━━━  "
+            1 => {
+                let prompt_line = Line::from(vec![
+                    Span::styled("  ", muted),
+                    Span::styled("\u{276f}", bold_text),
+                    Span::styled(" ", muted),
+                    Span::styled("\u{2501}\u{2501}\u{2501}", accent),
+                    Span::styled("  ", muted),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(prompt_line),
+                    Rect::new(inner_x, row_y, inner_w, 1),
+                );
+            }
+            // Row 2: " ❯ ──    "
+            2 => {
+                let prompt_line = Line::from(vec![
+                    Span::styled(" ", muted),
+                    Span::styled("\u{276f}", bold_text),
+                    Span::styled(" ", muted),
+                    Span::styled("\u{2500}\u{2500}", muted),
+                    Span::styled("    ", muted),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(prompt_line),
+                    Rect::new(inner_x, row_y, inner_w, 1),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // ── Bottom row: ╰─────────╯ ── (right to left in perimeter)
+    let bot_y = y + box_height - 1;
     for col in 0..box_width {
-        // Bottom goes right-to-left: col 6→pos 8, col 5→pos 9, ..., col 0→pos 14
-        let perim_pos = box_width + 1 + (box_width - 1 - col);
+        let perim_pos = box_width + inner_rows + (box_width - 1 - col);
         let style = if is_accent(perim_pos) { accent } else { muted };
         let ch = match col {
             0 => "\u{2570}",
