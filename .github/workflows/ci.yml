@@ -50,6 +50,14 @@ jobs:
           brew tap slp/krun
           brew install libkrun
 
+      # ── Inject version from tag ─────────────────────────────
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "Setting Cargo.toml version to ${TAG_VERSION}"
+          sed -i '' "s/^version = \".*\"/version = \"${TAG_VERSION}\"/" Cargo.toml
+          grep '^version' Cargo.toml
       # ── Update runtime to latest main ────────────────────────
       - name: Update runtime dependency
         run: cargo update
@@ -93,6 +101,7 @@ jobs:
           gh release create "$TAG_NAME" \
             --title "nanosandbox $TAG_NAME" \
             --generate-notes \
+            --latest \
             nanosb \
             install.sh \
             scripts/install/macos.sh \
