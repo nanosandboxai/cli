@@ -376,12 +376,8 @@ codesign_binary() {
         return 0
     fi
 
-    # Check if already signed with HVF entitlement
-    if codesign -d --entitlements :- "$binary_path" 2>&1 | grep -q "com.apple.security.hypervisor"; then
-        success "nanosb already signed with HVF entitlement: $binary_path"
-        return 0
-    fi
-
+    # Always re-codesign locally.  Ad-hoc signatures applied in CI are
+    # invalidated after download, so we must re-sign on this machine.
     local entitlements_plist
     entitlements_plist="$(mktemp /tmp/nanosb-entitlements.XXXXXX.plist)"
     cat > "$entitlements_plist" << 'PLIST'

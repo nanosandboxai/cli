@@ -69,20 +69,22 @@ jobs:
       - name: Run tests
         run: cargo test --target aarch64-apple-darwin
 
-      - name: Verify binary
-        run: |
-          ls -la target/aarch64-apple-darwin/release/nanosb
-          file target/aarch64-apple-darwin/release/nanosb
-          target/aarch64-apple-darwin/release/nanosb --version
-
       # ── Codesign (macOS) ──────────────────────────────────────
+      # Ad-hoc codesign so the binary can use Hypervisor.framework.
+      # The install.sh re-codesigns on the user's machine (ad-hoc
+      # signatures are invalidated after download).
       - name: Codesign binary
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           codesign --sign - \
             --entitlements entitlements.plist \
             --force \
             target/aarch64-apple-darwin/release/nanosb
+
+      - name: Verify binary
+        run: |
+          ls -la target/aarch64-apple-darwin/release/nanosb
+          file target/aarch64-apple-darwin/release/nanosb
+          target/aarch64-apple-darwin/release/nanosb --version
 
       # ── Release ───────────────────────────────────────────────
       - name: Prepare release assets
