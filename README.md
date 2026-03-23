@@ -32,7 +32,7 @@ The binary will be at `target/release/nanosb`.
 nanosb doctor
 
 # Pull an agent image
-nanosb pull claude
+nanosb pull ghcr.io/nanosandboxai/agents-registry/claude:latest
 
 # Run a sandbox from sandbox.yml in the current directory
 nanosb
@@ -64,7 +64,7 @@ nanosb --cpus 4 --memory 8192 --timeout 1200
 ### CLI Commands
 
 ```bash
-nanosb pull <image>          # Pull an image from a registry
+nanosb pull <image>          # Pull an image (full registry path required)
 nanosb images                # List cached images
 nanosb run <image> [cmd]     # Run a command in a new sandbox
 nanosb exec <sandbox> <cmd>  # Execute a command in a running sandbox
