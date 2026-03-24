@@ -1319,7 +1319,6 @@ fn main() -> anyhow::Result<()> {
     // subprocess via posix_spawn (std::process::Command) and handling it here
     // — before any threads are created — the child runs in a clean,
     // single-threaded process where hv_vm_create() works correctly.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if std::env::args().nth(1).as_deref() == Some("internal-boot-vm") {
         nanosandbox::runtime::handle_boot_vm_subprocess();
         // ^ never returns
