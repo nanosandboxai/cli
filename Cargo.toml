@@ -15,7 +15,7 @@ path = "src/main.rs"
 # Private runtime crate — requires git auth.
 # For local dev, override with: [patch.'https://github.com/nanosandboxai/runtime.git']
 #   nanosandbox = { path = "../runtime" }
-nanosandbox = { git = "https://github.com/nanosandboxai/runtime.git", branch = "main" }
+nanosandbox = { git = "https://github.com/nanosandboxai/runtime.git", branch = "feature/windows-libkrun" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
