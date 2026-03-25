@@ -14,6 +14,13 @@ use super::theme::{Theme, ThemeName};
 /// Maximum number of visual lines the input area can grow to.
 const MAX_INPUT_HEIGHT: u16 = 10;
 
+/// Prompt character for the logo. U+276F (❯) is not in the default Windows
+/// console font (Consolas/Cascadia Mono), so we fall back to ASCII '>'.
+#[cfg(unix)]
+const PROMPT_CHAR: &str = "\u{276f}";
+#[cfg(not(unix))]
+const PROMPT_CHAR: &str = ">";
+
 /// Render a full TUI frame based on the current application state.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme;
@@ -125,14 +132,14 @@ fn render_header(frame: &mut Frame, area: Rect, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("\u{2502}  ", s),
-            Span::styled("\u{276f}", w),
+            Span::styled(PROMPT_CHAR, w),
             Span::styled(" ", b),
             Span::styled("\u{2501}\u{2501}\u{2501}", s),
             Span::styled("  \u{2502}", s),
         ]),
         Line::from(vec![
             Span::styled("\u{2502} ", s),
-            Span::styled("\u{276f}", w),
+            Span::styled(PROMPT_CHAR, w),
             Span::styled(" ", b),
             Span::styled("\u{2500}\u{2500}", b),
             Span::styled("    \u{2502}", s),
@@ -173,7 +180,7 @@ fn render_branded_header(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::from(vec![
             Span::raw(pad),
             Span::styled("\u{2502}  ", a),
-            Span::styled("\u{276f}", w),
+            Span::styled(PROMPT_CHAR, w),
             Span::styled(" ", b),
             Span::styled("\u{2501}\u{2501}\u{2501}", a),
             Span::styled("  \u{2502}", a),
@@ -183,7 +190,7 @@ fn render_branded_header(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::from(vec![
             Span::raw(pad),
             Span::styled("\u{2502} ", a),
-            Span::styled("\u{276f}", w),
+            Span::styled(PROMPT_CHAR, w),
             Span::styled(" ", b),
             Span::styled("\u{2500}\u{2500}", b),
             Span::styled("    \u{2502}", a),
@@ -1470,7 +1477,7 @@ fn render_loading_animation(
             1 => {
                 let prompt_line = Line::from(vec![
                     Span::styled("  ", muted),
-                    Span::styled("\u{276f}", bold_text),
+                    Span::styled(PROMPT_CHAR, bold_text),
                     Span::styled(" ", muted),
                     Span::styled("\u{2501}\u{2501}\u{2501}", accent),
                     Span::styled("  ", muted),
@@ -1484,7 +1491,7 @@ fn render_loading_animation(
             2 => {
                 let prompt_line = Line::from(vec![
                     Span::styled(" ", muted),
-                    Span::styled("\u{276f}", bold_text),
+                    Span::styled(PROMPT_CHAR, bold_text),
                     Span::styled(" ", muted),
                     Span::styled("\u{2500}\u{2500}", muted),
                     Span::styled("    ", muted),
