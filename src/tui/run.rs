@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     MouseButton, MouseEvent, MouseEventKind,
     EnableMouseCapture, DisableMouseCapture,
     EnableBracketedPaste, DisableBracketedPaste,
@@ -272,10 +272,15 @@ pub async fn run_tui(
         match event {
             AppEvent::Terminal(crossterm_event) => {
                 match crossterm_event {
-                    CrosstermEvent::Key(key) => {
+                    CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                         // Clear mouse selection on any keypress.
+                        // Only handle Press events — on Windows, crossterm fires
+                        // both Press and Release for each keystroke.
                         app.mouse_selection = None;
                         handle_key_event(&mut app, key, &tx).await;
+                    }
+                    CrosstermEvent::Key(_) => {
+                        // Ignore Release / Repeat events.
                     }
                     CrosstermEvent::Mouse(mouse) => {
                         handle_mouse_event(&mut app, mouse);
