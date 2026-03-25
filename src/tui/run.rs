@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +27,74 @@ use super::app::{AgentPanel, App, ChatMessage, InputFocus, MessageRole, MouseSel
 use super::commands::{self, Command};
 use super::event::{spawn_terminal_event_reader, AppEvent};
 use super::renderer;
+
+/// Cross-platform stderr redirection helpers.
+///
+/// On Unix, native C libraries (libkrun, gvproxy) write to stderr via fprintf()
+/// which bypasses Rust's logging and corrupts the ratatui alternate screen.
+/// We redirect stderr to /dev/null while the TUI is active.
+/// On Windows, this is a no-op for now.
+mod stderr_redirect {
+    #[cfg(unix)]
+    pub type SavedStderr = i32;
+    #[cfg(not(unix))]
+    pub type SavedStderr = i32;
+
+    #[cfg(unix)]
+    pub fn save_and_redirect() -> SavedStderr {
+        use std::io;
+        use std::os::fd::AsRawFd;
+        let saved = unsafe { libc::dup(io::stderr().as_raw_fd()) };
+        let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
+        if dev_null >= 0 {
+            unsafe {
+                libc::dup2(dev_null, libc::STDERR_FILENO);
+                libc::close(dev_null);
+            }
+        }
+        saved
+    }
+
+    #[cfg(not(unix))]
+    pub fn save_and_redirect() -> SavedStderr { -1 }
+
+    #[cfg(unix)]
+    pub fn restore(saved: SavedStderr) {
+        if saved >= 0 {
+            unsafe { libc::dup2(saved, libc::STDERR_FILENO); }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn restore(_saved: SavedStderr) {}
+
+    #[cfg(unix)]
+    pub fn redirect_to_null() {
+        let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
+        if dev_null >= 0 {
+            unsafe {
+                libc::dup2(dev_null, libc::STDERR_FILENO);
+                libc::close(dev_null);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn redirect_to_null() {}
+
+    #[cfg(unix)]
+    pub fn restore_and_close(saved: SavedStderr) {
+        if saved >= 0 {
+            unsafe {
+                libc::dup2(saved, libc::STDERR_FILENO);
+                libc::close(saved);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn restore_and_close(_saved: SavedStderr) {}
+}
 
 /// Run the TUI application.
 ///
@@ -107,14 +174,7 @@ pub async fn run_tui(
     // which bypasses Rust's logging. Without this redirect those writes
     // corrupt the ratatui alternate screen or cause panics when the
     // terminal buffer fills up (EAGAIN / os error 35).
-    let saved_stderr = unsafe { libc::dup(io::stderr().as_raw_fd()) };
-    let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
-    if dev_null >= 0 {
-        unsafe {
-            libc::dup2(dev_null, libc::STDERR_FILENO);
-            libc::close(dev_null);
-        }
-    }
+    let saved_stderr = stderr_redirect::save_and_redirect();
 
     // Set up terminal.
     enable_raw_mode()?;
@@ -131,11 +191,7 @@ pub async fn run_tui(
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape, DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
         // Restore stderr so the panic message is visible.
-        if saved_stderr_for_hook >= 0 {
-            unsafe {
-                libc::dup2(saved_stderr_for_hook, libc::STDERR_FILENO);
-            }
-        }
+        stderr_redirect::restore(saved_stderr_for_hook);
         original_hook(info);
     }));
 
@@ -502,7 +558,7 @@ pub async fn run_tui(
                                                     "-i",
                                                     &key_path.to_string_lossy(),
                                                     "-o", "StrictHostKeyChecking=no",
-                                                    "-o", "UserKnownHostsFile=/dev/null",
+                                                    "-o", if cfg!(unix) { "UserKnownHostsFile=/dev/null" } else { "UserKnownHostsFile=NUL" },
                                                     "-o", "LogLevel=ERROR",
                                                     "-N",
                                                     "root@127.0.0.1",
@@ -556,9 +612,7 @@ pub async fn run_tui(
                 let _ = execute!(terminal.backend_mut(), SetCursorStyle::DefaultUserShape, DisableMouseCapture, LeaveAlternateScreen);
 
                 // Restore stderr so the tool can use it
-                if saved_stderr >= 0 {
-                    unsafe { libc::dup2(saved_stderr, libc::STDERR_FILENO); }
-                }
+                stderr_redirect::restore(saved_stderr);
 
                 // Build tool-specific arguments
                 let path_str = path.to_string_lossy().to_string();
@@ -573,13 +627,7 @@ pub async fn run_tui(
                 let _ = cmd.status();
 
                 // Redirect stderr back to /dev/null
-                let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
-                if dev_null >= 0 {
-                    unsafe {
-                        libc::dup2(dev_null, libc::STDERR_FILENO);
-                        libc::close(dev_null);
-                    }
-                }
+                stderr_redirect::redirect_to_null();
 
                 // Resume TUI: enter alternate screen, enable raw mode
                 let _ = enable_raw_mode();
@@ -630,12 +678,7 @@ pub async fn run_tui(
     terminal.show_cursor()?;
 
     // Restore stderr so cleanup log messages are visible.
-    if saved_stderr >= 0 {
-        unsafe {
-            libc::dup2(saved_stderr, libc::STDERR_FILENO);
-            libc::close(saved_stderr);
-        }
-    }
+    stderr_redirect::restore_and_close(saved_stderr);
 
     // Determine whether to suspend (preserve session) or fully teardown.
     // Suspend when: project is mounted AND /quit (not /destroy).
