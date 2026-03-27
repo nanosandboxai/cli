@@ -531,6 +531,15 @@ pub async fn run_tui(
                         app.status_message = None;
                     }
                 }
+
+                // Tick down auto-dismiss system message popup.
+                if let Some(ref mut ticks) = app.system_message_ticks {
+                    *ticks = ticks.saturating_sub(1);
+                    if *ticks == 0 {
+                        app.system_messages.clear();
+                        app.system_message_ticks = None;
+                    }
+                }
                 app.sidebar_tick_counter = app.sidebar_tick_counter.wrapping_add(1);
                 if app.sidebar_tick_counter.is_multiple_of(8) {
                     // Refresh file lists when sidebar is visible (~every 2s).
@@ -1095,7 +1104,8 @@ async fn handle_key_event(
                         // Forward everything else to SSH terminal.
                         let bytes = super::terminal::crossterm_key_to_bytes(key);
                         if !bytes.is_empty() {
-                            if let Some(panel) = app.panels.get(app.focused_panel) {
+                            if let Some(panel) = app.panels.get_mut(app.focused_panel) {
+                                panel.had_interaction = true;
                                 if let Some(ref handle) = panel.terminal_handle {
                                     let _ = handle.write_tx.send(bytes);
                                 }
@@ -1164,6 +1174,7 @@ async fn handle_key_event(
         KeyCode::Esc => {
             if !app.system_messages.is_empty() && !app.panels.is_empty() {
                 app.system_messages.clear();
+                app.system_message_ticks = None;
             } else if app.autocomplete_index.is_some() {
                 app.autocomplete_index = None;
             } else if app.input_focus == InputFocus::Panel {
@@ -1227,10 +1238,14 @@ async fn handle_key_event(
                     handle_command(app, cmd, tx).await;
                 }
                 SubmitResult::CommandError(msg) => {
-                    app.set_system_message(ChatMessage {
-                        role: MessageRole::System,
-                        content: msg,
-                    });
+                    // 4 ticks × 250ms = 1s auto-dismiss; ESC still dismisses immediately.
+                    app.set_system_message_timed(
+                        ChatMessage {
+                            role: MessageRole::System,
+                            content: msg,
+                        },
+                        4,
+                    );
                 }
                 SubmitResult::Message(_msg) => {
                     // Panels are terminal-only; messages are not sent.
@@ -3155,6 +3170,17 @@ fn resume_session(
         // creating a new one. We set config.project = None so that
         // setup_project_mount() inside Sandbox::create() is skipped, and add
         // the VirtioFS mount for the existing clone ourselves.
+        //
+        // Use the per-panel project path from the saved config (which may
+        // differ from the global session.project_path when `/add --project`
+        // pointed to a different directory).
+        let panel_project_path = sp
+            .config
+            .project
+            .as_ref()
+            .map(|p| p.path.clone())
+            .unwrap_or_else(|| session.project_path.clone());
+
         if let Some(ref clone_path) = sp.clone_path {
             if clone_path.exists() {
                 // Add VirtioFS mount for existing clone directly.
@@ -3163,14 +3189,14 @@ fn resume_session(
                 config.project = None;
 
                 // Create a ProjectMount on the panel to handle suspend/teardown.
-                if let Ok(mut pm) = nanosandbox::project::ProjectMount::detect(&session.project_path) {
+                if let Ok(mut pm) = nanosandbox::project::ProjectMount::detect(&panel_project_path) {
                     let _ = pm.resume(clone_path, sp.branches.clone());
                     panel.project_mount = Some(pm);
                 }
             } else {
                 // Clone dir is gone — create a fresh clone from the branch.
                 config.project = Some(nanosandbox::ProjectConfig {
-                    path: session.project_path.clone(),
+                    path: panel_project_path,
                     branch: sp
                         .branches
                         .first()
@@ -3181,10 +3207,11 @@ fn resume_session(
             }
         }
 
-        // Mark panel as resumed so agent uses resume command variant.
-        // Agent state is stored in /workspace/.nanosb-state/ (inside the clone),
-        // so it's automatically available when the clone is re-mounted.
-        panel.is_resumed = true;
+        // Only pass resume flags (--continue, -c, etc.) if the user actually
+        // interacted with the agent in the previous session. Without this check,
+        // agents like cursor-agent fail with "No previous chats found" when
+        // resumed after being started but never used.
+        panel.is_resumed = sp.had_interaction;
 
         app.panels.push(panel);
         let panel_idx = app.panels.len() - 1;
@@ -3548,6 +3575,7 @@ fn build_session_from_app(
                 model: panel.model.clone(),
                 env_keys,
                 visible: panel.visible,
+                had_interaction: panel.had_interaction,
             })
         })
         .collect();
