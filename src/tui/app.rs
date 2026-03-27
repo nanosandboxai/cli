@@ -325,6 +325,9 @@ pub struct AgentPanel {
     pub original_config: Option<nanosandbox::SandboxConfig>,
     /// Whether this panel was resumed from a previous session (agent uses resume command).
     pub is_resumed: bool,
+    /// Whether the user sent at least one keystroke to this agent's terminal.
+    /// Used to decide whether resume flags (--continue) are appropriate on next session load.
+    pub had_interaction: bool,
     /// Overlay notification shown on top of the terminal (message, is_error, remaining ticks).
     /// Replaces previous notification; auto-dismissed after countdown reaches 0.
     pub notification: Option<(String, bool, u8)>,
@@ -368,6 +371,7 @@ impl AgentPanel {
             headless_state: None,
             original_config: None,
             is_resumed: false,
+            had_interaction: false,
             notification: None,
         }
     }
@@ -421,6 +425,8 @@ pub struct App {
     pub settings: nanosandbox::settings::UserSettings,
     /// Temporary status message shown on the status bar (message, remaining ticks).
     pub status_message: Option<(String, u8)>,
+    /// Auto-dismiss countdown for system message popup (remaining ticks, None = manual dismiss).
+    pub system_message_ticks: Option<u8>,
     /// Active colour theme (resolved at startup, switchable via `/theme`).
     pub theme: &'static super::theme::Theme,
     /// Name of the active theme (for display and persistence).
@@ -476,6 +482,7 @@ impl App {
             sidebar_tick_counter: 0,
             settings,
             status_message: None,
+            system_message_ticks: None,
             theme,
             theme_name,
             mouse_selection: None,
@@ -496,6 +503,15 @@ impl App {
     pub fn set_system_message(&mut self, msg: ChatMessage) {
         self.system_messages.clear();
         self.system_messages.push(msg);
+        self.system_message_ticks = None; // manual dismiss only
+    }
+
+    /// Show a system message popup that auto-dismisses after the given number of
+    /// ticks (each tick ≈ 250 ms). ESC still dismisses immediately.
+    pub fn set_system_message_timed(&mut self, msg: ChatMessage, ticks: u8) {
+        self.system_messages.clear();
+        self.system_messages.push(msg);
+        self.system_message_ticks = Some(ticks);
     }
 
     /// Refresh the cached modified files list from the focused panel's project mount.
