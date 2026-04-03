@@ -632,7 +632,7 @@ fn parse_agent(parts: &[&str]) -> ParseResult {
 
 fn parse_upload(parts: &[&str]) -> ParseResult {
     match parts.get(1) {
-        Some(path) => {
+        Some(_) => {
             // Rejoin in case the path was split by whitespace (unlikely for absolute paths).
             let path = parts[1..].join(" ");
             ParseResult::Ok(Command::Upload { path })

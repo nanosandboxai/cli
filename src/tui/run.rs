@@ -22,9 +22,15 @@ use ratatui::Terminal;
 use tokio::sync::{mpsc, Mutex};
 
 use nanosandbox::{McpServerConfig, SandboxConfig};
+use nanosandbox::runtime::validation::{
+    validate_runtime_prerequisites_detailed, ValidationResult,
+};
 use nanosandbox::Sandbox;
 
-use super::app::{AgentPanel, App, ChatMessage, InputFocus, MessageRole, MouseSelection, PanelMode, SidebarFilesTab, SubmitResult};
+use super::app::{
+    AgentPanel, App, ChatMessage, InputFocus, MessageRole, MouseSelection, PanelMode,
+    SidebarFilesTab, SubmitResult, SYSTEM_POPUP_TICKS_DEFAULT,
+};
 use super::commands::{self, Command};
 use super::event::{spawn_terminal_event_reader, AppEvent};
 use super::renderer;
@@ -54,7 +60,7 @@ pub async fn run_tui(
 
     // Validate runtime prerequisites before launching TUI.
     println!("\nChecking runtime prerequisites...\n");
-    let validation = nanosandbox::runtime::validate_runtime_prerequisites_detailed().await;
+    let validation = validate_runtime_prerequisites_detailed().await;
 
     print_validation_results(&validation);
 
@@ -81,7 +87,7 @@ pub async fn run_tui(
             let choice = nanosandbox::session::prompt_resume(&session, &issues);
             match choice {
                 nanosandbox::session::ResumeChoice::Resume => Some(session),
-                nanosandbox::session::ResumeChoice::Fresh | nanosandbox::session::ResumeChoice::Destroy => {
+                nanosandbox::session::ResumeChoice::ClearAndRestart => {
                     // Remove old project clones.
                     for panel in &session.panels {
                         if let Some(ref clone_path) = panel.clone_path {
@@ -161,25 +167,31 @@ pub async fn run_tui(
     // Resolve agent definitions + skills from registry before launching.
     let mut resolved_configs: Vec<(String, SandboxConfig)> = Vec::new();
     for (key, mut config) in sandbox_configs {
-        if let (Some(ref registry), Some(ref agent_name)) = (&app.registry, &config.agent) {
-            match registry.resolve_full(agent_name, &config.skills) {
-                Ok(mut resolved) => {
-                    // Merge: sandbox.yml MCPs override registry MCPs
-                    for (name, mcp) in &config.mcp_servers {
-                        resolved.mcp_servers.insert(name.clone(), mcp.clone());
+        match (&app.registry, config.agent.as_ref()) {
+            (Some(registry), Some(agent_name)) => {
+                match registry.resolve_full(agent_name, &config.skills) {
+                    Ok(resolved) => merge_resolved_agent_into_config(&mut config, resolved),
+                    Err(e) => {
+                        eprintln!("Warning: failed to resolve agent '{}': {}", agent_name, e);
                     }
-                    // Replace config MCPs with merged set
-                    config.mcp_servers = resolved.mcp_servers.clone();
-                    // Propagate auto_mode, permissions, and agent_type from sandbox config
-                    resolved.auto_mode = config.auto_mode;
-                    resolved.permissions = config.permissions;
-                    resolved.agent_type = config.agent_type;
-                    config.resolved_agent = Some(resolved);
-                }
-                Err(e) => {
-                    eprintln!("Warning: failed to resolve agent '{}': {}", agent_name, e);
                 }
             }
+            (Some(registry), None) if !config.skills.is_empty() => {
+                match registry.resolve_skills_only(&config.skills) {
+                    Ok(resolved) => merge_resolved_agent_into_config(&mut config, resolved),
+                    Err(e) => {
+                        eprintln!("Warning: failed to resolve sandbox skills: {}", e);
+                    }
+                }
+            }
+            (None, None) if !config.skills.is_empty() => {
+                eprintln!(
+                    "Warning: sandbox lists skills but no agents registry was found. \
+Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-registry/ \
+(sibling ../agents-registry is also checked from the current directory)."
+                );
+            }
+            _ => {}
         }
         resolved_configs.push((key, config));
     }
@@ -737,7 +749,7 @@ pub async fn run_tui(
 }
 
 /// Print validation results as a checklist.
-fn print_validation_results(validation: &nanosandbox::runtime::ValidationResult) {
+fn print_validation_results(validation: &ValidationResult) {
     for err in &validation.errors {
         println!("  [x] {}: {}", err.check, err.message);
         if let Some(ref hint) = err.fix_hint {
@@ -1238,13 +1250,12 @@ async fn handle_key_event(
                     handle_command(app, cmd, tx).await;
                 }
                 SubmitResult::CommandError(msg) => {
-                    // 4 ticks × 250ms = 1s auto-dismiss; ESC still dismisses immediately.
                     app.set_system_message_timed(
                         ChatMessage {
                             role: MessageRole::System,
                             content: msg,
                         },
-                        4,
+                        SYSTEM_POPUP_TICKS_DEFAULT,
                     );
                 }
                 SubmitResult::Message(_msg) => {
@@ -1376,7 +1387,7 @@ async fn handle_command(
             }
         }
         Command::Help => {
-            app.set_system_message(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: concat!(
                     "Available commands:\n",
@@ -3590,6 +3601,22 @@ fn build_session_from_app(
     }
 }
 
+/// Merge registry resolution (full agent or skills-only) into sandbox config for bootstrap.
+fn merge_resolved_agent_into_config(
+    config: &mut SandboxConfig,
+    mut resolved: nanosandbox::ResolvedAgentConfig,
+) {
+    // Merge: sandbox.yml MCPs override registry MCPs
+    for (name, mcp) in &config.mcp_servers {
+        resolved.mcp_servers.insert(name.clone(), mcp.clone());
+    }
+    config.mcp_servers = resolved.mcp_servers.clone();
+    resolved.auto_mode = config.auto_mode;
+    resolved.permissions = config.permissions;
+    resolved.agent_type = config.agent_type;
+    config.resolved_agent = Some(resolved);
+}
+
 fn load_agents_registry() -> Option<nanosandbox::AgentsRegistryClient> {
     use nanosandbox::AgentsRegistryClient;
 
@@ -3629,20 +3656,33 @@ fn load_agents_registry() -> Option<nanosandbox::AgentsRegistryClient> {
 
 // ========== Skills Handlers ==========
 
+fn push_skills_feedback(app: &mut App, content: String, status: Option<String>) {
+    if let Some(status_msg) = status {
+        app.set_status_message(status_msg);
+    }
+    if let Some(panel) = app.focused_panel_mut() {
+        panel.chat_history.push(ChatMessage {
+            role: MessageRole::System,
+            content,
+        });
+    }
+}
+
 /// Handle `/skills list` — list skills installed in the gateway.
 async fn handle_skills_list(app: &mut App) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .panels
+        .get(app.focused_panel)
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
+            push_skills_feedback(
+                app,
+                "No sandbox attached to this panel.".to_string(),
+                Some("No sandbox attached to this panel.".to_string()),
+            );
             return;
         }
     };
@@ -3651,10 +3691,12 @@ async fn handle_skills_list(app: &mut App) {
     match sb.list_skills().await {
         Ok(skills) => {
             if skills.is_empty() {
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "No skills configured. Use /skills add <name> to add from the registry.".to_string(),
-                });
+                push_skills_feedback(
+                    app,
+                    "No skills configured. Use /skills add <name> to add from the registry."
+                        .to_string(),
+                    Some("No skills configured.".to_string()),
+                );
             } else {
                 let mut lines = Vec::new();
                 lines.push("Skills:".to_string());
@@ -3666,60 +3708,62 @@ async fn handle_skills_list(app: &mut App) {
                     };
                     lines.push(format!("  {}{}", name, desc));
                 }
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: lines.join("\n"),
-                });
+                push_skills_feedback(
+                    app,
+                    lines.join("\n"),
+                    Some(format!("Listed {} skill(s).", skills.len())),
+                );
             }
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to list skills: {}", e),
-            });
+            push_skills_feedback(
+                app,
+                format!("Failed to list skills: {}", e),
+                Some(format!("Failed to list skills: {}", e)),
+            );
         }
     }
 }
 
 /// Handle `/skills add <name>` — resolve from registry and push to gateway.
 async fn handle_skills_add(app: &mut App, name: &str) {
+    app.set_status_message(format!("Adding skill '{}'...", name));
     // First resolve the skill from the registry (host-side).
     let skill = match &app.registry {
         Some(registry) => match registry.resolve_skill(name) {
             Ok(s) => s,
             Err(e) => {
-                if let Some(panel) = app.focused_panel_mut() {
-                    panel.chat_history.push(ChatMessage {
-                        role: MessageRole::System,
-                        content: format!("Failed to resolve skill '{}': {}", name, e),
-                    });
-                }
+                push_skills_feedback(
+                    app,
+                    format!("Failed to resolve skill '{}': {}", name, e),
+                    Some(format!("Failed to resolve skill '{}': {}", name, e)),
+                );
                 return;
             }
         },
         None => {
-            if let Some(panel) = app.focused_panel_mut() {
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "No agents registry loaded. Set NANOSB_REGISTRY_PATH or place registry at ~/.nanosandbox/agents-registry/.".to_string(),
-                });
-            }
+            push_skills_feedback(
+                app,
+                "No agents registry loaded. Set NANOSB_REGISTRY_PATH or place registry at ~/.nanosandbox/agents-registry/.".to_string(),
+                Some("No agents registry loaded.".to_string()),
+            );
             return;
         }
     };
 
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .panels
+        .get(app.focused_panel)
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
+            push_skills_feedback(
+                app,
+                "No sandbox attached to this panel.".to_string(),
+                Some("No sandbox attached to this panel.".to_string()),
+            );
             return;
         }
     };
@@ -3727,34 +3771,46 @@ async fn handle_skills_add(app: &mut App, name: &str) {
     let sb = sandbox.lock().await;
     match sb.add_skill(&skill).await {
         Ok(()) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Skill '{}' added.", name),
-            });
+            let restart_result = sb.restart_agent("skills_update").await;
+            let content = match restart_result {
+                Ok(_) => format!("Skill '{}' added and agent reloaded.", name),
+                Err(e) => format!(
+                    "Skill '{}' added, but failed to reload agent: {}. Run /agent set claude.",
+                    name, e
+                ),
+            };
+            push_skills_feedback(
+                app,
+                content,
+                Some(format!("Skill '{}' added.", name)),
+            );
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to add skill '{}': {}", name, e),
-            });
+            push_skills_feedback(
+                app,
+                format!("Failed to add skill '{}': {}", name, e),
+                Some(format!("Failed to add '{}': {}", name, e)),
+            );
         }
     }
 }
 
 /// Handle `/skills remove <name>`.
 async fn handle_skills_remove(app: &mut App, name: &str) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    app.set_status_message(format!("Removing skill '{}'...", name));
+    let sandbox = match app
+        .panels
+        .get(app.focused_panel)
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
+            push_skills_feedback(
+                app,
+                "No sandbox attached to this panel.".to_string(),
+                Some("No sandbox attached to this panel.".to_string()),
+            );
             return;
         }
     };
@@ -3762,22 +3818,33 @@ async fn handle_skills_remove(app: &mut App, name: &str) {
     let sb = sandbox.lock().await;
     match sb.remove_skill(name).await {
         Ok(()) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Skill '{}' removed.", name),
-            });
+            let restart_result = sb.restart_agent("skills_update").await;
+            let content = match restart_result {
+                Ok(_) => format!("Skill '{}' removed and agent reloaded.", name),
+                Err(e) => format!(
+                    "Skill '{}' removed, but failed to reload agent: {}. Run /agent set claude.",
+                    name, e
+                ),
+            };
+            push_skills_feedback(
+                app,
+                content,
+                Some(format!("Skill '{}' removed.", name)),
+            );
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to remove skill '{}': {}", name, e),
-            });
+            push_skills_feedback(
+                app,
+                format!("Failed to remove skill '{}': {}", name, e),
+                Some(format!("Failed to remove '{}': {}", name, e)),
+            );
         }
     }
 }
 
 /// Handle `/skills show <name>` — show skill content from the registry.
 fn handle_skills_show(app: &mut App, name: &str) {
+    app.set_status_message(format!("Showing skill '{}'.", name));
     let content = match &app.registry {
         Some(registry) => match registry.resolve_skill(name) {
             Ok(skill) => {
@@ -3829,11 +3896,21 @@ async fn handle_agent_show(app: &mut App) {
     if let Some(sb) = panel.sandbox.as_ref() {
         let sb = sb.lock().await;
         if let Some(resolved) = sb.config().resolved_agent.as_ref() {
-            lines.insert(0, format!("Current agent: {} ({} skills, {} MCPs)",
-                resolved.agent_name,
-                resolved.skills.len(),
-                resolved.mcp_servers.len(),
-            ));
+            let summary = if resolved.agent_name.is_empty() && !resolved.skills.is_empty() {
+                format!(
+                    "Skills from sandbox config (no registry agent): {} skills, {} MCPs",
+                    resolved.skills.len(),
+                    resolved.mcp_servers.len(),
+                )
+            } else {
+                format!(
+                    "Current agent: {} ({} skills, {} MCPs)",
+                    resolved.agent_name,
+                    resolved.skills.len(),
+                    resolved.mcp_servers.len(),
+                )
+            };
+            lines.insert(0, summary);
         }
     }
 

@@ -6,6 +6,9 @@ mod cli {
     use clap::{Parser, Subcommand, ValueEnum};
     use colored::Colorize;
     use indicatif::{ProgressBar, ProgressStyle};
+    use nanosandbox::runtime::validation::{
+        validate_runtime_prerequisites_detailed, ValidationResult,
+    };
     use nanosandbox::{ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
     use std::io::Write;
     use std::time::Duration;
@@ -905,8 +908,6 @@ mod cli {
 
     /// Check runtime prerequisites and display status
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
-        use nanosandbox::runtime::validate_runtime_prerequisites_detailed;
-
         let result = validate_runtime_prerequisites_detailed().await;
 
         match format {
@@ -927,7 +928,7 @@ mod cli {
     }
 
     /// Print doctor results as colored checklist
-    fn print_doctor_results(result: &nanosandbox::runtime::ValidationResult) {
+    fn print_doctor_results(result: &ValidationResult) {
         println!();
         println!("Checking runtime prerequisites...");
         println!();
@@ -1083,7 +1084,7 @@ mod cli {
     }
 
     fn doctor_results_to_json(
-        result: &nanosandbox::runtime::ValidationResult,
+        result: &ValidationResult,
     ) -> serde_json::Value {
         serde_json::json!({
             "ok": result.is_ok(),
@@ -1271,8 +1272,6 @@ mod cli {
 
     /// Run preflight validation, showing doctor output on failure.
     async fn preflight_check() -> anyhow::Result<()> {
-        use nanosandbox::runtime::validate_runtime_prerequisites_detailed;
-
         let result = validate_runtime_prerequisites_detailed().await;
         if !result.is_ok() {
             print_doctor_results(&result);

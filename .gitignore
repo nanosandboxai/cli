@@ -19,3 +19,5 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+.cargo-home
