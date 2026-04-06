@@ -3755,6 +3755,7 @@ fn build_session_from_app(
                 model: panel.model.clone(),
                 env_keys,
                 visible: panel.visible,
+                had_interaction: false,
             })
         })
         .collect();
