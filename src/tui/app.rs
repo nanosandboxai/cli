@@ -15,6 +15,9 @@ use super::commands::{self, Command, ParseResult};
 use super::terminal::{SshTerminal, SshTerminalHandle};
 use super::text_input::TextInput;
 
+/// Default duration for status-bar messages and system popups: 12 ticks × 250ms ≈ 3s.
+pub const SYSTEM_POPUP_TICKS_DEFAULT: u8 = 12;
+
 /// In-memory command history with shell-like Up/Down navigation.
 pub struct CommandHistory {
     /// Ordered list of executed commands (oldest first).
@@ -496,14 +499,23 @@ impl App {
 
     /// Set a temporary status message that appears on the status bar for ~3 seconds.
     pub fn set_status_message(&mut self, msg: impl Into<String>) {
-        self.status_message = Some((msg.into(), 12)); // 12 ticks × 250ms = 3s
+        self.status_message = Some((msg.into(), SYSTEM_POPUP_TICKS_DEFAULT));
     }
 
-    /// Replace the welcome-screen system messages with a single new message.
+    /// Show a system message (welcome inline or centered popup over panels).
+    ///
+    /// Auto-dismisses after ~3s; **Esc** still dismisses immediately.
     pub fn set_system_message(&mut self, msg: ChatMessage) {
         self.system_messages.clear();
         self.system_messages.push(msg);
-        self.system_message_ticks = None; // manual dismiss only
+        self.system_message_ticks = Some(SYSTEM_POPUP_TICKS_DEFAULT);
+    }
+
+    /// Same as [`set_system_message`](Self::set_system_message) but stays until **Esc** (e.g. `/help`).
+    pub fn set_system_message_persistent(&mut self, msg: ChatMessage) {
+        self.system_messages.clear();
+        self.system_messages.push(msg);
+        self.system_message_ticks = None;
     }
 
     /// Show a system message popup that auto-dismisses after the given number of
