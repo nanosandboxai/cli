@@ -1,0 +1,166 @@
+#!/bin/bash
+#
+# Nanosandbox CLI Uninstaller
+#
+# Removes the nanosb CLI binary and (by default) its runtime dependencies.
+#
+#   1. Removes the nanosb binary
+#   2. Delegates dependency removal to install-deps' uninstall.sh
+#      (libkrunfw + gvproxy)
+#
+# Usage:
+#   curl -fsSL https://github.com/nanosandboxai/cli/releases/latest/download/uninstall.sh | bash
+#
+# Environment variables:
+#   INSTALL_DIR    - Binary install directory (default: ~/.local/bin)
+#   DEPS_VERSION   - install-deps version to use for uninstall (default: latest)
+#   KEEP_DEPS      - If set to "1", keep libkrunfw + gvproxy installed
+#   LIB_DIR        - Forwarded to install-deps uninstall (default: /usr/local/lib)
+#   BIN_DIR        - Forwarded to install-deps uninstall (default: ~/.local/bin)
+#
+
+set -eo pipefail
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+DEPS_VERSION="${DEPS_VERSION:-latest}"
+KEEP_DEPS="${KEEP_DEPS:-0}"
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+success() { echo -e "${GREEN}[OK]${NC} $1"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+header() {
+    echo ""
+    echo "========================================"
+    echo "  $1"
+    echo "========================================"
+    echo ""
+}
+
+# =============================================================================
+# Step 1: Remove nanosb binary
+# =============================================================================
+
+remove_binary() {
+    header "Removing nanosb binary"
+
+    local binary_path="${INSTALL_DIR}/nanosb"
+
+    if [[ -f "$binary_path" ]]; then
+        rm -f "$binary_path"
+        success "Removed ${binary_path}"
+    else
+        info "nanosb not found at ${binary_path}"
+    fi
+
+    # Also check common alternative locations
+    for candidate in /usr/local/bin/nanosb; do
+        if [[ -f "$candidate" ]]; then
+            warn "Found another nanosb at: $candidate"
+            warn "Remove manually with: sudo rm -f $candidate"
+        fi
+    done
+}
+
+# =============================================================================
+# Step 2: Remove runtime dependencies (libkrunfw + gvproxy)
+# =============================================================================
+
+# Resolve "latest" to the most recent install-deps release tag, including
+# prereleases. Required because GitHub's /releases/latest/ redirect only matches
+# stable (non-prerelease) releases — if install-deps has only prereleases, the
+# /latest/ URL returns 404.
+resolve_deps_version() {
+    local resolved
+    resolved="$(curl -fsSL \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/nanosandboxai/install-deps/releases" \
+        2>/dev/null \
+        | grep -m1 '"tag_name":' \
+        | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+    printf '%s' "$resolved"
+}
+
+remove_deps() {
+    if [[ "$KEEP_DEPS" == "1" ]]; then
+        header "Keeping runtime dependencies"
+        info "KEEP_DEPS=1 — leaving libkrunfw and gvproxy installed"
+        return 0
+    fi
+
+    header "Removing runtime dependencies"
+
+    local resolved_version="$DEPS_VERSION"
+    if [[ "$DEPS_VERSION" == "latest" ]]; then
+        resolved_version="$(resolve_deps_version)"
+        if [[ -z "$resolved_version" ]]; then
+            warn "Could not resolve latest install-deps release tag"
+            warn "See: https://github.com/nanosandboxai/install-deps/releases"
+            return 0
+        fi
+        info "Resolved install-deps latest → ${resolved_version}"
+    fi
+
+    local deps_uninstall_url="https://github.com/nanosandboxai/install-deps/releases/download/${resolved_version}/uninstall.sh"
+    local tmpfile
+    tmpfile="$(mktemp -t nanosb-uninstall-deps.XXXXXX)"
+
+    info "Downloading dependency uninstaller..."
+    if ! curl -fsSL "$deps_uninstall_url" -o "$tmpfile"; then
+        warn "Could not download install-deps uninstaller (release ${resolved_version})"
+        warn "Remove libkrunfw and gvproxy manually if needed"
+        warn "See: https://github.com/nanosandboxai/install-deps"
+        rm -f "$tmpfile"
+        return 0
+    fi
+
+    info "Running install-deps uninstaller..."
+    if bash "$tmpfile"; then
+        success "Runtime dependencies removed"
+    else
+        warn "install-deps uninstaller exited with an error"
+        warn "You may need to remove libkrunfw and gvproxy manually"
+        warn "See: https://github.com/nanosandboxai/install-deps"
+    fi
+    rm -f "$tmpfile"
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+header "Nanosandbox Uninstaller"
+
+remove_binary
+remove_deps
+
+header "Uninstall Complete"
+
+if [[ "$KEEP_DEPS" == "1" ]]; then
+    cat <<EOF
+The nanosb CLI has been removed.
+Runtime dependencies (libkrunfw + gvproxy) were kept (KEEP_DEPS=1).
+
+EOF
+else
+    cat <<EOF
+The nanosb CLI has been removed.
+Runtime dependencies (libkrunfw + gvproxy) have been removed.
+
+EOF
+fi
