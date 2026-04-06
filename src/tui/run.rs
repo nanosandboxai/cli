@@ -96,6 +96,48 @@ mod stderr_redirect {
     pub fn restore_and_close(_saved: SavedStderr) {}
 }
 
+/// Fix Windows console input mode after crossterm setup.
+///
+/// crossterm's `enable_raw_mode()` and `EnableMouseCapture` both call
+/// `SetConsoleMode()` on the stdin handle, but they don't set the exact
+/// combination of flags we need for the TUI:
+///
+/// - **ENABLE_MOUSE_INPUT** — delivers mouse click/drag/scroll as input records
+/// - **ENABLE_EXTENDED_FLAGS** — required when modifying Quick-Edit mode
+/// - **~ENABLE_QUICK_EDIT_MODE** — prevents console from stealing mouse for selection
+/// - **~ENABLE_PROCESSED_INPUT** — delivers Ctrl+C as a key event, not a signal
+///
+/// This function must be called AFTER `enable_raw_mode()` + `EnableMouseCapture`
+/// so our changes aren't overwritten.
+#[cfg(target_os = "windows")]
+pub(super) fn fix_windows_console_mode() {
+    unsafe {
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> isize;
+            fn GetConsoleMode(hConsoleHandle: isize, lpMode: *mut u32) -> i32;
+            fn SetConsoleMode(hConsoleHandle: isize, dwMode: u32) -> i32;
+        }
+        const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+        const ENABLE_MOUSE_INPUT: u32 = 0x0010;
+        const ENABLE_QUICK_EDIT_MODE: u32 = 0x0040;
+        const ENABLE_EXTENDED_FLAGS: u32 = 0x0080;
+
+        let stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+        if stdin_handle != -1_isize {
+            let mut mode: u32 = 0;
+            if GetConsoleMode(stdin_handle, &mut mode) != 0 {
+                let new_mode = (mode
+                    & !ENABLE_QUICK_EDIT_MODE
+                    & !ENABLE_PROCESSED_INPUT)
+                    | ENABLE_MOUSE_INPUT
+                    | ENABLE_EXTENDED_FLAGS;
+                SetConsoleMode(stdin_handle, new_mode);
+            }
+        }
+    }
+}
+
 /// Run the TUI application.
 ///
 /// This enables raw mode, enters the alternate screen, and runs the main
@@ -176,12 +218,29 @@ pub async fn run_tui(
     // terminal buffer fills up (EAGAIN / os error 35).
     let saved_stderr = stderr_redirect::save_and_redirect();
 
+    // On Windows, disable the default Ctrl+C handler so we can handle it
+    // as a key event (forwarding 0x03 to SSH or copying selected text).
+    #[cfg(target_os = "windows")]
+    unsafe {
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: *const std::ffi::c_void,
+                add: i32,
+            ) -> i32;
+        }
+        SetConsoleCtrlHandler(std::ptr::null(), 1);
+    }
+
     // Set up terminal.
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, SetCursorStyle::SteadyBar)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Fix console input flags AFTER crossterm setup (see fix_windows_console_mode doc).
+    #[cfg(target_os = "windows")]
+    fix_windows_console_mode();
 
     // Install a panic hook that restores the terminal before printing
     // the panic message. Without this, panics corrupt the alternate screen.
@@ -273,11 +332,38 @@ pub async fn run_tui(
             AppEvent::Terminal(crossterm_event) => {
                 match crossterm_event {
                     CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                        // Clear mouse selection on any keypress.
                         // Only handle Press events — on Windows, crossterm fires
                         // both Press and Release for each keystroke.
-                        app.mouse_selection = None;
-                        handle_key_event(&mut app, key, &tx).await;
+
+                        // Ctrl+C with active selection → copy to clipboard
+                        // instead of forwarding/clearing.
+                        if key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                            && app.mouse_selection.as_ref().is_some_and(|s| !s.dragging && s.start != s.end)
+                        {
+                            if let Some(sel) = app.mouse_selection.as_ref() {
+                                let (start, end) = sel.normalized();
+                                if let Some(panel) = app.panels.get(sel.panel_idx) {
+                                    if let Some(ref term) = panel.terminal {
+                                        let text = term.screen().contents_between(
+                                            start.0, start.1, end.0, end.1,
+                                        );
+                                        if !text.is_empty() {
+                                            let _ = copy_to_clipboard(&text);
+                                            app.set_status_message(format!(
+                                                "Copied {} chars to clipboard.",
+                                                text.len()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            app.mouse_selection = None;
+                        } else {
+                            // Clear mouse selection on any other keypress.
+                            app.mouse_selection = None;
+                            handle_key_event(&mut app, key, &tx).await;
+                        }
                     }
                     CrosstermEvent::Key(_) => {
                         // Ignore Release / Repeat events.
@@ -293,7 +379,14 @@ pub async fn run_tui(
                         // render_panel() detects the delta and propagates
                         // to vt100 parser + SSH PTY.
                     }
-                    CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => {}
+                    CrosstermEvent::FocusGained => {
+                        // Re-apply console mode fix on focus gain — Windows
+                        // Terminal may reset input flags when the window
+                        // loses and regains focus.
+                        #[cfg(target_os = "windows")]
+                        fix_windows_console_mode();
+                    }
+                    CrosstermEvent::FocusLost => {}
                 }
             }
             AppEvent::SandboxCreating { panel_idx, message } => {
@@ -303,11 +396,12 @@ pub async fn run_tui(
             }
             AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount } => {
                 // Get SSH info before storing sandbox
-                let ssh_info = {
+                let (ssh_info, guest_ip) = {
                     let sb = sandbox.lock().await;
                     let port = sb.ssh_port();
                     let key = sb.ssh_key_path();
-                    port.zip(key)
+                    let ip = sb.guest_ip();
+                    (port.zip(key), ip)
                 };
 
                 if let Some(panel) = app.panels.get_mut(panel_idx) {
@@ -324,6 +418,7 @@ pub async fn run_tui(
                         panel.ssh_host_port = Some(port);
                         panel.ssh_key_path = Some(key.clone());
                     }
+                    panel.ssh_guest_ip = guest_ip.clone();
                 }
                 // Initiate SSH connection if SSH info is available
                 if let Some((ssh_port, key_path)) = ssh_info {
@@ -349,12 +444,17 @@ pub async fn run_tui(
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
                         let model = panel.model.clone();
+                        let ssh_host = if cfg!(target_os = "windows") {
+                            guest_ip.unwrap_or_else(|| "172.28.0.2".to_string())
+                        } else {
+                            "127.0.0.1".to_string()
+                        };
                         let tx = tx.clone();
                         tokio::spawn(async move {
                             // Small delay for sshd to be fully ready
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             match super::terminal::connect_ssh(
-                                ssh_port, key_path, pty_cols, pty_rows,
+                                ssh_host, ssh_port, key_path, pty_cols, pty_rows,
                                 &agent_name, &env, workdir.as_deref(),
                                 permissions, auto_mode, prompt.as_deref(),
                                 is_resumed, model.as_deref(), panel_idx, tx.clone(),
@@ -425,10 +525,12 @@ pub async fn run_tui(
                             if !super::terminal::is_auth_url(&url) {
                                 continue;
                             }
-                            // OAuth URLs always have query parameters (?client_id=...).
-                            // Truncated URLs from partial screen renders won't have
-                            // reached the '?' yet — skip them.
-                            if !url.contains('?') {
+                            // OAuth authorize URLs always have query parameters
+                            // (?client_id=...).  Truncated URLs from partial screen
+                            // renders won't have reached the '?' yet — skip them.
+                            // Exception: device-code flow URLs (e.g. github.com/login/device,
+                            // cursor.com/loginlink) are complete without query params.
+                            if !url.contains('?') && !super::terminal::is_device_code_url(&url) {
                                 continue;
                             }
                             let key = super::terminal::url_dedup_key(&url);
@@ -555,18 +657,23 @@ pub async fn run_tui(
                                             "{}:127.0.0.1:{}",
                                             port, port
                                         );
+                                        let ssh_dest = if cfg!(target_os = "windows") {
+                                            format!("root@{}", panel.ssh_guest_ip.as_deref().unwrap_or("172.28.0.2"))
+                                        } else {
+                                            "root@127.0.0.1".to_string()
+                                        };
                                         if let Ok(child) =
                                             std::process::Command::new("ssh")
                                                 .args([
                                                     "-L", &fwd,
                                                     "-p", &ssh_port.to_string(),
                                                     "-i",
-                                                    &key_path.to_string_lossy(),
+                                                    &key_path.to_string_lossy().as_ref(),
                                                     "-o", "StrictHostKeyChecking=no",
                                                     "-o", if cfg!(unix) { "UserKnownHostsFile=/dev/null" } else { "UserKnownHostsFile=NUL" },
                                                     "-o", "LogLevel=ERROR",
                                                     "-N",
-                                                    "root@127.0.0.1",
+                                                    &ssh_dest,
                                                 ])
                                                 .stdin(std::process::Stdio::null())
                                                 .stdout(std::process::Stdio::null())
@@ -637,6 +744,8 @@ pub async fn run_tui(
                 // Resume TUI: enter alternate screen, enable raw mode
                 let _ = enable_raw_mode();
                 let _ = execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, SetCursorStyle::SteadyBar);
+                #[cfg(target_os = "windows")]
+                fix_windows_console_mode();
                 terminal.clear()?;
             }
             AppEvent::UploadStarted { panel_idx, filename } => {
@@ -806,6 +915,16 @@ fn print_validation_results(validation: &nanosandbox::runtime::ValidationResult)
             let failed = validation.errors.iter().any(|e| e.check == *name);
             let warned = validation.warnings.iter().any(|w| w.contains(name));
             if !failed && !warned {
+                println!("  [v] {}", name);
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let checks = ["Host Compute Service", "krun.dll", "libkrunfw.dll"];
+        for name in &checks {
+            let failed = validation.errors.iter().any(|e| e.check == *name);
+            if !failed {
                 println!("  [v] {}", name);
             }
         }
@@ -1065,7 +1184,7 @@ async fn handle_key_event(
                     // and arrives as CrosstermEvent::Paste, handled separately.
                     KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.modifiers.contains(KeyModifiers::SUPER) => {
-                        if let Some((panel_idx, ssh_port, key_path)) = panel_ssh_info(app) {
+                        if let Some((panel_idx, ssh_host, ssh_port, key_path)) = panel_ssh_info(app) {
                             // Clone the write channel so the async task can forward
                             // Ctrl+V to the terminal if no clipboard image is found.
                             let write_tx = app.panels.get(app.focused_panel)
@@ -1080,15 +1199,33 @@ async fn handle_key_event(
                                 match result {
                                     Ok(Ok((png_bytes, filename))) => {
                                         super::upload::spawn_bytes_upload(
-                                            ssh_port, key_path, png_bytes, filename,
+                                            ssh_host, ssh_port, key_path, png_bytes, filename,
                                             panel_idx, tx,
                                         );
                                     }
                                     Ok(Err(_)) | Err(_) => {
-                                        // No image in clipboard — forward Ctrl+V
-                                        // as a regular keystroke to the terminal.
-                                        if let Some(wtx) = write_tx {
-                                            let _ = wtx.send(vec![0x16]); // Ctrl+V = 0x16
+                                        // No image in clipboard — try reading text
+                                        // from clipboard and pasting it (bracketed).
+                                        // On macOS Cmd+V arrives as CrosstermEvent::Paste
+                                        // with the text; on Windows Ctrl+V arrives as a
+                                        // key event so we read the clipboard ourselves.
+                                        let pasted = tokio::task::spawn_blocking(|| {
+                                            arboard::Clipboard::new()
+                                                .and_then(|mut cb| cb.get_text())
+                                                .ok()
+                                        }).await.ok().flatten();
+                                        if let Some(Some(text)) = Some(pasted) {
+                                            if let Some(ref wtx) = write_tx {
+                                                if !text.is_empty() {
+                                                    let mut buf = Vec::with_capacity(text.len() + 12);
+                                                    buf.extend_from_slice(b"\x1b[200~");
+                                                    buf.extend_from_slice(text.as_bytes());
+                                                    buf.extend_from_slice(b"\x1b[201~");
+                                                    let _ = wtx.send(buf);
+                                                }
+                                            }
+                                        } else if let Some(wtx) = write_tx {
+                                            let _ = wtx.send(vec![0x16]); // fallback: Ctrl+V
                                         }
                                     }
                                 }
@@ -1584,13 +1721,14 @@ async fn handle_command(
                 panel.port_forward_children.clear();
                 panel.forwarded_ports.clear();
 
-                let ssh_info = if let Some(ref sb_arc) = panel.sandbox {
+                let (ssh_info, guest_ip) = if let Some(ref sb_arc) = panel.sandbox {
                     let sb = sb_arc.lock().await;
                     let port = sb.ssh_port();
                     let key = sb.ssh_key_path();
-                    port.zip(key)
+                    let ip = sb.guest_ip();
+                    (port.zip(key), ip)
                 } else {
-                    None
+                    (None, None)
                 };
 
                 if let Some((ssh_port, key_path)) = ssh_info {
@@ -1602,10 +1740,15 @@ async fn handle_command(
                     let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                     let is_resumed = panel.is_resumed;
                     let model = panel.model.clone();
+                    let ssh_host = if cfg!(target_os = "windows") {
+                        guest_ip.unwrap_or_else(|| "172.28.0.2".to_string())
+                    } else {
+                        "127.0.0.1".to_string()
+                    };
                     let tx = tx.clone();
                     tokio::spawn(async move {
                         match super::terminal::connect_ssh(
-                            ssh_port, key_path, pty_cols, pty_rows,
+                            ssh_host, ssh_port, key_path, pty_cols, pty_rows,
                             &agent_name, &env, workdir.as_deref(),
                             permissions, auto_mode, prompt.as_deref(),
                             is_resumed, model.as_deref(), panel_idx, tx.clone(),
@@ -1694,21 +1837,24 @@ async fn handle_command(
         Command::Branches => {
             let project_dir = app.project_path.as_ref();
             if let Some(dir) = project_dir {
-                let output = std::process::Command::new("git")
-                    .args(["branch", "--list", "nanosb/*"])
-                    .current_dir(dir)
-                    .output();
-                let msg = match output {
-                    Ok(out) => {
-                        let branches = String::from_utf8_lossy(&out.stdout);
-                        if branches.trim().is_empty() {
-                            "No nanosb branches found.".to_string()
-                        } else {
-                            format!("Nanosb branches:\n{}", branches)
+                let dir = dir.clone();
+                let msg = tokio::task::spawn_blocking(move || {
+                    let output = std::process::Command::new("git")
+                        .args(["branch", "--list", "nanosb/*"])
+                        .current_dir(&dir)
+                        .output();
+                    match output {
+                        Ok(out) => {
+                            let branches = String::from_utf8_lossy(&out.stdout);
+                            if branches.trim().is_empty() {
+                                "No nanosb branches found.".to_string()
+                            } else {
+                                format!("Nanosb branches:\n{}", branches)
+                            }
                         }
+                        Err(e) => format!("Failed to list branches: {}", e),
                     }
-                    Err(e) => format!("Failed to list branches: {}", e),
-                };
+                }).await.unwrap_or_else(|e| format!("Task failed: {}", e));
                 let chat_msg = ChatMessage {
                     role: MessageRole::System,
                     content: msg,
@@ -1804,12 +1950,16 @@ async fn handle_command(
                             if let Some(ref wt_base) = pm.worktree_base {
                                 if let Some((source, branch)) = pm.created_branches.first() {
                                     let refspec = format!("{}:{}", branch, branch);
-                                    let ok = std::process::Command::new("git")
-                                        .args(["fetch", &wt_base.to_string_lossy(), &refspec, "--force"])
-                                        .current_dir(source)
-                                        .output()
-                                        .map(|o| o.status.success())
-                                        .unwrap_or(false);
+                                    let wt = wt_base.clone();
+                                    let src = source.clone();
+                                    let ok = tokio::task::spawn_blocking(move || {
+                                        std::process::Command::new("git")
+                                            .args(["fetch", &wt.to_string_lossy(), &refspec, "--force"])
+                                            .current_dir(&src)
+                                            .output()
+                                            .map(|o| o.status.success())
+                                            .unwrap_or(false)
+                                    }).await.unwrap_or(false);
                                     let msg = if ok {
                                         format!("Synced to branch '{}'.", branch)
                                     } else {
@@ -1906,6 +2056,31 @@ async fn handle_command(
                         if ok {
                             app.set_status_message(format!("Opened in {}.", app_name));
                             return;
+                        }
+                    }
+
+                    // On Windows, try common install paths for GUI editors
+                    // when the binary isn't on PATH.
+                    #[cfg(target_os = "windows")]
+                    {
+                        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+                        let programfiles = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+                        let candidates: Vec<(&str, String)> = vec![
+                            ("vscode", format!(r"{}\Microsoft VS Code\Code.exe", programfiles)),
+                            ("vscode", format!(r"{}\Programs\Microsoft VS Code\Code.exe", localappdata)),
+                            ("cursor", format!(r"{}\Programs\Cursor\Cursor.exe", localappdata)),
+                        ];
+                        for (name, exe_path) in &candidates {
+                            if (editor_pref == *name || editor_pref == "auto") && std::path::Path::new(exe_path).exists() {
+                                let _ = std::process::Command::new(exe_path)
+                                    .arg(&clone_path)
+                                    .stdin(std::process::Stdio::null())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                                app.set_status_message(format!("Opened in {}.", name));
+                                return;
+                            }
                         }
                     }
 
@@ -2080,55 +2255,31 @@ fn handle_copy(app: &mut App) {
 }
 
 /// Write text to the system clipboard using platform-specific commands.
+/// Copy text to system clipboard without blocking the async event loop.
+///
+/// Uses `arboard` (cross-platform Rust clipboard library) instead of
+/// spawning external processes like `clip.exe` / `pbcopy` / `xclip`.
+/// The old process-based approach called `.wait()` synchronously on the
+/// main event loop, freezing the entire TUI for 100-500ms on Windows.
 fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
-    use std::io::Write;
-    use std::process::{Command as ProcessCommand, Stdio};
-
-    #[cfg(target_os = "macos")]
-    let mut child = ProcessCommand::new("pbcopy")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("pbcopy: {}", e))?;
-
-    #[cfg(target_os = "linux")]
-    let mut child = ProcessCommand::new("xclip")
-        .args(["-selection", "clipboard"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("xclip: {}", e))?;
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    return Err("Clipboard not supported on this platform".to_string());
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        child
-            .stdin
-            .as_mut()
-            .ok_or("Failed to open stdin")?
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("write: {}", e))?;
-
-        let status = child.wait().map_err(|e| format!("wait: {}", e))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("exited with {}", status))
-        }
-    }
+    arboard::Clipboard::new()
+        .map_err(|e| format!("clipboard: {}", e))?
+        .set_text(text.to_string())
+        .map_err(|e| format!("clipboard set: {}", e))
 }
 
 /// Get the SSH port and key path from the focused panel, if available.
-fn panel_ssh_info(app: &App) -> Option<(usize, u16, std::path::PathBuf)> {
+fn panel_ssh_info(app: &App) -> Option<(usize, String, u16, std::path::PathBuf)> {
     let idx = app.focused_panel;
     let panel = app.panels.get(idx)?;
     let port = panel.ssh_host_port?;
     let key = panel.ssh_key_path.clone()?;
-    Some((idx, port, key))
+    let host = if cfg!(target_os = "windows") {
+        panel.ssh_guest_ip.clone().unwrap_or_else(|| "172.28.0.2".to_string())
+    } else {
+        "127.0.0.1".to_string()
+    };
+    Some((idx, host, port, key))
 }
 
 /// Resolve a user-supplied path: strip quotes, expand `~`, resolve relative paths.
@@ -2160,7 +2311,7 @@ fn resolve_upload_path(raw: &str) -> std::path::PathBuf {
 
 /// Handle the `/upload <path>` command.
 fn handle_upload(app: &mut App, path: &str, tx: &mpsc::UnboundedSender<AppEvent>) {
-    let (panel_idx, ssh_port, key_path) = match panel_ssh_info(app) {
+    let (panel_idx, ssh_host, ssh_port, key_path) = match panel_ssh_info(app) {
         Some(info) => info,
         None => {
             app.set_system_message(ChatMessage {
@@ -2193,12 +2344,12 @@ fn handle_upload(app: &mut App, path: &str, tx: &mpsc::UnboundedSender<AppEvent>
         .unwrap_or_else(|| "unknown".to_string());
     app.set_status_message(format!("Uploading {}...", filename));
 
-    super::upload::spawn_file_upload(ssh_port, key_path, host_path, panel_idx, tx.clone());
+    super::upload::spawn_file_upload(ssh_host, ssh_port, key_path, host_path, panel_idx, tx.clone());
 }
 
 /// Handle the `/paste-image` command.
 fn handle_paste_image(app: &mut App, tx: &mpsc::UnboundedSender<AppEvent>) {
-    let (panel_idx, ssh_port, key_path) = match panel_ssh_info(app) {
+    let (panel_idx, ssh_host, ssh_port, key_path) = match panel_ssh_info(app) {
         Some(info) => info,
         None => {
             app.set_system_message(ChatMessage {
@@ -2219,7 +2370,7 @@ fn handle_paste_image(app: &mut App, tx: &mpsc::UnboundedSender<AppEvent>) {
         match result {
             Ok(Ok((png_bytes, filename))) => {
                 super::upload::spawn_bytes_upload(
-                    ssh_port, key_path, png_bytes, filename, panel_idx, tx,
+                    ssh_host, ssh_port, key_path, png_bytes, filename, panel_idx, tx,
                 );
             }
             Ok(Err(e)) => {
@@ -2258,7 +2409,7 @@ fn handle_paste_event(
     // In Terminal mode: if the paste is empty (image-only clipboard via Cmd+V),
     // check the clipboard for an image to upload.
     if text.is_empty() {
-        if let Some((panel_idx, ssh_port, key_path)) = panel_ssh_info(app) {
+        if let Some((panel_idx, ssh_host, ssh_port, key_path)) = panel_ssh_info(app) {
             let tx = tx.clone();
             tokio::spawn(async move {
                 let result = tokio::task::spawn_blocking(
@@ -2268,7 +2419,7 @@ fn handle_paste_event(
                 match result {
                     Ok(Ok((png_bytes, filename))) => {
                         super::upload::spawn_bytes_upload(
-                            ssh_port, key_path, png_bytes, filename,
+                            ssh_host, ssh_port, key_path, png_bytes, filename,
                             panel_idx, tx,
                         );
                     }
@@ -2290,11 +2441,19 @@ fn handle_paste_event(
         return;
     }
 
-    // Forward pasted text as-is to the terminal (covers drag-and-drop paths too).
+    // Forward pasted text to the terminal wrapped in bracketed-paste escape
+    // sequences (\x1b[200~ ... \x1b[201~).  Shells that support bracketed
+    // paste (bash 4.4+, zsh, fish) buffer the entire paste and process it
+    // in one shot instead of interpreting each character individually, which
+    // dramatically speeds up large pastes.
     if let Some(panel) = app.panels.get(app.focused_panel) {
         if panel.mode == PanelMode::Terminal {
             if let Some(ref handle) = panel.terminal_handle {
-                let _ = handle.write_tx.send(text.into_bytes());
+                let mut buf = Vec::with_capacity(text.len() + 12);
+                buf.extend_from_slice(b"\x1b[200~");
+                buf.extend_from_slice(text.as_bytes());
+                buf.extend_from_slice(b"\x1b[201~");
+                let _ = handle.write_tx.send(buf);
             }
         }
     }

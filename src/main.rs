@@ -1045,29 +1045,19 @@ mod cli {
         {
             vec![
                 PlatformCheck {
-                    name: "Windows Containers",
-                    keyword: "Containers",
-                    ok_message: "enabled",
-                },
-                PlatformCheck {
-                    name: "containerd Service",
-                    keyword: "containerd",
-                    ok_message: "running",
-                },
-                PlatformCheck {
-                    name: "runhcs Shim",
-                    keyword: "runhcs",
-                    ok_message: "found",
-                },
-                PlatformCheck {
-                    name: "HCS Service",
+                    name: "Host Compute Service",
                     keyword: "HCS",
                     ok_message: "running",
                 },
                 PlatformCheck {
-                    name: "Hyper-V",
-                    keyword: "Hyper-V",
-                    ok_message: "enabled",
+                    name: "krun.dll",
+                    keyword: "krun.dll",
+                    ok_message: "found",
+                },
+                PlatformCheck {
+                    name: "libkrunfw.dll",
+                    keyword: "libkrunfw.dll",
+                    ok_message: "found",
                 },
             ]
         }

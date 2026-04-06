@@ -160,6 +160,7 @@ impl russh::client::Handler for SshHandler {
 /// Returns an `SshTerminalHandle` for the caller to send keystrokes and resize events.
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_ssh(
+    ssh_host: String,
     ssh_port: u16,
     key_path: PathBuf,
     cols: u16,
@@ -188,7 +189,7 @@ pub async fn connect_ssh(
     let config = std::sync::Arc::new(config);
     let sh = SshHandler;
     let mut session =
-        russh::client::connect(config, format!("127.0.0.1:{}", ssh_port), sh).await?;
+        russh::client::connect(config, format!("{}:{}", ssh_host, ssh_port), sh).await?;
 
     // Authenticate
     let auth_result = session
@@ -759,13 +760,21 @@ pub fn extract_urls_from_screen(screen: &vt100::Screen) -> Vec<String> {
 /// Only URLs matching these domains are auto-opened in the host browser.
 /// This prevents random URLs printed by agents from spawning browser tabs.
 const AUTH_DOMAINS: &[&str] = &[
-    "auth.openai.com",          // OpenAI Codex CLI
-    "claude.ai",                // Claude Code CLI
+    // Claude Code
+    "claude.ai",                // Claude Code CLI (OAuth authorize)
     "auth.anthropic.com",       // Claude Code (token refresh)
     "console.anthropic.com",    // Claude Code (console auth)
-    "authenticator.cursor.sh",  // Cursor IDE
-    "cursor.sh",                // Cursor IDE (device flow)
-    "www.cursor.com",           // Cursor IDE (alt)
+    // OpenAI Codex CLI
+    "auth.openai.com",          // Codex CLI (OAuth authorize)
+    "login.live.com",           // Codex CLI (Microsoft SSO)
+    "login.microsoftonline.com",// Codex CLI (Azure AD SSO)
+    // Cursor
+    "authenticator.cursor.sh",  // Cursor IDE (authenticator)
+    "cursor.sh",                // Cursor IDE (legacy domain)
+    "cursor.com",               // Cursor IDE (device flow sign-in)
+    "www.cursor.com",           // Cursor IDE (www redirect)
+    // GitHub (SSO provider for multiple agents)
+    "github.com",               // GitHub device flow (Codex, Copilot)
 ];
 
 /// Check whether a URL is a known OAuth authentication URL.
@@ -787,6 +796,36 @@ pub fn is_auth_url(url: &str) -> bool {
     AUTH_DOMAINS.iter().any(|d| host.eq_ignore_ascii_case(d))
 }
 
+/// Device-code flow path segments.
+///
+/// Device-code flows (GitHub, Cursor) print a URL without query parameters
+/// and display the user code separately.  These URLs are complete as-is and
+/// should not be rejected by the `?`-query-param filter.
+const DEVICE_CODE_PATHS: &[&str] = &[
+    "/login/device",    // GitHub device flow
+    "/loginlink",       // Cursor device flow
+    "/device",          // Generic device code
+];
+
+/// Check whether a URL is a device-code flow URL (no query params needed).
+pub fn is_device_code_url(url: &str) -> bool {
+    let after_scheme = match url.strip_prefix("https://") {
+        Some(s) => s,
+        None => return false,
+    };
+    // Extract path (everything after the host, before ? or #).
+    let after_host = match after_scheme.find('/') {
+        Some(pos) => &after_scheme[pos..],
+        None => return false,
+    };
+    let path = after_host
+        .split(|c: char| c == '?' || c == '#')
+        .next()
+        .unwrap_or(after_host);
+    DEVICE_CODE_PATHS
+        .iter()
+        .any(|p| path.eq_ignore_ascii_case(p) || path.starts_with(&format!("{}/", p)))
+}
 
 /// Extract the `redirect_uri` localhost port from an OAuth URL.
 ///
@@ -874,16 +913,36 @@ pub fn url_dedup_key(url: &str) -> String {
 /// Open a URL in the host machine's default browser.
 pub fn open_url_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(not(target_os = "macos"))]
-    let cmd = "xdg-open";
-
-    let _ = std::process::Command::new(cmd)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    {
+        let _ = std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Use rundll32 to open URLs — avoids cmd.exe shell interpretation that
+        // breaks OAuth URLs containing '&' (command separator) and '%' (env var
+        // expansion).  The URL is passed as a single process argument, so all
+        // special characters are preserved.
+        let _ = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
 
 #[cfg(test)]
@@ -1355,5 +1414,30 @@ mod tests {
                 domain
             );
         }
+    }
+
+    #[test]
+    fn test_is_auth_url_cursor_com() {
+        assert!(is_auth_url("https://cursor.com/loginlink?user_code=ABCD-1234"));
+        assert!(is_auth_url("https://www.cursor.com/auth?client_id=123"));
+        assert!(is_auth_url("https://authenticator.cursor.sh/authorize?code=abc"));
+        assert!(is_auth_url("https://cursor.sh/device?code=xyz"));
+        // Non-cursor domain should not match.
+        assert!(!is_auth_url("https://evil-cursor.com/login"));
+    }
+
+    #[test]
+    fn test_is_device_code_url() {
+        assert!(is_device_code_url("https://github.com/login/device"));
+        assert!(is_device_code_url("https://cursor.com/loginlink"));
+        assert!(is_device_code_url("https://example.com/device"));
+        assert!(is_device_code_url("https://example.com/login/device/"));
+        // URLs with query params still match.
+        assert!(is_device_code_url("https://cursor.com/loginlink?user_code=ABCD"));
+        // Non-device paths should not match.
+        assert!(!is_device_code_url("https://cursor.com/settings"));
+        assert!(!is_device_code_url("https://cursor.com/"));
+        // HTTP not supported.
+        assert!(!is_device_code_url("http://cursor.com/loginlink"));
     }
 }

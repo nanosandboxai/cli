@@ -98,7 +98,19 @@ pub fn spawn_terminal_event_reader(tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         loop {
             // Blocking read wrapped in spawn_blocking to avoid blocking the async runtime.
-            let evt = tokio::task::spawn_blocking(event::read).await;
+            //
+            // On Windows, crossterm's event::read() does a save→modify→read→restore
+            // cycle on the console input mode. The "restore" undoes our custom flags
+            // (ENABLE_MOUSE_INPUT, ~QUICK_EDIT, ~PROCESSED_INPUT) every time. We
+            // re-apply them inside the spawn_blocking closure, right after read()
+            // returns, so the corrected mode is what crossterm saves on the NEXT call.
+            let evt = tokio::task::spawn_blocking(|| {
+                let result = event::read();
+                #[cfg(target_os = "windows")]
+                super::run::fix_windows_console_mode();
+                result
+            })
+            .await;
 
             match evt {
                 Ok(Ok(crossterm_event)) => {

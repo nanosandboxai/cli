@@ -297,6 +297,8 @@ pub struct AgentPanel {
     pub ssh_host_port: Option<u16>,
     /// SSH private key path for port forwarding (stored from SandboxReady).
     pub ssh_key_path: Option<PathBuf>,
+    /// Guest IP address for SSH connections on Windows (stored from SandboxReady).
+    pub ssh_guest_ip: Option<String>,
     /// Guest ports with active SSH local-port-forwards (`ssh -L`).
     pub forwarded_ports: HashSet<u16>,
     /// SSH port-forward child processes (killed on panel close).
@@ -354,6 +356,7 @@ impl AgentPanel {
             sync_override: None,
             ssh_host_port: None,
             ssh_key_path: None,
+            ssh_guest_ip: None,
             forwarded_ports: HashSet::new(),
             port_forward_children: Vec::new(),
             loading_tick: 0,
