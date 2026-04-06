@@ -44,12 +44,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # ── System dependencies ───────────────────────────────────
-      - name: Install libkrun
-        run: |
-          brew tap slp/krun
-          brew install libkrun
-
       # ── Inject version from tag ─────────────────────────────
       - name: Set version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -105,11 +99,7 @@ jobs:
             --generate-notes \
             --latest \
             nanosb \
-            install.sh \
-            scripts/install/macos.sh \
-            scripts/install/linux.sh \
-            scripts/install/gvproxy.sh \
-            scripts/install/uninstall.sh
+            install.sh
 
       # ── Artifacts (for PRs / non-release builds) ──────────────
       - name: Upload build artifacts
