@@ -55,7 +55,7 @@ mod stderr_redirect {
     #[cfg(windows)]
     mod win32 {
         // MSVC CRT file descriptor functions (always available on Windows)
-        extern "cdecl" {
+        extern "C" {
             fn _dup(fd: i32) -> i32;
             fn _dup2(fd1: i32, fd2: i32) -> i32;
             fn _open(filename: *const u8, oflag: i32, ...) -> i32;
