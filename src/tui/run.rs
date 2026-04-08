@@ -35,9 +35,6 @@ use super::renderer;
 /// We redirect stderr to /dev/null while the TUI is active.
 /// On Windows, this is a no-op for now.
 mod stderr_redirect {
-    #[cfg(unix)]
-    pub type SavedStderr = i32;
-    #[cfg(not(unix))]
     pub type SavedStderr = i32;
 
     #[cfg(unix)]
@@ -55,7 +52,35 @@ mod stderr_redirect {
         saved
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    mod win32 {
+        // MSVC CRT file descriptor functions (always available on Windows)
+        extern "cdecl" {
+            fn _dup(fd: i32) -> i32;
+            fn _dup2(fd1: i32, fd2: i32) -> i32;
+            fn _open(filename: *const u8, oflag: i32, ...) -> i32;
+            fn _close(fd: i32) -> i32;
+        }
+        const O_WRONLY: i32 = 1;
+
+        pub fn dup(fd: i32) -> i32 { unsafe { _dup(fd) } }
+        pub fn dup2(src: i32, dst: i32) -> i32 { unsafe { _dup2(src, dst) } }
+        pub fn close(fd: i32) -> i32 { unsafe { _close(fd) } }
+        pub fn open_nul() -> i32 { unsafe { _open(b"NUL\0".as_ptr(), O_WRONLY) } }
+    }
+
+    #[cfg(windows)]
+    pub fn save_and_redirect() -> SavedStderr {
+        let saved = win32::dup(2);
+        let nul = win32::open_nul();
+        if nul >= 0 {
+            win32::dup2(nul, 2);
+            win32::close(nul);
+        }
+        saved
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn save_and_redirect() -> SavedStderr { -1 }
 
     #[cfg(unix)]
@@ -65,7 +90,14 @@ mod stderr_redirect {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn restore(saved: SavedStderr) {
+        if saved >= 0 {
+            win32::dup2(saved, 2);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn restore(_saved: SavedStderr) {}
 
     #[cfg(unix)]
@@ -79,7 +111,16 @@ mod stderr_redirect {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn redirect_to_null() {
+        let nul = win32::open_nul();
+        if nul >= 0 {
+            win32::dup2(nul, 2);
+            win32::close(nul);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn redirect_to_null() {}
 
     #[cfg(unix)]
@@ -92,7 +133,15 @@ mod stderr_redirect {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn restore_and_close(saved: SavedStderr) {
+        if saved >= 0 {
+            win32::dup2(saved, 2);
+            win32::close(saved);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn restore_and_close(_saved: SavedStderr) {}
 }
 

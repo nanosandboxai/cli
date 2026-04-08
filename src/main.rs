@@ -1271,6 +1271,8 @@ mod cli {
             eprintln!("\nRun './scripts/install/macos.sh' to install dependencies.");
             #[cfg(target_os = "linux")]
             eprintln!("\nRun './scripts/install/linux.sh' to install dependencies.");
+            #[cfg(target_os = "windows")]
+            eprintln!("\nRun 'powershell -ExecutionPolicy Bypass -File .\\scripts\\install\\windows.ps1' to install dependencies.\nOr use: irm https://github.com/nanosandboxai/install-deps/releases/latest/download/install.ps1 | iex");
 
             anyhow::bail!("Runtime prerequisites not met. Run 'nanosb doctor' for details.");
         }
