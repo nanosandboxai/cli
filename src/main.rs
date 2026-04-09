@@ -938,6 +938,8 @@ mod cli {
 
         let checks = get_platform_checks();
 
+        let check_names: Vec<&str> = checks.iter().map(|c| c.name).collect();
+
         for check in &checks {
             let failed = errors.iter().find(|e| e.check == check.name);
             let warned = warnings.iter().find(|w| w.contains(check.keyword));
@@ -967,6 +969,21 @@ mod cli {
                     check.ok_message
                 );
                 passed += 1;
+            }
+        }
+
+        // Show any errors that didn't match a known check name
+        for err in errors {
+            if !check_names.contains(&err.check.as_str()) {
+                println!(
+                    "  {} {}: {}",
+                    "[✗]".red().bold(),
+                    err.check,
+                    err.message
+                );
+                if let Some(ref hint) = &err.fix_hint {
+                    println!("      {}: {}", "Fix".yellow(), hint);
+                }
             }
         }
 
@@ -1045,19 +1062,29 @@ mod cli {
         {
             vec![
                 PlatformCheck {
-                    name: "Host Compute Service",
-                    keyword: "HCS",
-                    ok_message: "running",
+                    name: "Windows Hypervisor Platform",
+                    keyword: "WHPX feature",
+                    ok_message: "enabled",
                 },
                 PlatformCheck {
-                    name: "krun.dll",
-                    keyword: "krun.dll",
-                    ok_message: "found",
+                    name: "HCS Service",
+                    keyword: "vmcompute",
+                    ok_message: "running (vmcompute)",
                 },
                 PlatformCheck {
-                    name: "libkrunfw.dll",
-                    keyword: "libkrunfw.dll",
-                    ok_message: "found",
+                    name: "Hyper-V",
+                    keyword: "Hyper-V hypervisor not detected",
+                    ok_message: "enabled",
+                },
+                PlatformCheck {
+                    name: "Disk",
+                    keyword: "No SSD detected",
+                    ok_message: "SSD detected",
+                },
+                PlatformCheck {
+                    name: "Memory",
+                    keyword: "Low available memory",
+                    ok_message: "sufficient RAM available",
                 },
             ]
         }
