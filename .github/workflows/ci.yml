@@ -21,10 +21,10 @@ jobs:
         uses: actions/checkout@v4
 
       # ── Clone runtime repo (path dependency: ../runtime) ─────
-      # Uses feature/windows-libkrun until Windows support is merged to main
+      # Uses feature/libkrun-win-merge until Windows support is merged to main
       - name: Checkout runtime
         run: |
-          git clone --depth 1 --branch feature/windows-libkrun \
+          git clone --depth 1 --branch feature/libkrun-win-merge \
             "https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/runtime.git" \
             ../runtime
 
@@ -101,11 +101,11 @@ jobs:
         uses: actions/checkout@v4
 
       # ── Clone runtime repo (path dependency: ../runtime) ─────
-      # Uses feature/windows-libkrun until Windows support is merged to main
+      # Uses feature/libkrun-win-merge until Windows support is merged to main
       - name: Checkout runtime
         shell: bash
         run: |
-          git clone --depth 1 --branch feature/windows-libkrun \
+          git clone --depth 1 --branch feature/libkrun-win-merge \
             "https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/runtime.git" \
             ../runtime
 
