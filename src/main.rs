@@ -264,19 +264,58 @@ mod cli {
     pub async fn run() -> anyhow::Result<()> {
         let cli = Cli::parse();
 
-        if cli.verbose && cli.command.is_some() {
-            tracing_subscriber::fmt()
-                .with_env_filter("nanosandbox=debug")
-                .init();
-        } else if cli.command.is_some() {
-            // Install a silent logger so that the runtime's
-            // env_logger::try_init_from_env() (inside Sandbox::create / libkrun)
-            // finds one already present and skips installing its own default
-            // logger that would print INFO messages to stderr.
-            let _ = env_logger::Builder::from_env(
-                env_logger::Env::default().default_filter_or("off"),
-            )
-            .try_init();
+        // Initialize logging:
+        // - File: WARN+ by default, override with NANOSB_LOG=debug|info|trace
+        // - Stderr: only when --verbose (always debug level)
+        // The _log_guard must be held alive for the duration of the program.
+        let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+
+        if cli.command.is_some() {
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            use tracing_subscriber::{EnvFilter, Layer, fmt};
+
+            if let Some((file_writer, guard)) = nanosandbox::logging::file_layer() {
+                _log_guard = Some(guard);
+
+                // File log level: WARN by default, NANOSB_LOG=debug for verbose
+                let file_level = nanosandbox::logging::file_log_level();
+                let file_filter = format!("nanosandbox={}", file_level);
+                let file_layer = fmt::layer()
+                    .with_writer(file_writer)
+                    .with_ansi(false)
+                    .with_filter(EnvFilter::new(&file_filter));
+
+                if cli.verbose {
+                    let stderr_layer = fmt::layer()
+                        .with_writer(std::io::stderr)
+                        .with_filter(EnvFilter::new("nanosandbox=debug"));
+
+                    tracing_subscriber::registry()
+                        .with(file_layer)
+                        .with(stderr_layer)
+                        .init();
+                } else {
+                    tracing_subscriber::registry()
+                        .with(file_layer)
+                        .init();
+                }
+            } else {
+                _log_guard = None;
+                // Fallback: same as before
+                if cli.verbose {
+                    tracing_subscriber::fmt()
+                        .with_env_filter("nanosandbox=debug")
+                        .init();
+                } else {
+                    let _ = env_logger::Builder::from_env(
+                        env_logger::Env::default().default_filter_or("off"),
+                    )
+                    .try_init();
+                }
+            }
+        } else {
+            _log_guard = None;
         }
 
         match cli.command {
