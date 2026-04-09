@@ -8,7 +8,9 @@ mod cli {
     use indicatif::{ProgressBar, ProgressStyle};
     use nanosandbox::{ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
     use std::io::Write;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Mutex;
     use tabled::{Table, Tabled};
 
     /// Output format for commands
@@ -611,19 +613,38 @@ mod cli {
         sandbox.start().await?;
         pb.finish_and_clear();
 
+        // Wrap sandbox in Arc<Mutex<Option>> so the Ctrl+C handler can
+        // take ownership and destroy it if the process is interrupted.
+        let shared: Arc<Mutex<Option<Sandbox>>> = Arc::new(Mutex::new(Some(sandbox)));
+
+        // Register Ctrl+C handler for VM cleanup on interruption.
+        let signal_ref = shared.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\nInterrupted. Cleaning up sandbox...");
+                if let Some(sb) = signal_ref.lock().await.take() {
+                    let _ = sb.destroy().await;
+                }
+                eprintln!("Sandbox destroyed.");
+                std::process::exit(130);
+            }
+        });
+
         if command.is_empty() {
             // No command, just print sandbox info
+            let guard = shared.lock().await;
+            let sb = guard.as_ref().expect("sandbox exists");
             match format {
                 OutputFormat::Text => {
-                    println!("{} Sandbox {} started", "✓".green(), sandbox.id().bold());
+                    println!("{} Sandbox {} started", "✓".green(), sb.id().bold());
                     println!(
                         "Run commands with: nanosb exec {} <command>",
-                        &sandbox.id()[..12]
+                        &sb.id()[..12]
                     );
                 }
                 OutputFormat::Json => {
                     let json = serde_json::json!({
-                        "id": sandbox.id(),
+                        "id": sb.id(),
                         "status": "running",
                     });
                     println!("{}", serde_json::to_string_pretty(&json)?);
@@ -643,7 +664,11 @@ mod cli {
 
             if use_buffered {
                 // Buffered execution - output after completion
-                let result = sandbox.exec(cmd, &args).await?;
+                let result = {
+                    let mut guard = shared.lock().await;
+                    let sb = guard.as_mut().expect("sandbox exists");
+                    sb.exec(cmd, &args).await?
+                };
 
                 match format {
                     OutputFormat::Text => {
@@ -662,7 +687,9 @@ mod cli {
                 }
 
                 // Clean up sandbox
-                sandbox.destroy().await?;
+                if let Some(sb) = shared.lock().await.take() {
+                    sb.destroy().await?;
+                }
 
                 if result.exit_code != 0 {
                     std::process::exit(result.exit_code);
@@ -673,8 +700,10 @@ mod cli {
                 // streaming (e.g. LLM token deltas) can fill the terminal
                 // buffer, causing EAGAIN (os error 35). println! panics on
                 // write errors, so we retry with backoff instead.
-                let exit_code = sandbox
-                    .exec_stream(cmd, &args, |chunk| {
+                let exit_code = {
+                    let mut guard = shared.lock().await;
+                    let sb = guard.as_mut().expect("sandbox exists");
+                    sb.exec_stream(cmd, &args, |chunk| {
                         match chunk.stream {
                             Stream::Stdout => {
                                 let data = format!("{}\n", chunk.data);
@@ -690,10 +719,13 @@ mod cli {
                             }
                         }
                     })
-                    .await?;
+                    .await?
+                };
 
                 // Clean up sandbox
-                sandbox.destroy().await?;
+                if let Some(sb) = shared.lock().await.take() {
+                    sb.destroy().await?;
+                }
 
                 if exit_code != 0 {
                     std::process::exit(exit_code);
