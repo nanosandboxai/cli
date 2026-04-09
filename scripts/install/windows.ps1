@@ -64,25 +64,24 @@ if (-not $hyperv -or $hyperv.State -ne "Enabled") {
 }
 
 # --- Resolve version ---
-# Use a separate variable to avoid "Cannot overwrite variable" error when piped via iex
+# Use a separate variable to avoid "Cannot overwrite variable" error when piped via iex.
+# When piped via iex, $Version may be empty string instead of "latest", so handle both.
 $releaseRepo = "nanosandboxai/cli"
 $resolvedVersion = $Version
-if ($resolvedVersion -eq "latest") {
-    if ($PreRelease) {
-        Write-Info "Resolving latest version (including pre-releases)..."
-    } else {
-        Write-Info "Resolving latest version..."
-    }
+if (-not $resolvedVersion -or $resolvedVersion -eq "latest") {
+    Write-Info "Resolving latest version..."
     try {
-        if ($PreRelease) {
-            $releases = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases?per_page=1"
-            $resolvedVersion = $releases[0].tag_name
-        } else {
+        # Use the all-releases API to pick up pre-releases too
+        $releases = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases?per_page=1"
+        $resolvedVersion = $releases[0].tag_name
+    } catch {
+        try {
+            # Fallback: stable-only endpoint
             $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
             $resolvedVersion = $releaseInfo.tag_name
+        } catch {
+            Write-Err "Failed to resolve latest version: $_"
         }
-    } catch {
-        Write-Err "Failed to resolve latest version: $_"
     }
 }
 Write-Info "Installing nanosb $resolvedVersion"
@@ -108,24 +107,19 @@ try {
 
 # --- Install runtime dependencies ---
 Write-Info "Installing runtime dependencies..."
-if ($PreRelease) {
-    $depsRepo = "nanosandboxai/install-deps"
-    try {
-        $depsReleases = Invoke-RestMethod "https://api.github.com/repos/$depsRepo/releases?per_page=1"
-        $depsTag = $depsReleases[0].tag_name
-    } catch {
-        Write-Warn "Failed to resolve install-deps pre-release, falling back to latest"
-        $depsTag = "latest"
-    }
-    if ($depsTag -ne "latest") {
-        $depsUrl = "https://github.com/$depsRepo/releases/download/$depsTag/install.ps1"
-    } else {
-        $depsUrl = "https://github.com/$depsRepo/releases/latest/download/install.ps1"
-    }
-} else {
-    $depsUrl = "https://github.com/nanosandboxai/install-deps/releases/latest/download/install.ps1"
+$depsRepo = "nanosandboxai/install-deps"
+# Always resolve from the releases API (picks up pre-releases too).
+# The /releases/latest endpoint only returns stable releases which may not exist yet.
+try {
+    $depsReleases = Invoke-RestMethod "https://api.github.com/repos/$depsRepo/releases?per_page=1"
+    $depsTag = $depsReleases[0].tag_name
+    $depsUrl = "https://github.com/$depsRepo/releases/download/$depsTag/install.ps1"
+} catch {
+    # Fallback to /latest (stable only)
+    $depsUrl = "https://github.com/$depsRepo/releases/latest/download/install.ps1"
 }
 try {
+    Write-Info "Fetching install-deps ($depsTag)..."
     $depsScript = Invoke-RestMethod $depsUrl
     Invoke-Expression $depsScript
     Write-Ok "Runtime dependencies installed"
