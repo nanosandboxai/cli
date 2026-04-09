@@ -431,6 +431,7 @@ mod cli {
 
     /// Pull an image from a registry
     async fn cmd_pull(image: &str, format: OutputFormat, verbose: bool) -> anyhow::Result<()> {
+        let image = nanosandbox::config::normalize_image(image);
         let pb = create_pull_progress();
         pb.set_message(format!("Pulling {}", image));
 
@@ -440,7 +441,7 @@ mod cli {
             pb.set_message("Connecting to registry...".to_string());
         }
 
-        let pulled = manager.pull(image).await?;
+        let pulled = manager.pull(&image).await?;
         pb.finish_and_clear();
 
         match format {
@@ -587,9 +588,10 @@ mod cli {
             }
         }
 
+        let image = nanosandbox::config::normalize_image(image);
         let mut builder = SandboxConfig::builder()
             .name(&sandbox_name)
-            .image(image)
+            .image(&image)
             .cpus(cpus)
             .memory_mb(memory)
             .timeout_secs(timeout);
@@ -1062,19 +1064,19 @@ mod cli {
         {
             vec![
                 PlatformCheck {
-                    name: "Windows Hypervisor Platform",
-                    keyword: "WHPX feature",
-                    ok_message: "enabled",
-                },
-                PlatformCheck {
                     name: "HCS Service",
                     keyword: "vmcompute",
                     ok_message: "running (vmcompute)",
                 },
                 PlatformCheck {
-                    name: "Hyper-V",
-                    keyword: "Hyper-V hypervisor not detected",
-                    ok_message: "enabled",
+                    name: "WSL Kernel",
+                    keyword: "WSL kernel",
+                    ok_message: "found",
+                },
+                PlatformCheck {
+                    name: "libkrunfw.dll",
+                    keyword: "libkrunfw.dll not found",
+                    ok_message: "found",
                 },
                 PlatformCheck {
                     name: "Disk",
