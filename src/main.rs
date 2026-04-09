@@ -1071,6 +1071,8 @@ mod cli {
 
         if result.is_ok() {
             println!("{}", "Ready to run sandboxes.".green());
+            let logs_dir = nanosandbox::logging::logs_dir();
+            println!("  Logs: {}", logs_dir.display());
         } else {
             println!("{}", "Cannot run sandboxes. Fix the errors above.".red());
         }
