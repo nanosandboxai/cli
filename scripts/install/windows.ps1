@@ -15,18 +15,25 @@
 .PARAMETER InstallDir
     Install directory (default: $env:LOCALAPPDATA\nanosandbox).
 
+.PARAMETER PreRelease
+    Include pre-release versions when resolving "latest".
+
 .EXAMPLE
     # Install latest version
     irm https://github.com/nanosandboxai/cli/releases/latest/download/windows.ps1 | iex
 
     # Install specific version
     .\windows.ps1 -Version v0.2.0
+
+    # Install latest pre-release
+    .\windows.ps1 -PreRelease
 #>
 
 [CmdletBinding()]
 param(
     [string]$Version = "latest",
-    [string]$InstallDir = "$env:LOCALAPPDATA\nanosandbox"
+    [string]$InstallDir = "$env:LOCALAPPDATA\nanosandbox",
+    [switch]$PreRelease
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,10 +66,19 @@ if (-not $hyperv -or $hyperv.State -ne "Enabled") {
 # --- Resolve version ---
 $releaseRepo = "nanosandboxai/cli"
 if ($Version -eq "latest") {
-    Write-Info "Resolving latest version..."
+    if ($PreRelease) {
+        Write-Info "Resolving latest version (including pre-releases)..."
+    } else {
+        Write-Info "Resolving latest version..."
+    }
     try {
-        $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
-        $Version = $releaseInfo.tag_name
+        if ($PreRelease) {
+            $releases = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases?per_page=1"
+            $Version = $releases[0].tag_name
+        } else {
+            $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
+            $Version = $releaseInfo.tag_name
+        }
     } catch {
         Write-Err "Failed to resolve latest version: $_"
     }
@@ -90,7 +106,23 @@ try {
 
 # --- Install runtime dependencies ---
 Write-Info "Installing runtime dependencies..."
-$depsUrl = "https://github.com/nanosandboxai/install-deps/releases/latest/download/install.ps1"
+if ($PreRelease) {
+    $depsRepo = "nanosandboxai/install-deps"
+    try {
+        $depsReleases = Invoke-RestMethod "https://api.github.com/repos/$depsRepo/releases?per_page=1"
+        $depsTag = $depsReleases[0].tag_name
+    } catch {
+        Write-Warn "Failed to resolve install-deps pre-release, falling back to latest"
+        $depsTag = "latest"
+    }
+    if ($depsTag -ne "latest") {
+        $depsUrl = "https://github.com/$depsRepo/releases/download/$depsTag/install.ps1"
+    } else {
+        $depsUrl = "https://github.com/$depsRepo/releases/latest/download/install.ps1"
+    }
+} else {
+    $depsUrl = "https://github.com/nanosandboxai/install-deps/releases/latest/download/install.ps1"
+}
 try {
     $depsScript = Invoke-RestMethod $depsUrl
     Invoke-Expression $depsScript

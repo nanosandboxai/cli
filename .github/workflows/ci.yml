@@ -11,21 +11,22 @@ env:
 
 jobs:
   # ==========================================================================
-  # Build + Test
+  # Build + Test (macOS)
   # ==========================================================================
   build:
     name: Build CLI (macOS arm64)
     runs-on: macos-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Auth for private runtime crate ────────────────────────
-      - name: Configure git auth for private runtime
+      # ── Clone runtime repo (path dependency: ../runtime) ─────
+      # Uses feature/new-runtime until Windows support is merged to main
+      - name: Checkout runtime
         run: |
-          git config --global url."https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/runtime".insteadOf "https://github.com/nanosandboxai/runtime"
+          git clone --depth 1 --branch feature/new-runtime \
+            "https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/runtime.git" \
+            ../runtime
 
       # ── Toolchain ─────────────────────────────────────────────
       - name: Install Rust toolchain
@@ -58,10 +59,6 @@ jobs:
           echo "Setting Cargo.toml version to ${TAG_VERSION}"
           sed -i '' "s/^version = \".*\"/version = \"${TAG_VERSION}\"/" Cargo.toml
           grep '^version' Cargo.toml
-      # ── Update runtime to latest main ────────────────────────
-      - name: Update runtime dependency
-        run: cargo update
-
       # ── Build ─────────────────────────────────────────────────
       - name: Build release binary
         run: cargo build --release --target aarch64-apple-darwin
@@ -86,16 +83,111 @@ jobs:
           file target/aarch64-apple-darwin/release/nanosb
           target/aarch64-apple-darwin/release/nanosb --version
 
-      # ── Release ───────────────────────────────────────────────
-      - name: Prepare release assets
-        if: startsWith(github.ref, 'refs/tags/v')
+      # ── Upload artifacts ──────────────────────────────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanosb-macos-arm64
+          path: target/aarch64-apple-darwin/release/nanosb
+
+  # ==========================================================================
+  # Build (Windows)
+  # ==========================================================================
+  build-windows:
+    name: Build CLI (Windows amd64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Clone runtime repo (path dependency: ../runtime) ─────
+      # Uses feature/new-runtime until Windows support is merged to main
+      - name: Checkout runtime
+        shell: bash
         run: |
-          cp target/aarch64-apple-darwin/release/nanosb nanosb
+          git clone --depth 1 --branch feature/new-runtime \
+            "https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/runtime.git" \
+            ../runtime
+
+      # ── Toolchain ─────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ── Inject version from tag ─────────────────────────────
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "Setting Cargo.toml version to ${TAG_VERSION}"
+          sed -i "s/^version = \".*\"/version = \"${TAG_VERSION}\"/" Cargo.toml
+          grep '^version' Cargo.toml
+
+      # ── Build ─────────────────────────────────────────────────
+      - name: Build release binary
+        run: cargo build --release
+
+      # Tests are skipped — they require a Hyper-V hypervisor
+
+      - name: Verify binary
+        run: |
+          Get-Item target\release\nanosb.exe
+          target\release\nanosb.exe --version
+
+      # ── Upload artifacts ──────────────────────────────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanosb-windows-amd64
+          path: target/release/nanosb.exe
+
+  # ==========================================================================
+  # Release
+  # ==========================================================================
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nanosb-macos-arm64
+          path: artifacts/macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nanosb-windows-amd64
+          path: artifacts/windows
+
+      - name: Prepare release assets
+        run: |
+          cp artifacts/macos/nanosb nanosb
+          chmod +x nanosb
+          cp artifacts/windows/nanosb.exe nanosb-windows-amd64.exe
           chmod +x scripts/install/*.sh
-          cp scripts/install/install.sh install.sh
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -105,18 +197,11 @@ jobs:
             --generate-notes \
             --latest \
             nanosb \
-            install.sh \
+            nanosb-windows-amd64.exe \
+            scripts/install/install.sh \
             scripts/install/macos.sh \
             scripts/install/linux.sh \
             scripts/install/gvproxy.sh \
-            scripts/install/uninstall.sh
-
-      # ── Artifacts (for PRs / non-release builds) ──────────────
-      - name: Upload build artifacts
-        if: "!startsWith(github.ref, 'refs/tags/v')"
-        uses: actions/upload-artifact@v4
-        with:
-          name: nanosb-macos-arm64
-          path: |
-            target/aarch64-apple-darwin/release/nanosb
-            scripts/install/
+            scripts/install/uninstall.sh \
+            scripts/install/windows.ps1 \
+            scripts/install/uninstall-windows.ps1
