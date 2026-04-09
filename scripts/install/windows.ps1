@@ -64,8 +64,10 @@ if (-not $hyperv -or $hyperv.State -ne "Enabled") {
 }
 
 # --- Resolve version ---
+# Use a separate variable to avoid "Cannot overwrite variable" error when piped via iex
 $releaseRepo = "nanosandboxai/cli"
-if ($Version -eq "latest") {
+$resolvedVersion = $Version
+if ($resolvedVersion -eq "latest") {
     if ($PreRelease) {
         Write-Info "Resolving latest version (including pre-releases)..."
     } else {
@@ -74,16 +76,16 @@ if ($Version -eq "latest") {
     try {
         if ($PreRelease) {
             $releases = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases?per_page=1"
-            $Version = $releases[0].tag_name
+            $resolvedVersion = $releases[0].tag_name
         } else {
             $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
-            $Version = $releaseInfo.tag_name
+            $resolvedVersion = $releaseInfo.tag_name
         }
     } catch {
         Write-Err "Failed to resolve latest version: $_"
     }
 }
-Write-Info "Installing nanosb $Version"
+Write-Info "Installing nanosb $resolvedVersion"
 
 # --- Create install directory ---
 if (-not (Test-Path $InstallDir)) {
@@ -93,7 +95,7 @@ Write-Info "Install directory: $InstallDir"
 
 # --- Download nanosb.exe ---
 $binaryName = "nanosb-windows-amd64.exe"
-$downloadUrl = "https://github.com/$releaseRepo/releases/download/$Version/$binaryName"
+$downloadUrl = "https://github.com/$releaseRepo/releases/download/$resolvedVersion/$binaryName"
 $destPath = Join-Path $InstallDir "nanosb.exe"
 
 Write-Info "Downloading $binaryName..."
@@ -144,7 +146,7 @@ if ($userPath -notlike "*$InstallDir*") {
 
 # --- Verify ---
 Write-Host ""
-Write-Ok "nanosb $Version installed to $destPath"
+Write-Ok "nanosb $resolvedVersion installed to $destPath"
 Write-Host ""
 Write-Host "  Get started:" -ForegroundColor White
 Write-Host "    nanosb doctor    # Check prerequisites" -ForegroundColor DarkGray
