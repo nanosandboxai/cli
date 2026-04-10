@@ -391,7 +391,10 @@ mod cli {
                 let cli_permissions = cli.permissions.as_deref()
                     .map(|s| s.parse::<nanosandbox::Permissions>())
                     .transpose()
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    .map_err(|e| {
+                        error!("Failed to parse --permissions flag: {}", e);
+                        anyhow::anyhow!("{}", e)
+                    })?;
 
                 // Apply CLI flag overrides (merge step 4).
                 nanosandbox::config::file::apply_cli_overrides(
@@ -563,8 +566,10 @@ mod cli {
 
         // Parse --env-file(s) first (later files override earlier ones)
         for path in env_files {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("Failed to read env file '{}': {}", path, e))?;
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                error!("Failed to read env file '{}': {}", path, e);
+                anyhow::anyhow!("Failed to read env file '{}': {}", path, e)
+            })?;
             for line in content.lines() {
                 let line = line.trim();
                 // Skip empty lines and comments
