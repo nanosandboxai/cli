@@ -803,10 +803,16 @@ mod cli {
             .into_iter()
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
-        let sandbox_info =
-            sandbox_info.ok_or_else(|| anyhow::anyhow!("Sandbox not found: {}", sandbox_id))?;
+        let sandbox_info = sandbox_info.ok_or_else(|| {
+            error!("cmd_exec(): sandbox not found: {}", sandbox_id);
+            anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+        })?;
 
         if sandbox_info.status != SandboxStatus::Running {
+            error!(
+                "cmd_exec(): sandbox '{}' is not running (status: {:?})",
+                sandbox_id, sandbox_info.status
+            );
             anyhow::bail!(
                 "Sandbox {} is not running (status: {:?})",
                 sandbox_id,
