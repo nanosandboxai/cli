@@ -351,8 +351,10 @@ mod cli {
                 let mut sandbox_configs = if config_paths.is_empty() {
                     Vec::new()
                 } else {
-                    nanosandbox::load_sandbox_files(&config_paths)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                    nanosandbox::load_sandbox_files(&config_paths).map_err(|e| {
+                        error!("Failed to load sandbox config files: {}", e);
+                        anyhow::anyhow!("{}", e)
+                    })?
                 };
 
                 // Auto-load .env from project directory (lowest priority).
@@ -368,7 +370,11 @@ mod cli {
                         let project_env = nanosandbox::config::file::load_env_file(
                             &env_path.to_string_lossy(),
                             dir,
-                        ).map_err(|e| anyhow::anyhow!("{}", e))?;
+                        )
+                        .map_err(|e| {
+                            error!("Failed to load env file {:?}: {}", env_path, e);
+                            anyhow::anyhow!("{}", e)
+                        })?;
                         for (_, config) in sandbox_configs.iter_mut() {
                             for (k, v) in &project_env {
                                 // Only set if not already defined by sandbox.yml
