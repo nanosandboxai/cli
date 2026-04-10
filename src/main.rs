@@ -12,6 +12,7 @@ mod cli {
     use std::time::Duration;
     use tokio::sync::Mutex;
     use tabled::{Table, Tabled};
+    use tracing::{error, warn};
 
     /// Output format for commands
     #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -279,8 +280,9 @@ mod cli {
                 _log_guard = Some(guard);
 
                 // File log level: WARN by default, NANOSB_LOG=debug for verbose
+                // Covers both runtime (nanosandbox) and CLI (nanosb_cli) crates
                 let file_level = nanosandbox::logging::file_log_level();
-                let file_filter = format!("nanosandbox={}", file_level);
+                let file_filter = format!("nanosandbox={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
@@ -289,7 +291,7 @@ mod cli {
                 if cli.verbose {
                     let stderr_layer = fmt::layer()
                         .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new("nanosandbox=debug"));
+                        .with_filter(EnvFilter::new("nanosandbox=debug,nanosb_cli=debug,nanosb=debug"));
 
                     tracing_subscriber::registry()
                         .with(file_layer)
@@ -305,7 +307,7 @@ mod cli {
                 // Fallback: same as before
                 if cli.verbose {
                     tracing_subscriber::fmt()
-                        .with_env_filter("nanosandbox=debug")
+                        .with_env_filter("nanosandbox=debug,nanosb_cli=debug,nanosb=debug")
                         .init();
                 } else {
                     let _ = env_logger::Builder::from_env(
@@ -402,6 +404,7 @@ mod cli {
                         .filter(|(key, config)| key == name || config.name == *name)
                         .collect();
                     if filtered.is_empty() {
+                        error!("Sandbox '{}' not found in config files", name);
                         anyhow::bail!(
                             "Sandbox '{}' not found in config files",
                             name
@@ -577,6 +580,7 @@ mod cli {
                 if let Ok(value) = std::env::var(entry) {
                     vars.push((entry.to_string(), value));
                 } else {
+                    error!("Environment variable '{}' not found", entry);
                     anyhow::bail!(
                         "Environment variable '{}' not found. Use KEY=VALUE format.",
                         entry
@@ -660,6 +664,7 @@ mod cli {
         let signal_ref = shared.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
+                warn!("Ctrl+C received, cleaning up sandbox");
                 eprintln!("\nInterrupted. Cleaning up sandbox...");
                 if let Some(sb) = signal_ref.lock().await.take() {
                     let _ = sb.destroy().await;
@@ -784,6 +789,7 @@ mod cli {
         verbose: bool,
     ) -> anyhow::Result<()> {
         if command.is_empty() {
+            error!("No command specified for exec");
             anyhow::bail!("No command specified. Usage: nanosb exec <sandbox> <command>");
         }
 
@@ -912,7 +918,10 @@ mod cli {
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
         let sandbox_info =
-            sandbox_info.ok_or_else(|| anyhow::anyhow!("Sandbox not found: {}", sandbox_id))?;
+            sandbox_info.ok_or_else(|| {
+                error!("Sandbox not found for stop: {}", sandbox_id);
+                anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+            })?;
 
         if verbose {
             eprintln!(
@@ -943,9 +952,13 @@ mod cli {
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
         let sandbox_info =
-            sandbox_info.ok_or_else(|| anyhow::anyhow!("Sandbox not found: {}", sandbox_id))?;
+            sandbox_info.ok_or_else(|| {
+                error!("Sandbox not found: {}", sandbox_id);
+                anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+            })?;
 
         if sandbox_info.status == SandboxStatus::Running && !force {
+            warn!("Attempted to remove running sandbox {}", sandbox_id);
             anyhow::bail!(
                 "Sandbox {} is running. Use -f to force removal.",
                 sandbox_id
@@ -1376,6 +1389,7 @@ mod cli {
             #[cfg(target_os = "windows")]
             eprintln!("\nRun 'powershell -ExecutionPolicy Bypass -File .\\scripts\\install\\windows.ps1' to install dependencies.\nOr use: irm https://github.com/nanosandboxai/install-deps/releases/latest/download/install.ps1 | iex");
 
+            error!("Runtime prerequisites not met");
             anyhow::bail!("Runtime prerequisites not met. Run 'nanosb doctor' for details.");
         }
         Ok(())
