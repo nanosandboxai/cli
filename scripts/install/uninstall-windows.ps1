@@ -8,12 +8,12 @@
     Does NOT remove runtime dependencies (use install-deps uninstall.ps1 for that).
 
 .PARAMETER InstallDir
-    Install directory (default: $env:LOCALAPPDATA\nanosandbox).
+    Install directory (default: $env:USERPROFILE\.nanosandbox).
 #>
 
 [CmdletBinding()]
 param(
-    [string]$InstallDir = "$env:LOCALAPPDATA\nanosandbox"
+    [string]$InstallDir = "$env:USERPROFILE\.nanosandbox"
 )
 
 $ErrorActionPreference = "Stop"

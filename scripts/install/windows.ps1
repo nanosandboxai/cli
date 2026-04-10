@@ -27,7 +27,7 @@ $ErrorActionPreference = "Stop"
 function Install-NanosandboxCLI {
     param(
         [string]$Version = "latest",
-        [string]$InstallDir = "$env:LOCALAPPDATA\nanosandbox",
+        [string]$InstallDir = "$env:USERPROFILE\.nanosandbox",
         [switch]$PreRelease
     )
 
