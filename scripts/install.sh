@@ -23,7 +23,7 @@ set -eo pipefail
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 NANOSB_VERSION="${NANOSB_VERSION:-latest}"
-DEPS_VERSION="${DEPS_VERSION:-$NANOSB_VERSION}"
+DEPS_VERSION="${DEPS_VERSION:-latest}"
 RELEASE_REPO="nanosandboxai/cli"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
