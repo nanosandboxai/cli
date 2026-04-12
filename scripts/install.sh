@@ -23,6 +23,7 @@ set -eo pipefail
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 NANOSB_VERSION="${NANOSB_VERSION:-latest}"
+NANOSB_VERSION="${NANOSB_VERSION#v}"   # strip leading "v" — tags use v-prefix internally
 DEPS_VERSION="${DEPS_VERSION:-latest}"
 RELEASE_REPO="nanosandboxai/cli"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
