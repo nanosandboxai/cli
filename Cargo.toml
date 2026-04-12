@@ -13,9 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Sandbox SDK — wraps nanosandbox runtime with agent-aware features.
-# TODO: Switch to git dep after sandbox repo changes are merged to main
-# sandbox = { git = "https://github.com/nanosandboxai/sandbox.git", branch = "main" }
-sandbox = { path = "../sandbox/crates/sandbox" }
+sandbox = { git = "https://github.com/nanosandboxai/sandbox.git", branch = "feat/init-sandbox-sdk" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
