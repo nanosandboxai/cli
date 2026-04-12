@@ -6,7 +6,7 @@ mod cli {
     use clap::{Parser, Subcommand, ValueEnum};
     use colored::Colorize;
     use indicatif::{ProgressBar, ProgressStyle};
-    use nanosandbox::{ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
+    use sandbox::{ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
     use std::io::Write;
     use std::time::Duration;
     use tabled::{Table, Tabled};
@@ -288,7 +288,7 @@ mod cli {
 
                 // Auto-detect sandbox.yml in CWD.
                 let cwd = std::env::current_dir()?;
-                if nanosandbox::find_sandbox_file(&cwd).is_some()
+                if sandbox::find_sandbox_file(&cwd).is_some()
                     && !config_paths.contains(&cwd)
                 {
                     config_paths.insert(0, cwd.clone());
@@ -297,7 +297,7 @@ mod cli {
                 // Also auto-detect sandbox.yml in --project path.
                 if let Some(ref project) = cli.project {
                     let project_dir = std::path::PathBuf::from(project);
-                    if nanosandbox::find_sandbox_file(&project_dir).is_some()
+                    if sandbox::find_sandbox_file(&project_dir).is_some()
                         && !config_paths.contains(&project_dir)
                     {
                         config_paths.push(project_dir);
@@ -308,7 +308,7 @@ mod cli {
                 let mut sandbox_configs = if config_paths.is_empty() {
                     Vec::new()
                 } else {
-                    nanosandbox::load_sandbox_files(&config_paths)
+                    sandbox::load_sandbox_files(&config_paths)
                         .map_err(|e| anyhow::anyhow!("{}", e))?
                 };
 
@@ -322,14 +322,14 @@ mod cli {
                 if let Some(ref dir) = auto_env_dir {
                     let env_path = dir.join(".env");
                     if env_path.exists() {
-                        let project_env = nanosandbox::config::file::load_env_file(
+                        let project_env = sandbox::config::file::load_env_file(
                             &env_path.to_string_lossy(),
                             dir,
                         ).map_err(|e| anyhow::anyhow!("{}", e))?;
                         for (_, config) in sandbox_configs.iter_mut() {
                             for (k, v) in &project_env {
                                 // Only set if not already defined by sandbox.yml
-                                config.env.entry(k.clone()).or_insert_with(|| v.clone());
+                                config.runtime.env.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                         }
                     }
@@ -340,12 +340,12 @@ mod cli {
 
                 // Parse --permissions flag.
                 let cli_permissions = cli.permissions.as_deref()
-                    .map(|s| s.parse::<nanosandbox::Permissions>())
+                    .map(|s| s.parse::<sandbox::Permissions>())
                     .transpose()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                 // Apply CLI flag overrides (merge step 4).
-                nanosandbox::config::file::apply_cli_overrides(
+                sandbox::apply_cli_overrides(
                     &mut sandbox_configs,
                     cli.cpus,
                     cli.memory,
@@ -358,7 +358,7 @@ mod cli {
                 let sandbox_configs = if let Some(ref name) = cli.sandbox {
                     let filtered: Vec<_> = sandbox_configs
                         .into_iter()
-                        .filter(|(key, config)| key == name || config.name == *name)
+                        .filter(|(key, config)| key == name || config.runtime.name == *name)
                         .collect();
                     if filtered.is_empty() {
                         anyhow::bail!(
@@ -905,7 +905,7 @@ mod cli {
 
     /// Check runtime prerequisites and display status
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
-        use nanosandbox::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::nanosandbox::runtime::validate_runtime_prerequisites_detailed;
 
         let result = validate_runtime_prerequisites_detailed().await;
 
@@ -927,7 +927,7 @@ mod cli {
     }
 
     /// Print doctor results as colored checklist
-    fn print_doctor_results(result: &nanosandbox::runtime::ValidationResult) {
+    fn print_doctor_results(result: &sandbox::nanosandbox::runtime::ValidationResult) {
         println!();
         println!("Checking runtime prerequisites...");
         println!();
@@ -1083,7 +1083,7 @@ mod cli {
     }
 
     fn doctor_results_to_json(
-        result: &nanosandbox::runtime::ValidationResult,
+        result: &sandbox::nanosandbox::runtime::ValidationResult,
     ) -> serde_json::Value {
         serde_json::json!({
             "ok": result.is_ok(),
@@ -1167,7 +1167,7 @@ mod cli {
         };
 
         let canonical_path = project_path.canonicalize().unwrap_or_else(|_| project_path.clone());
-        let clones = nanosandbox::project::clones_dir(&canonical_path);
+        let clones = sandbox::nanosandbox::project::clones_dir(&canonical_path);
         if !clones.exists() {
             println!("No nanosb clones found for {}", project_path.display());
             return Ok(());
@@ -1271,7 +1271,7 @@ mod cli {
 
     /// Run preflight validation, showing doctor output on failure.
     async fn preflight_check() -> anyhow::Result<()> {
-        use nanosandbox::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::nanosandbox::runtime::validate_runtime_prerequisites_detailed;
 
         let result = validate_runtime_prerequisites_detailed().await;
         if !result.is_ok() {
@@ -1321,7 +1321,7 @@ fn main() -> anyhow::Result<()> {
     // single-threaded process where hv_vm_create() works correctly.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if std::env::args().nth(1).as_deref() == Some("internal-boot-vm") {
-        nanosandbox::runtime::handle_boot_vm_subprocess();
+        sandbox::nanosandbox::runtime::handle_boot_vm_subprocess();
         // ^ never returns
     }
 
