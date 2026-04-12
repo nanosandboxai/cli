@@ -13,7 +13,7 @@
 #
 # Environment variables:
 #   NANOSB_VERSION   - CLI version to install (default: "latest")
-#   DEPS_VERSION     - Dependencies version (default: same as NANOSB_VERSION)
+#   DEPS_VERSION     - Dependencies version (default: "latest")
 #   INSTALL_DIR      - Binary install directory (default: ~/.local/bin)
 #   NANOSB_BINARY    - Path to a local binary to install (skips download)
 #
