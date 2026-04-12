@@ -25,7 +25,7 @@ jobs:
       # ── Auth for private crates (sandbox → runtime) ──────────
       - name: Configure git auth for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/sandbox".insteadOf "https://github.com/nanosandboxai/sandbox"
+          git config --global url."https://x-access-token:${{ secrets.SANDBOX_PAT }}@github.com/nanosandboxai/sandbox".insteadOf "https://github.com/nanosandboxai/sandbox"
           git config --global url."https://x-access-token:${{ secrets.RUNTIME_PAT }}@github.com/nanosandboxai/runtime".insteadOf "https://github.com/nanosandboxai/runtime"
 
       # ── Toolchain ─────────────────────────────────────────────
