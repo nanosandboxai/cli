@@ -13,7 +13,7 @@
 #
 # Environment variables:
 #   NANOSB_VERSION   - CLI version to install (default: "latest")
-#   DEPS_VERSION     - Dependencies version (default: same as NANOSB_VERSION)
+#   DEPS_VERSION     - Dependencies version (default: "latest")
 #   INSTALL_DIR      - Binary install directory (default: ~/.local/bin)
 #   NANOSB_BINARY    - Path to a local binary to install (skips download)
 #
@@ -23,7 +23,8 @@ set -eo pipefail
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 NANOSB_VERSION="${NANOSB_VERSION:-latest}"
-DEPS_VERSION="${DEPS_VERSION:-$NANOSB_VERSION}"
+NANOSB_VERSION="${NANOSB_VERSION#v}"   # strip leading "v" — tags use v-prefix internally
+DEPS_VERSION="${DEPS_VERSION:-latest}"
 RELEASE_REPO="nanosandboxai/cli"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 

@@ -167,7 +167,7 @@ pub async fn connect_ssh(
     agent_name: &str,
     env: &HashMap<String, String>,
     workdir: Option<&str>,
-    permissions: nanosandbox::Permissions,
+    permissions: sandbox::Permissions,
     auto_mode: bool,
     prompt: Option<&str>,
     is_resumed: bool,
@@ -212,9 +212,9 @@ pub async fn connect_ssh(
     // Goose permissions via GOOSE_MODE env var.
     if agent_name == "goose" {
         let goose_mode = match effective_perms {
-            nanosandbox::Permissions::AllowAll => "auto",
-            nanosandbox::Permissions::AcceptEdits => "smart_approve",
-            nanosandbox::Permissions::Default => "smart_approve",
+            sandbox::Permissions::AllowAll => "auto",
+            sandbox::Permissions::AcceptEdits => "smart_approve",
+            sandbox::Permissions::Default => "smart_approve",
         };
         env_parts.push(format!("export GOOSE_MODE='{}'", goose_mode));
         // Goose uses env var for model selection instead of CLI flag.
@@ -384,12 +384,12 @@ pub async fn connect_ssh(
 /// picks up previous conversation context from `/workspace/.nanosb-state/`.
 fn agent_cli_command(
     agent_name: &str,
-    permissions: nanosandbox::Permissions,
+    permissions: sandbox::Permissions,
     auto_mode: bool,
     is_resumed: bool,
     model: Option<&str>,
 ) -> Option<String> {
-    use nanosandbox::Permissions;
+    use sandbox::Permissions;
     let effective = permissions.effective(auto_mode);
 
     match agent_name {
@@ -951,7 +951,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_default_perms() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         assert_eq!(
             agent_cli_command("claude", Permissions::Default, false, false, None),
             Some("claude".to_string()),
@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_allow_all_interactive() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::AllowAll, false, false, None).unwrap();
         assert!(cmd.contains("--dangerously-skip-permissions"));
         assert!(!cmd.contains(" -p ")); // not headless (space-delimited to avoid matching inside --dangerously-skip-permissions)
@@ -989,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_accept_edits() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::AcceptEdits, false, false, None).unwrap();
         assert!(cmd.contains("--permission-mode"));
         assert!(cmd.contains("acceptEdits"));
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_headless() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         // Headless mode should use -p/exec + stream-json + AllowAll
         let cmd = agent_cli_command("claude", Permissions::Default, true, false, None).unwrap();
         assert!(cmd.contains("-p"));
@@ -1032,7 +1032,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_resumed_interactive() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         assert_eq!(
             agent_cli_command("claude", Permissions::Default, false, true, None),
             Some("claude -c".to_string()),
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_resumed_allow_all() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::AllowAll, false, true, None).unwrap();
         assert!(cmd.contains("-c"));
         assert!(cmd.contains("--dangerously-skip-permissions"));
@@ -1067,21 +1067,21 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_with_model_claude() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::Default, false, false, Some("claude-sonnet-4-5-20250929")).unwrap();
         assert!(cmd.contains("--model claude-sonnet-4-5-20250929"));
     }
 
     #[test]
     fn test_agent_cli_command_with_model_codex() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("codex", Permissions::Default, false, false, Some("o4-mini")).unwrap();
         assert!(cmd.contains("--model o4-mini"));
     }
 
     #[test]
     fn test_agent_cli_command_with_model_cursor() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("cursor", Permissions::Default, false, false, Some("sonnet-4.6")).unwrap();
         assert!(cmd.contains("--model sonnet-4.6"));
     }
@@ -1089,14 +1089,14 @@ mod tests {
     #[test]
     fn test_agent_cli_command_goose_no_model_flag() {
         // Goose uses env var, not CLI flag — model should NOT appear in the command string.
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("goose", Permissions::Default, false, false, Some("claude-sonnet-4-5-20250929")).unwrap();
         assert!(!cmd.contains("--model"));
     }
 
     #[test]
     fn test_agent_cli_command_model_in_headless() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::Default, true, false, Some("claude-opus-4-20250514")).unwrap();
         assert!(cmd.contains("--model claude-opus-4-20250514"));
         assert!(cmd.contains("-p"));
