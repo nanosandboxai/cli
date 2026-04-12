@@ -266,8 +266,10 @@ mod cli {
         let cli = Cli::parse();
 
         // Initialize logging:
-        // - File: WARN+ by default, override with NANOSB_LOG=debug|info|trace
+        // - File: always writes to ~/.nanosandbox/logs/nanosb.YYYY-MM-DD (daily rotation)
+        // - File level: WARN by default, override with NANOSB_LOG=debug|info|trace
         // - Stderr: only when --verbose (always debug level)
+        // - Old logs (>7 days) are cleaned up on startup
         // The _log_guard must be held alive for the duration of the program.
         let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
 
@@ -276,12 +278,24 @@ mod cli {
             use tracing_subscriber::util::SubscriberInitExt;
             use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-            if let Some((file_writer, guard)) = nanosandbox::logging::file_layer() {
+            let logs_dir = nanosandbox::logging::logs_dir();
+            let file_setup = if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+                eprintln!("Warning: could not create logs directory {}: {}", logs_dir.display(), e);
+                None
+            } else {
+                cleanup_old_logs(&logs_dir, 7);
+                let file_appender = tracing_appender::rolling::daily(&logs_dir, "nanosb");
+                let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+                Some((non_blocking, guard))
+            };
+
+            if let Some((file_writer, guard)) = file_setup {
                 _log_guard = Some(guard);
 
-                // File log level: WARN by default, NANOSB_LOG=debug for verbose
-                // Covers both runtime (nanosandbox) and CLI (nanosb_cli) crates
-                let file_level = nanosandbox::logging::file_log_level();
+                let file_level = std::env::var("NANOSB_LOG")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| "warn".to_string());
                 let file_filter = format!("nanosandbox={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
@@ -304,7 +318,6 @@ mod cli {
                 }
             } else {
                 _log_guard = None;
-                // Fallback: same as before
                 if cli.verbose {
                     tracing_subscriber::fmt()
                         .with_env_filter("nanosandbox=debug,nanosb_cli=debug,nanosb=debug")
@@ -1430,6 +1443,33 @@ mod cli {
             }
         }
         let _ = w.flush();
+    }
+}
+
+/// Remove log files older than `retention_days` from the given directory.
+fn cleanup_old_logs(dir: &std::path::Path, retention_days: u64) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(retention_days * 24 * 60 * 60);
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if n.starts_with("nanosb.") || n.starts_with("vm-") => n,
+            _ => continue,
+        };
+
+        if let Ok(metadata) = path.metadata() {
+            if let Ok(modified) = metadata.modified() {
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
     }
 }
 

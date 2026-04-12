@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Sandbox SDK — wraps nanosandbox runtime with agent-aware features.
-sandbox = { path = "../sandbox" }
+sandbox = { path = "../sandbox/crates/sandbox" }
 # Direct nanosandbox access for logging and low-level runtime APIs.
 nanosandbox = { path = "../runtime/crates/nanosandbox" }
 
