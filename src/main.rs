@@ -1003,9 +1003,9 @@ mod cli {
                     ok_message: "Apple Silicon (aarch64)",
                 },
                 PlatformCheck {
-                    name: "libkrun Library",
-                    keyword: "libkrun",
-                    ok_message: "/opt/homebrew/lib/libkrun.dylib",
+                    name: "libkrunfw Kernel Firmware",
+                    keyword: "libkrunfw",
+                    ok_message: "found (libkrunfw.5.dylib)",
                 },
                 PlatformCheck {
                     name: "Hypervisor.framework",
@@ -1024,9 +1024,9 @@ mod cli {
         {
             vec![
                 PlatformCheck {
-                    name: "libkrun Library",
-                    keyword: "libkrun",
-                    ok_message: "found",
+                    name: "libkrunfw Kernel Firmware",
+                    keyword: "libkrunfw",
+                    ok_message: "found (libkrunfw.so.5)",
                 },
                 PlatformCheck {
                     name: "KVM Device",
