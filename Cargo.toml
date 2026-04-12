@@ -12,9 +12,9 @@ name = "nanosb"
 path = "src/main.rs"
 
 [dependencies]
-# Private runtime crate — requires git auth.
-# For local dev, override with: [patch.'https://github.com/nanosandboxai/runtime.git']
-#   nanosandbox = { path = "../runtime/crates/nanosandbox" }
+# Sandbox SDK — wraps nanosandbox runtime with agent-aware features.
+sandbox = { path = "../sandbox" }
+# Direct nanosandbox access for logging and low-level runtime APIs.
 nanosandbox = { path = "../runtime/crates/nanosandbox" }
 
 # Async runtime

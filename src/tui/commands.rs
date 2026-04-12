@@ -279,7 +279,32 @@ fn parse_add(parts: &[&str]) -> ParseResult {
             }
             "--project" => {
                 match parts.get(i + 1) {
-                    Some(v) => { project = Some(v.to_string()); i += 2; }
+                    Some(v) => {
+                        let raw = std::path::Path::new(v);
+                        let resolved = if raw.is_absolute() {
+                            raw.to_path_buf()
+                        } else {
+                            std::env::current_dir()
+                                .unwrap_or_default()
+                                .join(raw)
+                        };
+                        if !resolved.exists() {
+                            return ParseResult::Err(format!(
+                                "Project path does not exist: {}\n\
+                                 Usage: /add <agent> --project <path>",
+                                resolved.display(),
+                            ));
+                        }
+                        if !resolved.is_dir() {
+                            return ParseResult::Err(format!(
+                                "Project path is not a directory: {}\n\
+                                 Usage: /add <agent> --project <path>",
+                                resolved.display(),
+                            ));
+                        }
+                        project = Some(resolved.to_string_lossy().to_string());
+                        i += 2;
+                    }
                     None => return ParseResult::Err(
                         "--project requires a path\n\
                          Usage: /add <agent> --project <path>".to_string(),
@@ -941,12 +966,13 @@ mod tests {
 
     #[test]
     fn test_parse_add_with_project() {
+        // Use /tmp which always exists on macOS/Linux.
         assert_eq!(
-            parse_command_verbose("/add claude --project /tmp/myapp"),
+            parse_command_verbose("/add claude --project /tmp"),
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
-                project: Some("/tmp/myapp".to_string()),
+                project: Some("/tmp".to_string()),
                 branch: None,
                 name: None,
                 auto_mode: false,
@@ -959,11 +985,11 @@ mod tests {
     #[test]
     fn test_parse_add_with_project_and_branch() {
         assert_eq!(
-            parse_command_verbose("/add claude --project /tmp/myapp --branch feat/auth"),
+            parse_command_verbose("/add claude --project /tmp --branch feat/auth"),
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
-                project: Some("/tmp/myapp".to_string()),
+                project: Some("/tmp".to_string()),
                 branch: Some("feat/auth".to_string()),
                 name: None,
                 auto_mode: false,
@@ -971,6 +997,25 @@ mod tests {
                 model: None,
             })
         );
+    }
+
+    #[test]
+    fn test_parse_add_project_path_not_exists() {
+        let result = parse_command_verbose("/add claude --project /nonexistent/path/xyz");
+        assert!(matches!(result, ParseResult::Err(msg) if msg.contains("does not exist")));
+    }
+
+    #[test]
+    fn test_parse_add_project_path_not_directory() {
+        // /etc/hosts is a file, not a directory.
+        let result = parse_command_verbose("/add claude --project /etc/hosts");
+        assert!(matches!(result, ParseResult::Err(msg) if msg.contains("not a directory")));
+    }
+
+    #[test]
+    fn test_parse_add_project_missing_value() {
+        let result = parse_command_verbose("/add claude --project");
+        assert!(matches!(result, ParseResult::Err(msg) if msg.contains("--project requires a path")));
     }
 
     #[test]

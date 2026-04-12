@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use nanosandbox::AgentsRegistryClient;
-use nanosandbox::ImageManager;
-use nanosandbox::Sandbox;
+use sandbox::AgentsRegistryClient;
+use sandbox::ImageManager;
+use sandbox::Sandbox;
 
 use ratatui::layout::Rect;
 
@@ -285,7 +285,7 @@ pub struct AgentPanel {
     /// Key: dedup key, Value: (full URL, timestamp of last growth).
     pub pending_urls: HashMap<String, (String, std::time::Instant)>,
     /// Active project mount for this panel's sandbox.
-    pub project_mount: Option<nanosandbox::project::ProjectMount>,
+    pub project_mount: Option<sandbox::nanosandbox::project::ProjectMount>,
     /// Last known HEAD SHA in the clone (for commit auto-sync detection).
     pub last_known_head: Option<String>,
     /// Initial HEAD SHA of the clone at creation (base for committed files diff).
@@ -316,17 +316,20 @@ pub struct AgentPanel {
     /// Whether auto/headless mode is enabled for this panel's agent.
     pub auto_mode: bool,
     /// Agent permission level.
-    pub permissions: nanosandbox::Permissions,
+    pub permissions: sandbox::Permissions,
     /// Agent type (source of truth for CLI command + config format).
-    pub agent_type: Option<nanosandbox::AgentType>,
+    pub agent_type: Option<sandbox::AgentType>,
     /// Model identifier for CLI flag generation (e.g., "claude-sonnet-4-5-20250929").
     pub model: Option<String>,
     /// Headless mode state (NDJSON parsing and structured output).
     pub headless_state: Option<HeadlessState>,
     /// Original SandboxConfig used to create this panel (for session persistence).
-    pub original_config: Option<nanosandbox::SandboxConfig>,
+    pub original_config: Option<sandbox::SandboxConfig>,
     /// Whether this panel was resumed from a previous session (agent uses resume command).
     pub is_resumed: bool,
+    /// Whether the user sent at least one keystroke to this agent's terminal.
+    /// Used to decide whether resume flags (--continue) are appropriate on next session load.
+    pub had_interaction: bool,
     /// Overlay notification shown on top of the terminal (message, is_error, remaining ticks).
     /// Replaces previous notification; auto-dismissed after countdown reaches 0.
     pub notification: Option<(String, bool, u8)>,
@@ -365,12 +368,13 @@ impl AgentPanel {
             reconnecting: false,
             visible: true,
             auto_mode: false,
-            permissions: nanosandbox::Permissions::Default,
+            permissions: sandbox::Permissions::Default,
             agent_type: None,
             model: None,
             headless_state: None,
             original_config: None,
             is_resumed: false,
+            had_interaction: false,
             notification: None,
         }
     }
@@ -421,9 +425,11 @@ pub struct App {
     /// Tick counter for throttling sidebar refresh.
     pub sidebar_tick_counter: u8,
     /// Persistent user settings (loaded from ~/.nanosandbox/config.toml).
-    pub settings: nanosandbox::settings::UserSettings,
+    pub settings: sandbox::settings::UserSettings,
     /// Temporary status message shown on the status bar (message, remaining ticks).
     pub status_message: Option<(String, u8)>,
+    /// Auto-dismiss countdown for system message popup (remaining ticks, None = manual dismiss).
+    pub system_message_ticks: Option<u8>,
     /// Active colour theme (resolved at startup, switchable via `/theme`).
     pub theme: &'static super::theme::Theme,
     /// Name of the active theme (for display and persistence).
@@ -453,7 +459,7 @@ impl Default for App {
 impl App {
     /// Create a new application with default state.
     pub fn new() -> Self {
-        let settings = nanosandbox::settings::UserSettings::load();
+        let settings = sandbox::settings::UserSettings::load();
         let (theme, theme_name) = super::theme::Theme::resolve(&settings.ui.theme);
         Self {
             panels: Vec::new(),
@@ -479,6 +485,7 @@ impl App {
             sidebar_tick_counter: 0,
             settings,
             status_message: None,
+            system_message_ticks: None,
             theme,
             theme_name,
             mouse_selection: None,
@@ -499,6 +506,15 @@ impl App {
     pub fn set_system_message(&mut self, msg: ChatMessage) {
         self.system_messages.clear();
         self.system_messages.push(msg);
+        self.system_message_ticks = None; // manual dismiss only
+    }
+
+    /// Show a system message popup that auto-dismisses after the given number of
+    /// ticks (each tick ≈ 250 ms). ESC still dismisses immediately.
+    pub fn set_system_message_timed(&mut self, msg: ChatMessage, ticks: u8) {
+        self.system_messages.clear();
+        self.system_messages.push(msg);
+        self.system_message_ticks = Some(ticks);
     }
 
     /// Refresh the cached modified files list from the focused panel's project mount.

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ratatui::crossterm::event::{self, Event as CrosstermEvent};
 use tokio::sync::{mpsc, Mutex};
 
-use nanosandbox::Sandbox;
+use sandbox::Sandbox;
 
 /// Events that the TUI application can handle.
 pub enum AppEvent {
@@ -29,7 +29,7 @@ pub enum AppEvent {
         /// Short sandbox identifier for display.
         short_id: String,
         /// Project mount transferred from the sandbox (if any).
-        project_mount: Option<nanosandbox::project::ProjectMount>,
+        project_mount: Option<sandbox::nanosandbox::project::ProjectMount>,
     },
     /// Sandbox creation or startup failed.
     SandboxFailed {
