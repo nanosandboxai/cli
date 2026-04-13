@@ -10,14 +10,12 @@
     3. Adds the install directory to the user PATH
 
 .EXAMPLE
-    # Install latest version
+    # Install latest stable version
     irm https://github.com/nanosandboxai/cli/releases/latest/download/windows.ps1 | iex
 
-    # Install specific version
+    # Install specific version (stable or pre-release)
+    .\windows.ps1 -Version v0.2.0-rc5
     .\windows.ps1 -Version v0.2.0
-
-    # Install latest pre-release
-    .\windows.ps1 -PreRelease
 #>
 
 $ErrorActionPreference = "Stop"
@@ -26,9 +24,8 @@ $ErrorActionPreference = "Stop"
 # Script-level param() creates optimized read-only variables that break under Invoke-Expression.
 function Install-NanosandboxCLI {
     param(
-        [string]$Version = "latest",
-        [string]$InstallDir = "$env:USERPROFILE\.nanosandbox",
-        [switch]$PreRelease
+        [string]$Version = "",
+        [string]$InstallDir = "$env:USERPROFILE\.nanosandbox"
     )
 
     # --- Helpers ---
@@ -65,20 +62,26 @@ function Install-NanosandboxCLI {
     # --- Resolve version ---
     $releaseRepo = "nanosandboxai/cli"
     $resolvedVersion = $Version
+
     if (-not $resolvedVersion -or $resolvedVersion -eq "latest") {
-        Write-Info "Resolving latest version..."
+        # No version specified: resolve latest stable release only
+        Write-Info "Resolving latest stable version..."
         try {
-            $releases = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases?per_page=1"
-            $resolvedVersion = $releases[0].tag_name
+            $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
+            $resolvedVersion = $releaseInfo.tag_name
         } catch {
-            try {
-                $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
-                $resolvedVersion = $releaseInfo.tag_name
-            } catch {
-                Write-Err "Failed to resolve latest version: $_"
-            }
+            Write-Err "Failed to resolve latest stable version: $_`nTo install a pre-release, specify the tag: .\windows.ps1 -Version v0.2.0-rc5"
+        }
+    } else {
+        # Specific version requested: verify the tag exists
+        Write-Info "Verifying tag $resolvedVersion..."
+        try {
+            $null = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/tags/$resolvedVersion"
+        } catch {
+            Write-Err "Release $resolvedVersion not found. Check available tags at: https://github.com/$releaseRepo/releases"
         }
     }
+
     Write-Info "Installing nanosb $resolvedVersion"
 
     # --- Create install directory ---

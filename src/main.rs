@@ -6,7 +6,7 @@ mod cli {
     use clap::{Parser, Subcommand, ValueEnum};
     use colored::Colorize;
     use indicatif::{ProgressBar, ProgressStyle};
-    use sandbox::{ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
+    use sandbox::{normalize_image, ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
     use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
@@ -495,7 +495,7 @@ mod cli {
 
     /// Pull an image from a registry
     async fn cmd_pull(image: &str, format: OutputFormat, verbose: bool) -> anyhow::Result<()> {
-        let image = if image.contains(':') { image.to_string() } else { format!("{}:latest", image) };
+        let image = normalize_image(image);
         let pb = create_pull_progress();
         pb.set_message(format!("Pulling {}", image));
 
@@ -655,7 +655,7 @@ mod cli {
             }
         }
 
-        let image = if image.contains(':') { image.to_string() } else { format!("{}:latest", image) };
+        let image = normalize_image(image);
         let mut builder = SandboxConfig::builder()
             .name(&sandbox_name)
             .image(&image)
