@@ -99,11 +99,23 @@ resolve_deps_version() {
 remove_deps() {
     if [[ "$KEEP_DEPS" == "1" ]]; then
         header "Keeping runtime dependencies"
-        info "KEEP_DEPS=1 — leaving libkrunfw and gvproxy installed"
+        info "KEEP_DEPS=1 -- leaving libkrunfw and gvproxy installed"
         return 0
     fi
 
-    header "Removing runtime dependencies"
+    header "Runtime dependencies"
+
+    # Always prompt unless KEEP_DEPS is explicitly set
+    if [[ -t 0 ]]; then
+        printf "  Also remove runtime dependencies (libkrunfw, gvproxy)? [y/N] "
+        read -r answer
+        if [[ ! "$answer" =~ ^[Yy] ]]; then
+            info "Keeping runtime dependencies"
+            return 0
+        fi
+    fi
+
+    info "Removing runtime dependencies..."
 
     local resolved_version="$DEPS_VERSION"
     if [[ "$DEPS_VERSION" == "latest" ]]; then
