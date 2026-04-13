@@ -495,7 +495,7 @@ mod cli {
 
     /// Pull an image from a registry
     async fn cmd_pull(image: &str, format: OutputFormat, verbose: bool) -> anyhow::Result<()> {
-        let image = nanosandbox::config::normalize_image(image);
+        let image = if image.contains(':') { image.to_string() } else { format!("{}:latest", image) };
         let pb = create_pull_progress();
         pb.set_message(format!("Pulling {}", image));
 
@@ -655,7 +655,7 @@ mod cli {
             }
         }
 
-        let image = nanosandbox::config::normalize_image(image);
+        let image = if image.contains(':') { image.to_string() } else { format!("{}:latest", image) };
         let mut builder = SandboxConfig::builder()
             .name(&sandbox_name)
             .image(&image)
@@ -1444,29 +1444,29 @@ mod cli {
         }
         let _ = w.flush();
     }
-}
 
-/// Remove log files older than `retention_days` from the given directory.
-fn cleanup_old_logs(dir: &std::path::Path, retention_days: u64) {
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(retention_days * 24 * 60 * 60);
+    /// Remove log files older than `retention_days` from the given directory.
+    fn cleanup_old_logs(dir: &std::path::Path, retention_days: u64) {
+        let cutoff = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(retention_days * 24 * 60 * 60);
 
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) if n.starts_with("nanosb.") || n.starts_with("vm-") => n,
-            _ => continue,
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
         };
 
-        if let Ok(metadata) = path.metadata() {
-            if let Ok(modified) = metadata.modified() {
-                if modified < cutoff {
-                    let _ = std::fs::remove_file(&path);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let _name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) if n.starts_with("nanosb.") || n.starts_with("vm-") => n,
+                _ => continue,
+            };
+
+            if let Ok(metadata) = path.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if modified < cutoff {
+                        let _ = std::fs::remove_file(&path);
+                    }
                 }
             }
         }
