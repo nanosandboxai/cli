@@ -11,11 +11,11 @@
 
 .EXAMPLE
     # Install latest stable version
-    irm https://github.com/nanosandboxai/cli/releases/latest/download/windows.ps1 | iex
+    irm https://github.com/nanosandboxai/cli/releases/latest/download/install.ps1 | iex
 
     # Install specific version (stable or pre-release)
-    .\windows.ps1 -Version v0.2.0-rc5
-    .\windows.ps1 -Version v0.2.0
+    .\install.ps1 -Version v0.2.0-rc5
+    .\install.ps1 -Version v0.2.0
 #>
 
 $ErrorActionPreference = "Stop"
@@ -70,7 +70,7 @@ function Install-NanosandboxCLI {
             $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
             $resolvedVersion = $releaseInfo.tag_name
         } catch {
-            Write-Err "Failed to resolve latest stable version: $_`nTo install a pre-release, specify the tag: .\windows.ps1 -Version v0.2.0-rc5"
+            Write-Err "Failed to resolve latest stable version: $_`nTo install a pre-release, specify the tag: .\install.ps1 -Version v0.2.0-rc5"
         }
     } else {
         # Specific version requested: verify the tag exists
