@@ -298,12 +298,20 @@ pub async fn connect_ssh(
             }
 
             let _ = writer.write_all(init_commands.as_bytes()).await;
+            let _ = writer.flush().await;
 
             // Then enter the write loop: forward keystrokes + handle resize
             loop {
                 tokio::select! {
                     Some(data) = write_rx.recv() => {
                         if writer.write_all(&data).await.is_err() {
+                            break;
+                        }
+                        // Flush immediately — without this, small writes (single
+                        // keystrokes) can get stuck in russh's internal buffer
+                        // and the remote shell never sees them, causing the
+                        // session to appear frozen.
+                        if writer.flush().await.is_err() {
                             break;
                         }
                     }

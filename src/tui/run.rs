@@ -212,7 +212,7 @@ pub async fn run_tui(
 
     // Validate runtime prerequisites before launching TUI.
     println!("\nChecking runtime prerequisites...\n");
-    let validation = sandbox::nanosandbox::runtime::validate_runtime_prerequisites_detailed().await;
+    let validation = sandbox::runtime::runtime::validate_runtime_prerequisites_detailed().await;
 
     print_validation_results(&validation);
 
@@ -445,12 +445,9 @@ pub async fn run_tui(
             }
             AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount } => {
                 // Get SSH info before storing sandbox
-                let (ssh_info, guest_ip) = {
+                let ssh_info = {
                     let sb = sandbox.lock().await;
-                    let port = sb.ssh_port();
-                    let key = sb.ssh_key_path();
-                    let ip = sb.guest_ip();
-                    (port.zip(key), ip)
+                    sb.ssh_port().zip(sb.ssh_key_path())
                 };
 
                 if let Some(panel) = app.panels.get_mut(panel_idx) {
@@ -467,7 +464,6 @@ pub async fn run_tui(
                         panel.ssh_host_port = Some(port);
                         panel.ssh_key_path = Some(key.clone());
                     }
-                    panel.ssh_guest_ip = guest_ip.clone();
                 }
                 // Initiate SSH connection if SSH info is available
                 if let Some((ssh_port, key_path)) = ssh_info {
@@ -493,11 +489,9 @@ pub async fn run_tui(
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
                         let model = panel.model.clone();
-                        let ssh_host = if cfg!(target_os = "windows") {
-                            guest_ip.unwrap_or_else(|| "172.28.0.2".to_string())
-                        } else {
-                            "127.0.0.1".to_string()
-                        };
+                        // Use 127.0.0.1 on all platforms — on Windows, portproxy
+                        // rules route localhost to the guest IP via HCN NAT.
+                        let ssh_host = "127.0.0.1".to_string();
                         let tx = tx.clone();
                         tokio::spawn(async move {
                             // Small delay for sshd to be fully ready
@@ -706,11 +700,7 @@ pub async fn run_tui(
                                             "{}:127.0.0.1:{}",
                                             port, port
                                         );
-                                        let ssh_dest = if cfg!(target_os = "windows") {
-                                            format!("root@{}", panel.ssh_guest_ip.as_deref().unwrap_or("172.28.0.2"))
-                                        } else {
-                                            "root@127.0.0.1".to_string()
-                                        };
+                                        let ssh_dest = "root@127.0.0.1".to_string();
                                         if let Ok(child) =
                                             std::process::Command::new("ssh")
                                                 .args([
@@ -943,7 +933,7 @@ pub async fn run_tui(
 }
 
 /// Print validation results as a checklist.
-fn print_validation_results(validation: &sandbox::nanosandbox::runtime::ValidationResult) {
+fn print_validation_results(validation: &sandbox::runtime::runtime::ValidationResult) {
     for err in &validation.errors {
         println!("  [x] {}: {}", err.check, err.message);
         if let Some(ref hint) = err.fix_hint {
@@ -1785,14 +1775,11 @@ async fn handle_command(
                 panel.port_forward_children.clear();
                 panel.forwarded_ports.clear();
 
-                let (ssh_info, guest_ip) = if let Some(ref sb_arc) = panel.sandbox {
+                let ssh_info = if let Some(ref sb_arc) = panel.sandbox {
                     let sb = sb_arc.lock().await;
-                    let port = sb.ssh_port();
-                    let key = sb.ssh_key_path();
-                    let ip = sb.guest_ip();
-                    (port.zip(key), ip)
+                    sb.ssh_port().zip(sb.ssh_key_path())
                 } else {
-                    (None, None)
+                    None
                 };
 
                 if let Some((ssh_port, key_path)) = ssh_info {
@@ -1804,11 +1791,9 @@ async fn handle_command(
                     let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                     let is_resumed = panel.is_resumed;
                     let model = panel.model.clone();
-                    let ssh_host = if cfg!(target_os = "windows") {
-                        guest_ip.unwrap_or_else(|| "172.28.0.2".to_string())
-                    } else {
-                        "127.0.0.1".to_string()
-                    };
+                    // Use 127.0.0.1 on all platforms — on Windows, portproxy
+                    // rules route localhost to the guest IP via HCN NAT.
+                    let ssh_host = "127.0.0.1".to_string();
                     let tx = tx.clone();
                     tokio::spawn(async move {
                         match super::terminal::connect_ssh(
@@ -2338,11 +2323,7 @@ fn panel_ssh_info(app: &App) -> Option<(usize, String, u16, std::path::PathBuf)>
     let panel = app.panels.get(idx)?;
     let port = panel.ssh_host_port?;
     let key = panel.ssh_key_path.clone()?;
-    let host = if cfg!(target_os = "windows") {
-        panel.ssh_guest_ip.clone().unwrap_or_else(|| "172.28.0.2".to_string())
-    } else {
-        "127.0.0.1".to_string()
-    };
+    let host = "127.0.0.1".to_string();
     Some((idx, host, port, key))
 }
 
@@ -3441,7 +3422,7 @@ fn resume_session(
                 config.project = None;
 
                 // Create a ProjectMount on the panel to handle suspend/teardown.
-                if let Ok(mut pm) = sandbox::nanosandbox::project::ProjectMount::detect(&panel_project_path) {
+                if let Ok(mut pm) = sandbox::runtime::project::ProjectMount::detect(&panel_project_path) {
                     let _ = pm.resume(clone_path, sp.branches.clone());
                     panel.project_mount = Some(pm);
                 }

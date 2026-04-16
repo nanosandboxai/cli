@@ -128,8 +128,9 @@ function Install-NanosandboxCLI {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -notlike "*$InstallDir*") {
         [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
-        Write-Ok "Added $InstallDir to user PATH"
-        Write-Warn "Restart your terminal for PATH changes to take effect."
+        # Also update the current session so the user doesn't need to open a new terminal
+        $env:Path = "$env:Path;$InstallDir"
+        Write-Ok "Added $InstallDir to user PATH (available immediately)"
     } else {
         Write-Info "$InstallDir already in PATH"
     }

@@ -2367,31 +2367,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanosandbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dirs",
- "docker_credential",
- "env_logger",
- "flate2",
- "libc",
- "libkrun-sys",
- "log",
- "oci-distribution",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "nanosb-cli"
 version = "0.1.0"
 dependencies = [
@@ -2407,10 +2382,10 @@ dependencies = [
  "indicatif",
  "libc",
  "log",
- "nanosandbox",
  "png 0.17.16",
  "predicates",
  "ratatui",
+ "runtime",
  "russh",
  "sandbox",
  "serde",
@@ -3424,6 +3399,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dirs",
+ "docker_credential",
+ "env_logger",
+ "flate2",
+ "libc",
+ "libkrun-sys",
+ "log",
+ "oci-distribution",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "russh"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3582,7 +3582,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
- "nanosandbox",
+ "runtime",
  "serde",
  "serde_json",
  "serde_yaml",

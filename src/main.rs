@@ -74,6 +74,10 @@ mod cli {
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long = "env-file", global = true)]
         pub env_file: Vec<String>,
+
+        /// Root filesystem mode for Windows VMs: vhdx or plan9 (default: vhdx)
+        #[arg(long = "rootfs-mode", global = true)]
+        pub rootfs_mode: Option<String>,
     }
 
     #[derive(Subcommand)]
@@ -278,7 +282,7 @@ mod cli {
             use tracing_subscriber::util::SubscriberInitExt;
             use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-            let logs_dir = nanosandbox::logging::logs_dir();
+            let logs_dir = runtime::logging::logs_dir();
             let file_setup = if let Err(e) = std::fs::create_dir_all(&logs_dir) {
                 eprintln!("Warning: could not create logs directory {}: {}", logs_dir.display(), e);
                 None
@@ -296,7 +300,7 @@ mod cli {
                     .ok()
                     .filter(|v| !v.is_empty())
                     .unwrap_or_else(|| "warn".to_string());
-                let file_filter = format!("nanosandbox={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
+                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
@@ -305,7 +309,7 @@ mod cli {
                 if cli.verbose {
                     let stderr_layer = fmt::layer()
                         .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new("nanosandbox=debug,nanosb_cli=debug,nanosb=debug"));
+                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug"));
 
                     tracing_subscriber::registry()
                         .with(file_layer)
@@ -320,7 +324,7 @@ mod cli {
                 _log_guard = None;
                 if cli.verbose {
                     tracing_subscriber::fmt()
-                        .with_env_filter("nanosandbox=debug,nanosb_cli=debug,nanosb=debug")
+                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug")
                         .init();
                 } else {
                     let _ = env_logger::Builder::from_env(
@@ -407,6 +411,15 @@ mod cli {
                         anyhow::anyhow!("{}", e)
                     })?;
 
+                // Parse --rootfs-mode flag (Windows only).
+                let cli_rootfs_mode = cli.rootfs_mode.as_deref()
+                    .map(|s| s.parse::<sandbox::RootfsMode>())
+                    .transpose()
+                    .map_err(|e| {
+                        error!("Failed to parse --rootfs-mode flag: {}", e);
+                        anyhow::anyhow!("{}", e)
+                    })?;
+
                 // Apply CLI flag overrides (merge step 4).
                 sandbox::apply_cli_overrides(
                     &mut sandbox_configs,
@@ -415,6 +428,7 @@ mod cli {
                     cli.timeout,
                     cli_permissions,
                     &cli_env,
+                    cli_rootfs_mode,
                 );
 
                 // Filter to a single sandbox if --sandbox is specified.
@@ -462,6 +476,10 @@ mod cli {
                 buffered,
                 command,
             }) => {
+                let run_rootfs_mode = cli.rootfs_mode.as_deref()
+                    .map(|s| s.parse::<sandbox::RootfsMode>())
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("Invalid --rootfs-mode: {}", e))?;
                 cmd_run(
                     &image,
                     name,
@@ -474,6 +492,7 @@ mod cli {
                     &command,
                     cli.format,
                     cli.verbose,
+                    run_rootfs_mode,
                 )
                 .await
             }
@@ -631,6 +650,7 @@ mod cli {
         command: &[String],
         format: OutputFormat,
         verbose: bool,
+        rootfs_mode: Option<sandbox::RootfsMode>,
     ) -> anyhow::Result<()> {
         preflight_check().await?;
 
@@ -662,6 +682,10 @@ mod cli {
             .cpus(cpus)
             .memory_mb(memory)
             .timeout_secs(timeout);
+
+        if let Some(mode) = rootfs_mode {
+            builder = builder.rootfs_mode(mode);
+        }
 
         for (key, value) in &env_vars {
             builder = builder.env(key, value);
@@ -1019,7 +1043,7 @@ mod cli {
 
     /// Check runtime prerequisites and display status
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
-        use sandbox::nanosandbox::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::runtime::runtime::validate_runtime_prerequisites_detailed;
 
         let result = validate_runtime_prerequisites_detailed().await;
 
@@ -1041,7 +1065,7 @@ mod cli {
     }
 
     /// Print doctor results as colored checklist
-    fn print_doctor_results(result: &sandbox::nanosandbox::runtime::ValidationResult) {
+    fn print_doctor_results(result: &sandbox::runtime::runtime::ValidationResult) {
         println!();
         println!("Checking runtime prerequisites...");
         println!();
@@ -1112,7 +1136,7 @@ mod cli {
 
         if result.is_ok() {
             println!("{}", "Ready to run sandboxes.".green());
-            let logs_dir = nanosandbox::logging::logs_dir();
+            let logs_dir = runtime::logging::logs_dir();
             println!("  Logs: {}", logs_dir.display());
         } else {
             println!("{}", "Cannot run sandboxes. Fix the errors above.".red());
@@ -1216,7 +1240,7 @@ mod cli {
     }
 
     fn doctor_results_to_json(
-        result: &sandbox::nanosandbox::runtime::ValidationResult,
+        result: &sandbox::runtime::runtime::ValidationResult,
     ) -> serde_json::Value {
         serde_json::json!({
             "ok": result.is_ok(),
@@ -1300,7 +1324,7 @@ mod cli {
         };
 
         let canonical_path = project_path.canonicalize().unwrap_or_else(|_| project_path.clone());
-        let clones = sandbox::nanosandbox::project::clones_dir(&canonical_path);
+        let clones = sandbox::runtime::project::clones_dir(&canonical_path);
         if !clones.exists() {
             println!("No nanosb clones found for {}", project_path.display());
             return Ok(());
@@ -1404,7 +1428,7 @@ mod cli {
 
     /// Run preflight validation, showing doctor output on failure.
     async fn preflight_check() -> anyhow::Result<()> {
-        use sandbox::nanosandbox::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::runtime::runtime::validate_runtime_prerequisites_detailed;
 
         let result = validate_runtime_prerequisites_detailed().await;
         if !result.is_ok() {
@@ -1483,7 +1507,7 @@ fn main() -> anyhow::Result<()> {
     // — before any threads are created — the child runs in a clean,
     // single-threaded process where hv_vm_create() works correctly.
     if std::env::args().nth(1).as_deref() == Some("internal-boot-vm") {
-        sandbox::nanosandbox::runtime::handle_boot_vm_subprocess();
+        sandbox::runtime::runtime::handle_boot_vm_subprocess();
         // ^ never returns
     }
 

@@ -14,8 +14,8 @@ path = "src/main.rs"
 [dependencies]
 # Sandbox SDK — wraps nanosandbox runtime with agent-aware features.
 sandbox = { path = "../sandbox/crates/sandbox" }
-# Direct nanosandbox access for logging and low-level runtime APIs.
-nanosandbox = { path = "../runtime/crates/nanosandbox" }
+# Direct runtime access for logging and low-level runtime APIs.
+runtime = { path = "../runtime/crates/runtime" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

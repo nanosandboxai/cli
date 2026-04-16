@@ -51,13 +51,23 @@ function Uninstall-NanosandboxCLI {
 
     # --- Ask about runtime dependencies ---
     Write-Host ""
-    $depsExist = (Test-Path (Join-Path $InstallDir "libkrunfw.dll")) -or
+    $libsDir = Join-Path $InstallDir "libs"
+    $depsExist = (Test-Path (Join-Path $libsDir "libkrunfw.dll")) -or
+                 (Test-Path (Join-Path $libsDir "busybox")) -or
+                 # Legacy: old install-deps placed deps at root level
+                 (Test-Path (Join-Path $InstallDir "libkrunfw.dll")) -or
                  (Test-Path (Join-Path $InstallDir "busybox"))
 
     if ($depsExist) {
         Write-Host "  Runtime dependencies found (libkrunfw.dll, busybox)." -ForegroundColor White
         $answer = Read-Host "  Also remove runtime dependencies? [y/N]"
         if ($answer -match '^[Yy]') {
+            # Remove from libs/ (current layout)
+            if (Test-Path $libsDir) {
+                Remove-Item $libsDir -Recurse -Force
+                Write-Ok "Removed $libsDir"
+            }
+            # Remove legacy root-level deps
             foreach ($file in @('libkrunfw.dll', 'busybox')) {
                 $path = Join-Path $InstallDir $file
                 if (Test-Path $path) {
@@ -76,7 +86,7 @@ function Uninstall-NanosandboxCLI {
         $children = Get-ChildItem $InstallDir -ErrorAction SilentlyContinue
         # Check for cache/logs/data dirs (anything beyond the binary and deps)
         $dataItems = $children | Where-Object {
-            $_.Name -notin @('nanosb.exe', 'libkrunfw.dll', 'busybox')
+            $_.Name -notin @('nanosb.exe', 'libkrunfw.dll', 'busybox', 'libs')
         }
     }
 
