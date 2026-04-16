@@ -32,7 +32,7 @@ function Install-NanosandboxCLI {
     function Write-Info    { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan }
     function Write-Ok      { param($msg) Write-Host "[OK]   $msg" -ForegroundColor Green }
     function Write-Warn    { param($msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
-    function Write-Err     { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red; exit 1 }
+    function Write-Err     { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
     # --- Prerequisites ---
     Write-Host ""
@@ -43,6 +43,7 @@ function Install-NanosandboxCLI {
     $build = [System.Environment]::OSVersion.Version.Build
     if ($build -lt 17763) {
         Write-Err "Windows 10 version 1809 (build 17763) or later is required. Current build: $build"
+        return
     }
 
     # Check Hyper-V: try the service first (works on both Server and Desktop), fall back to feature check
@@ -71,6 +72,7 @@ function Install-NanosandboxCLI {
             $resolvedVersion = $releaseInfo.tag_name
         } catch {
             Write-Err "Failed to resolve latest stable version: $_`nTo install a pre-release, specify the tag: .\install.ps1 -Version v0.2.0-rc5"
+            return
         }
     } else {
         # Specific version requested: verify the tag exists
@@ -79,6 +81,7 @@ function Install-NanosandboxCLI {
             $null = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/tags/$resolvedVersion"
         } catch {
             Write-Err "Release $resolvedVersion not found. Check available tags at: https://github.com/$releaseRepo/releases"
+            return
         }
     }
 
@@ -101,6 +104,7 @@ function Install-NanosandboxCLI {
         Write-Ok "Downloaded nanosb.exe"
     } catch {
         Write-Err "Failed to download nanosb.exe from $downloadUrl`n$_"
+        return
     }
 
     # --- Install runtime dependencies ---
