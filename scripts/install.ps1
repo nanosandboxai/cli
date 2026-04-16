@@ -65,13 +65,14 @@ function Install-NanosandboxCLI {
     $resolvedVersion = $Version
 
     if (-not $resolvedVersion -or $resolvedVersion -eq "latest") {
-        # No version specified: resolve latest stable release only
-        Write-Info "Resolving latest stable version..."
+        # No version specified: resolve latest release (including pre-releases)
+        Write-Info "Resolving latest version..."
         try {
-            $releaseInfo = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases/latest"
-            $resolvedVersion = $releaseInfo.tag_name
+            $releases = Invoke-RestMethod "https://api.github.com/repos/$releaseRepo/releases?per_page=1"
+            $resolvedVersion = $releases[0].tag_name
+            if (-not $resolvedVersion) { throw "No releases found" }
         } catch {
-            Write-Err "Failed to resolve latest stable version: $_`nTo install a pre-release, specify the tag: .\install.ps1 -Version v0.2.0-rc5"
+            Write-Err "Failed to resolve latest version: $_"
             return
         }
     } else {
