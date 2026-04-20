@@ -179,6 +179,8 @@ pub struct HeadlessState {
     pub auto_scroll: bool,
     /// Start time for elapsed display.
     pub started_at: std::time::Instant,
+    /// Set when the task finishes (completed/error). Freezes the elapsed timer.
+    pub completed_at: Option<std::time::Instant>,
 }
 
 impl HeadlessState {
@@ -193,6 +195,23 @@ impl HeadlessState {
             scroll_offset: 0,
             auto_scroll: true,
             started_at: std::time::Instant::now(),
+            completed_at: None,
+        }
+    }
+
+    /// Elapsed time since task start. Freezes at completion.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.completed_at
+            .unwrap_or_else(std::time::Instant::now)
+            .duration_since(self.started_at)
+    }
+
+    /// Mark the task as finished with the given status ("completed" or "error").
+    /// Freezes the elapsed timer on the first call; idempotent afterwards.
+    pub fn finish(&mut self, status: &str) {
+        self.status = status.to_string();
+        if self.completed_at.is_none() {
+            self.completed_at = Some(std::time::Instant::now());
         }
     }
 }

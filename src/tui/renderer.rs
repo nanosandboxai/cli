@@ -1092,8 +1092,8 @@ fn render_headless_panel(
         }
     };
 
-    // Compute elapsed time.
-    let elapsed = state.started_at.elapsed();
+    // Compute elapsed time. Freezes when the task finishes.
+    let elapsed = state.elapsed();
     let mins = elapsed.as_secs() / 60;
     let secs = elapsed.as_secs() % 60;
     let elapsed_str = format!("{mins}:{secs:02}");

@@ -451,9 +451,9 @@ pub async fn run_tui(
                 };
 
                 if let Some(panel) = app.panels.get_mut(panel_idx) {
-                    panel.sandbox = Some(sandbox);
+                    panel.sandbox = Some(sandbox.clone());
                     panel.sandbox_id_short = short_id.clone();
-                    panel.loading_message = Some("Connecting via SSH...".into());
+                    panel.loading_message = Some("Connecting...".into());
                     // Only set project_mount from sandbox if the panel doesn't
                     // already have one (resumed sessions set it up front).
                     if project_mount.is_some() {
@@ -465,9 +465,34 @@ pub async fn run_tui(
                         panel.ssh_key_path = Some(key.clone());
                     }
                 }
-                // Initiate SSH connection if SSH info is available
-                if let Some((ssh_port, key_path)) = ssh_info {
-                    // Pre-calculate panel dimensions for accurate PTY allocation.
+
+                let is_auto_mode = app.panels.get(panel_idx)
+                    .map(|p| p.auto_mode)
+                    .unwrap_or(false);
+
+                if is_auto_mode {
+                    // Auto-mode: use gateway exec (same as `nanosb exec`).
+                    // No SSH needed — runs command via HvSocket/HTTP gateway.
+                    if let Some(panel) = app.panels.get(panel_idx) {
+                        let agent_name = panel.agent_name.clone();
+                        let env = panel.env.clone();
+                        let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
+                        let permissions = panel.permissions;
+                        let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
+                        let is_resumed = panel.is_resumed;
+                        let model = panel.model.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            spawn_gateway_exec(
+                                sandbox, &agent_name, &env,
+                                workdir.as_deref(), permissions,
+                                prompt.as_deref(), is_resumed,
+                                model.as_deref(), panel_idx, tx,
+                            ).await;
+                        });
+                    }
+                } else if let Some((ssh_port, key_path)) = ssh_info {
+                    // Interactive mode: SSH with PTY for terminal access.
                     let (pty_cols, pty_rows) = {
                         let term_size = ratatui::crossterm::terminal::size()
                             .unwrap_or((160, 40));
@@ -485,33 +510,45 @@ pub async fn run_tui(
                         let env = panel.env.clone();
                         let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                         let permissions = panel.permissions;
-                        let auto_mode = panel.auto_mode;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
                         let model = panel.model.clone();
-                        // Use 127.0.0.1 on all platforms — on Windows, portproxy
-                        // rules route localhost to the guest IP via HCN NAT.
                         let ssh_host = "127.0.0.1".to_string();
                         let tx = tx.clone();
                         tokio::spawn(async move {
-                            // Small delay for sshd to be fully ready
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            match super::terminal::connect_ssh(
-                                ssh_host, ssh_port, key_path, pty_cols, pty_rows,
-                                &agent_name, &env, workdir.as_deref(),
-                                permissions, auto_mode, prompt.as_deref(),
-                                is_resumed, model.as_deref(), panel_idx, tx.clone(),
-                            ).await {
-                                Ok(handle) => {
-                                    let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(AppEvent::SshDisconnected {
-                                        panel_idx,
-                                        error: Some(format!("SSH connect failed: {}", e)),
-                                    });
+                            // Retry SSH connection — on Windows the HvSocket SSH
+                            // proxy chain takes time to be ready after VM boot.
+                            let max_attempts = 10;
+                            let mut last_err = String::new();
+                            for attempt in 1..=max_attempts {
+                                let delay = if attempt == 1 { 500 } else { 1000 };
+                                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                                match super::terminal::connect_ssh(
+                                    ssh_host.clone(), ssh_port, key_path.clone(),
+                                    pty_cols, pty_rows,
+                                    &agent_name, &env, workdir.as_deref(),
+                                    permissions, false, prompt.as_deref(),
+                                    is_resumed, model.as_deref(), panel_idx, tx.clone(),
+                                ).await {
+                                    Ok(handle) => {
+                                        let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        last_err = e.to_string();
+                                        if attempt < max_attempts {
+                                            tracing::debug!(
+                                                "SSH connect attempt {}/{} failed: {}, retrying...",
+                                                attempt, max_attempts, last_err
+                                            );
+                                        }
+                                    }
                                 }
                             }
+                            let _ = tx.send(AppEvent::SshDisconnected {
+                                panel_idx,
+                                error: Some(format!("SSH connect failed after {} attempts: {}", max_attempts, last_err)),
+                            });
                         });
                     }
                 }
@@ -623,9 +660,9 @@ pub async fn run_tui(
                             if hs.status != "completed" && hs.status != "error" {
                                 if let Some(ref err) = error {
                                     hs.agent_text.push_str(&format!("\n[process] {}\n", err));
-                                    hs.status = "error".to_string();
+                                    hs.finish("error");
                                 } else {
-                                    hs.status = "completed".to_string();
+                                    hs.finish("completed");
                                 }
                             }
                         }
@@ -929,7 +966,141 @@ pub async fn run_tui(
         eprintln!("All sandboxes stopped.");
     }
 
+    // Windows safety net: even with spawn_blocking on the HvSocket SSE reader,
+    // a blocking-pool thread parked in recv() cannot be cancelled. The tokio
+    // runtime drop will skip it (because blocking-pool threads are detached),
+    // but belt-and-suspenders — explicitly exit so the process never lingers
+    // after /quit or /destroy.
+    #[cfg(target_os = "windows")]
+    {
+        std::process::exit(0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
     Ok(())
+}
+
+/// Run an agent command via the gateway exec endpoint (no SSH).
+///
+/// Used for auto-mode: sends the agent command to the guest gateway over
+/// HvSocket (Windows) or TCP (Linux/macOS) and streams NDJSON output back
+/// to the TUI as `TerminalData` events for the headless parser.
+async fn spawn_gateway_exec(
+    sandbox: Arc<Mutex<Sandbox>>,
+    agent_name: &str,
+    env: &HashMap<String, String>,
+    workdir: Option<&str>,
+    permissions: sandbox::Permissions,
+    prompt: Option<&str>,
+    is_resumed: bool,
+    model: Option<&str>,
+    panel_idx: usize,
+    tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    let agent_cmd = super::terminal::agent_cli_command(
+        agent_name, permissions, true, is_resumed, model,
+    );
+    let cmd = match agent_cmd {
+        Some(c) => c,
+        None => {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: Some("No agent command for gateway exec".to_string()),
+            });
+            return;
+        }
+    };
+
+    // Build environment map — panel env + agent-specific vars.
+    let mut exec_env = env.clone();
+    exec_env.extend(super::terminal::agent_env_vars(
+        agent_name, permissions, true, model, prompt,
+    ));
+
+    // Wrap in `script -qfc` for PTY allocation (forces line-buffered output
+    // from Node.js/Rust CLIs that default to full buffering without a TTY).
+    let escaped_cmd = cmd.replace('"', "\\\"");
+    let shell_cmd = format!("script -qfc \"{}\" /dev/null", escaped_cmd);
+    tracing::info!(
+        "[spawn_gateway_exec] agent={} auto=true resumed={} cmd={:?}",
+        agent_name, is_resumed, cmd,
+    );
+    tracing::info!("[spawn_gateway_exec] shell_cmd={:?}", shell_cmd);
+
+    let exec_opts = sandbox::ExecOptions {
+        workdir: workdir.map(|s| s.to_string()),
+        env: exec_env,
+        user: None,
+        timeout_secs: Some(86400), // 24h for long-running agent tasks
+    };
+
+    // Transition panel to Headless mode with a no-op handle.
+    let handle = super::terminal::SshTerminalHandle::noop();
+    let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
+
+    // Extract what we need from the sandbox while holding the lock briefly,
+    // then release it. exec_stream_with_options does blocking I/O on Windows
+    // (HvSocket) so we must not hold the Mutex during execution.
+    let exec_result = {
+        let sb = sandbox.lock().await;
+        // Verify sandbox is running
+        if sb.status() != sandbox::SandboxStatus::Running {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: Some("Sandbox not ready for exec".to_string()),
+            });
+            return;
+        }
+        // Use exec_stream_with_options — on Windows this calls blocking
+        // HvSocket I/O, but we're inside tokio::spawn so it runs on a
+        // worker thread. The on_output callback sends TerminalData events.
+        let tx_data = tx.clone();
+        let chunk_counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let chunk_counter_cb = chunk_counter.clone();
+        sb.exec_stream_with_options(
+            "sh",
+            &["-c", &shell_cmd],
+            exec_opts,
+            move |chunk| {
+                // Gateway SSE events don't include trailing newlines, but the
+                // headless NDJSON parser splits on \n. Append newline to each
+                // chunk (same as `nanosb exec` in main.rs).
+                let n = chunk_counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n == 1 || n % 20 == 0 {
+                    let preview: String = chunk.data.chars().take(200).collect();
+                    tracing::info!(
+                        "[spawn_gateway_exec] chunk #{} (stream={:?}): {}",
+                        n, chunk.stream, preview
+                    );
+                }
+                let mut data = chunk.data.into_bytes();
+                data.push(b'\n');
+                let _ = tx_data.send(AppEvent::TerminalData {
+                    panel_idx,
+                    data,
+                });
+            },
+        ).await
+    };
+
+    match exec_result {
+        Ok(exit_code) => {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: if exit_code != 0 {
+                    Some(format!("Agent exited with code {}", exit_code))
+                } else {
+                    None
+                },
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: Some(format!("Gateway exec failed: {}", e)),
+            });
+        }
+    }
 }
 
 /// Print validation results as a checklist.
@@ -1731,8 +1902,8 @@ async fn handle_command(
         Command::McpToggle => {
             app.show_mcp_sidebar = !app.show_mcp_sidebar;
         }
-        Command::AddAgent { agent, image, project, branch, name, auto_mode, prompt, model } => {
-            add_agent(app, &agent, image.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), tx);
+        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model } => {
+            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), tx);
         }
         Command::Env { assignment } => {
             handle_env(app, assignment);
@@ -2747,7 +2918,7 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                 if let Some(text) = json.get("result").and_then(|r| r.as_str()) {
                     state.agent_text.push_str(text);
                 }
-                state.status = "completed".to_string();
+                state.finish("completed");
             }
 
             // =================================================================
@@ -2908,7 +3079,7 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             }
             // Goose completion
             "complete" => {
-                state.status = "completed".to_string();
+                state.finish("completed");
             }
 
             // =================================================================
@@ -3005,7 +3176,7 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                     .or_else(|| json.get("message").and_then(|v| v.as_str()))
                     .unwrap_or("unknown error");
                 state.agent_text.push_str(&format!("[error] {}\n", msg));
-                state.status = "error".to_string();
+                state.finish("error");
             }
 
             // Silent lifecycle events
@@ -3092,6 +3263,7 @@ fn add_agent(
     app: &mut App,
     agent: &str,
     image: Option<&str>,
+    tag: Option<&str>,
     project: Option<&str>,
     branch: Option<&str>,
     name: Option<&str>,
@@ -3100,10 +3272,16 @@ fn add_agent(
     model: Option<&str>,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    let image_name = match image {
-        Some(img) => sandbox::config::normalize_image(img),
-        None => sandbox::config::normalize_image(agent),
+    // Build image reference. --tag overrides the default "latest" tag
+    // for bare agent names (e.g., `/add claude --tag rc11` → `claude:rc11`).
+    let image_ref = match image {
+        Some(img) => img.to_string(),
+        None => match tag {
+            Some(t) => format!("{}:{}", agent, t),
+            None => agent.to_string(),
+        },
     };
+    let image_name = sandbox::config::normalize_image(&image_ref);
 
     let mut panel = AgentPanel::new(agent);
 

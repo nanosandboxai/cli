@@ -131,6 +131,7 @@ pub struct SshTerminalHandle {
     pub resize_tx: mpsc::UnboundedSender<(u16, u16)>,
 }
 
+
 /// Minimal russh client handler.
 ///
 /// Accepts all server keys since we only connect to localhost sandboxes
@@ -208,30 +209,9 @@ pub async fn connect_ssh(
     for (key, val) in env {
         env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
-    let effective_perms = permissions.effective(auto_mode);
-
-    // Goose permissions via GOOSE_MODE env var.
-    if agent_name == "goose" {
-        let goose_mode = match effective_perms {
-            sandbox::Permissions::AllowAll => "auto",
-            sandbox::Permissions::AcceptEdits => "smart_approve",
-            sandbox::Permissions::Default => "smart_approve",
-        };
-        env_parts.push(format!("export GOOSE_MODE='{}'", goose_mode));
-        // Goose uses env var for model selection instead of CLI flag.
-        if let Some(m) = model {
-            env_parts.push(format!("export GOOSE_DEFAULT_MODEL='{}'", m));
-        }
-    }
-
-    // Set prompt env var for headless agents.
-    if auto_mode {
-        if let Some(p) = prompt {
-            env_parts.push(format!(
-                "export NANOSB_PROMPT='{}'",
-                p.replace('\'', "'\\''")
-            ));
-        }
+    // Agent-specific env vars (Goose mode, prompt, etc.)
+    for (key, val) in agent_env_vars(agent_name, permissions, auto_mode, model, prompt) {
+        env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
 
     let agent_cmd = agent_cli_command(agent_name, permissions, auto_mode, is_resumed, model);
@@ -380,6 +360,52 @@ pub async fn connect_ssh(
     })
 }
 
+impl SshTerminalHandle {
+    /// Create a no-op handle for headless gateway exec (no SSH session).
+    pub fn noop() -> Self {
+        let (write_tx, _) = mpsc::unbounded_channel();
+        let (resize_tx, _) = mpsc::unbounded_channel();
+        Self { write_tx, resize_tx }
+    }
+}
+
+/// Build agent-specific environment variables (e.g. Goose mode, prompt).
+///
+/// Returns a map of extra env vars that both the SSH and gateway exec paths
+/// need to set for the agent to work correctly.
+pub(super) fn agent_env_vars(
+    agent_name: &str,
+    permissions: sandbox::Permissions,
+    auto_mode: bool,
+    model: Option<&str>,
+    prompt: Option<&str>,
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    let effective = permissions.effective(auto_mode);
+
+    // Goose permissions via GOOSE_MODE env var.
+    if agent_name == "goose" {
+        let goose_mode = match effective {
+            sandbox::Permissions::AllowAll => "auto",
+            sandbox::Permissions::AcceptEdits => "smart_approve",
+            sandbox::Permissions::Default => "smart_approve",
+        };
+        vars.insert("GOOSE_MODE".to_string(), goose_mode.to_string());
+        if let Some(m) = model {
+            vars.insert("GOOSE_DEFAULT_MODEL".to_string(), m.to_string());
+        }
+    }
+
+    // Prompt env var for headless agents.
+    if auto_mode {
+        if let Some(p) = prompt {
+            vars.insert("NANOSB_PROMPT".to_string(), p.to_string());
+        }
+    }
+
+    vars
+}
+
 /// Map agent name to the CLI command to auto-launch after SSH connection.
 ///
 /// When `auto_mode` is true (headless), the agent is launched in non-interactive
@@ -391,7 +417,7 @@ pub async fn connect_ssh(
 ///
 /// When `is_resumed` is true, uses the agent's session resume command so it
 /// picks up previous conversation context from `/workspace/.nanosb-state/`.
-fn agent_cli_command(
+pub(super) fn agent_cli_command(
     agent_name: &str,
     permissions: sandbox::Permissions,
     auto_mode: bool,

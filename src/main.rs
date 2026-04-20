@@ -277,7 +277,7 @@ mod cli {
         // The _log_guard must be held alive for the duration of the program.
         let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
 
-        if cli.command.is_some() {
+        {
             use tracing_subscriber::layer::SubscriberExt;
             use tracing_subscriber::util::SubscriberInitExt;
             use tracing_subscriber::{EnvFilter, Layer, fmt};
@@ -296,17 +296,24 @@ mod cli {
             if let Some((file_writer, guard)) = file_setup {
                 _log_guard = Some(guard);
 
+                // In TUI mode (cli.command is None) we can't write to stderr —
+                // it corrupts the ratatui alternate screen. So default to info
+                // there to capture the SSE/exec diagnostics. For command mode,
+                // keep warn so we don't spam the file unnecessarily.
+                let default_level = if cli.command.is_none() { "info" } else { "warn" };
                 let file_level = std::env::var("NANOSB_LOG")
                     .ok()
                     .filter(|v| !v.is_empty())
-                    .unwrap_or_else(|| "warn".to_string());
+                    .unwrap_or_else(|| default_level.to_string());
                 let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
                     .with_filter(EnvFilter::new(&file_filter));
 
-                if cli.verbose {
+                // Only attach a stderr layer when there's a command AND --verbose.
+                // TUI must never write to stderr (it breaks the alternate screen).
+                if cli.command.is_some() && cli.verbose {
                     let stderr_layer = fmt::layer()
                         .with_writer(std::io::stderr)
                         .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug"));
@@ -322,7 +329,7 @@ mod cli {
                 }
             } else {
                 _log_guard = None;
-                if cli.verbose {
+                if cli.command.is_some() && cli.verbose {
                     tracing_subscriber::fmt()
                         .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug")
                         .init();
@@ -333,8 +340,6 @@ mod cli {
                     .try_init();
                 }
             }
-        } else {
-            _log_guard = None;
         }
 
         match cli.command {
