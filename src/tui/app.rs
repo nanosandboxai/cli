@@ -304,7 +304,7 @@ pub struct AgentPanel {
     /// Key: dedup key, Value: (full URL, timestamp of last growth).
     pub pending_urls: HashMap<String, (String, std::time::Instant)>,
     /// Active project mount for this panel's sandbox.
-    pub project_mount: Option<sandbox::runtime::project::ProjectMount>,
+    pub project_mount: Option<sandbox::ProjectMount>,
     /// Last known HEAD SHA in the clone (for commit auto-sync detection).
     pub last_known_head: Option<String>,
     /// Initial HEAD SHA of the clone at creation (base for committed files diff).

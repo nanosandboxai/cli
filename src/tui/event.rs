@@ -29,7 +29,7 @@ pub enum AppEvent {
         /// Short sandbox identifier for display.
         short_id: String,
         /// Project mount transferred from the sandbox (if any).
-        project_mount: Option<sandbox::runtime::project::ProjectMount>,
+        project_mount: Option<sandbox::ProjectMount>,
     },
     /// Sandbox creation or startup failed.
     SandboxFailed {

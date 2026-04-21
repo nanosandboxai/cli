@@ -1329,7 +1329,7 @@ mod cli {
         };
 
         let canonical_path = project_path.canonicalize().unwrap_or_else(|_| project_path.clone());
-        let clones = sandbox::runtime::project::clones_dir(&canonical_path);
+        let clones = sandbox::project::clones_dir(&canonical_path);
         if !clones.exists() {
             println!("No nanosb clones found for {}", project_path.display());
             return Ok(());

@@ -3600,7 +3600,7 @@ fn resume_session(
                 config.project = None;
 
                 // Create a ProjectMount on the panel to handle suspend/teardown.
-                if let Ok(mut pm) = sandbox::runtime::project::ProjectMount::detect(&panel_project_path) {
+                if let Ok(mut pm) = sandbox::ProjectMount::detect(&panel_project_path) {
                     let _ = pm.resume(clone_path, sp.branches.clone());
                     panel.project_mount = Some(pm);
                 }
