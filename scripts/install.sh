@@ -211,13 +211,31 @@ install_deps
 download_binary
 [[ "$OS" == "Darwin" ]] && { header "Codesigning nanosb"; codesign_binary; }
 
-# PATH check
+# PATH check — auto-configure if missing
 if ! printf '%s' ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
-    header "PATH not configured"
-    warn "${INSTALL_DIR} is not in your PATH"
-    info "Add to your shell profile:"
-    info "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
-    info "Then: source ~/.zshrc"
+    header "Configuring PATH"
+
+    path_line="export PATH=\"${INSTALL_DIR}:\$PATH\""
+    path_added=false
+
+    for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+        [ -f "$rc" ] || continue
+        if ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+            printf '\n# Added by Nanosandbox installer\n%s\n' "$path_line" >> "$rc"
+            success "Added to $(basename "$rc")"
+            path_added=true
+        fi
+    done
+
+    if [ "$path_added" = false ]; then
+        default_rc="$HOME/.bashrc"
+        [ "$OS" = "Darwin" ] && default_rc="$HOME/.zshrc"
+        printf '\n# Added by Nanosandbox installer\n%s\n' "$path_line" >> "$default_rc"
+        success "Added to $(basename "$default_rc")"
+    fi
+
+    export PATH="${INSTALL_DIR}:$PATH"
+    info "PATH updated for this session"
 fi
 
 # Summary
