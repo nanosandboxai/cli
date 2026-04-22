@@ -253,3 +253,12 @@ cat <<EOF
 
   Run 'nanosb doctor' to verify the installation.
 EOF
+
+# If PATH was just configured, remind user to reload
+if ! printf '%s' ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
+    echo ""
+    info "To start using nanosb in this terminal, run:"
+    echo ""
+    echo "    source ~/.zshrc"
+    echo ""
+fi
