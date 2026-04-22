@@ -3,6 +3,11 @@
 # Nanosandbox CLI Installer
 #
 # Installs the nanosb CLI binary and its runtime dependencies.
+# Everything is installed under ~/.nanosandbox/ (no sudo required):
+#
+#   ~/.nanosandbox/bin/nanosb     — CLI binary
+#   ~/.nanosandbox/bin/gvproxy    — networking daemon (via install-deps)
+#   ~/.nanosandbox/libs/          — shared libraries (via install-deps)
 #
 #   1. Installs runtime dependencies via install-deps (libkrunfw + gvproxy)
 #   2. Downloads the nanosb binary
@@ -14,7 +19,7 @@
 # Environment variables:
 #   NANOSB_VERSION   - CLI version to install (default: "latest")
 #   DEPS_VERSION     - Dependencies version (default: "latest")
-#   INSTALL_DIR      - Binary install directory (default: ~/.local/bin)
+#   NANOSANDBOX_HOME - Base directory (default: ~/.nanosandbox)
 #   NANOSB_BINARY    - Path to a local binary to install (skips download)
 #
 
@@ -26,7 +31,8 @@ NANOSB_VERSION="${NANOSB_VERSION:-latest}"
 NANOSB_VERSION="${NANOSB_VERSION#v}"   # strip leading "v" — tags use v-prefix internally
 DEPS_VERSION="${DEPS_VERSION:-latest}"
 RELEASE_REPO="nanosandboxai/cli"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+NANOSANDBOX_HOME="${NANOSANDBOX_HOME:-$HOME/.nanosandbox}"
+INSTALL_DIR="${NANOSANDBOX_HOME}/bin"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -96,7 +102,7 @@ install_deps() {
     fi
 
     info "Running install-deps installer..."
-    if DEPS_VERSION="$resolved_version" bash "$tmpfile"; then
+    if DEPS_VERSION="$resolved_version" NANOSANDBOX_HOME="$NANOSANDBOX_HOME" bash "$tmpfile"; then
         success "Runtime dependencies installed"
     else
         warn "install-deps installer exited with an error"
@@ -163,8 +169,7 @@ codesign_binary() {
         for candidate in \
             "$(command -v nanosb 2>/dev/null || true)" \
             "./target/debug/nanosb" \
-            "./target/release/nanosb" \
-            "/usr/local/bin/nanosb"; do
+            "./target/release/nanosb"; do
             if [[ -n "$candidate" && -f "$candidate" ]]; then
                 binary_path="$candidate"
                 break
@@ -224,8 +229,8 @@ case "$OS" in
 esac
 cat <<EOF
   nanosb     → ${INSTALL_DIR}/nanosb
-  libkrunfw  → /usr/local/lib/
-  gvproxy    → ${HOME}/.local/bin/gvproxy
+  libkrunfw  → ${NANOSANDBOX_HOME}/libs/
+  gvproxy    → ${INSTALL_DIR}/gvproxy
   backend    → ${backend}
 
   Run 'nanosb doctor' to verify the installation.

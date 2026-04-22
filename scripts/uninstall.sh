@@ -4,7 +4,7 @@
 #
 # Removes the nanosb CLI binary and (by default) its runtime dependencies.
 #
-#   1. Removes the nanosb binary
+#   1. Removes the nanosb binary from ~/.nanosandbox/bin/
 #   2. Delegates dependency removal to install-deps' uninstall.sh
 #      (libkrunfw + gvproxy)
 #
@@ -12,11 +12,9 @@
 #   curl -fsSL https://github.com/nanosandboxai/cli/releases/latest/download/uninstall.sh | bash
 #
 # Environment variables:
-#   INSTALL_DIR    - Binary install directory (default: ~/.local/bin)
-#   DEPS_VERSION   - install-deps version to use for uninstall (default: latest)
-#   KEEP_DEPS      - If set to "1", keep libkrunfw + gvproxy installed
-#   LIB_DIR        - Forwarded to install-deps uninstall (default: /usr/local/lib)
-#   BIN_DIR        - Forwarded to install-deps uninstall (default: ~/.local/bin)
+#   NANOSANDBOX_HOME - Base directory (default: ~/.nanosandbox)
+#   DEPS_VERSION     - install-deps version to use for uninstall (default: latest)
+#   KEEP_DEPS        - If set to "1", keep libkrunfw + gvproxy installed
 #
 
 set -eo pipefail
@@ -25,9 +23,13 @@ set -eo pipefail
 # Configuration
 # =============================================================================
 
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+NANOSANDBOX_HOME="${NANOSANDBOX_HOME:-$HOME/.nanosandbox}"
+INSTALL_DIR="${NANOSANDBOX_HOME}/bin"
 DEPS_VERSION="${DEPS_VERSION:-latest}"
 KEEP_DEPS="${KEEP_DEPS:-0}"
+
+# Also check legacy location
+LEGACY_INSTALL_DIR="$HOME/.local/bin"
 
 # =============================================================================
 # Helpers
@@ -66,6 +68,12 @@ remove_binary() {
         success "Removed ${binary_path}"
     else
         info "nanosb not found at ${binary_path}"
+    fi
+
+    # Check legacy location
+    if [[ -f "${LEGACY_INSTALL_DIR}/nanosb" ]]; then
+        rm -f "${LEGACY_INSTALL_DIR}/nanosb"
+        info "Removed legacy ${LEGACY_INSTALL_DIR}/nanosb"
     fi
 
     # Also check common alternative locations
@@ -142,7 +150,7 @@ remove_deps() {
     fi
 
     info "Running install-deps uninstaller..."
-    if bash "$tmpfile"; then
+    if NANOSANDBOX_HOME="$NANOSANDBOX_HOME" bash "$tmpfile"; then
         success "Runtime dependencies removed"
     else
         warn "install-deps uninstaller exited with an error"
