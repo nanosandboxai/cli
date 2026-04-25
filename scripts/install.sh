@@ -205,11 +205,48 @@ PLIST
     rm -f "$entitlements"
 }
 
+# ─── /usr/local/bin symlink ──────────────────────────────────────────────────
+
+# Symlinks ~/.nanosandbox/bin/nanosb into /usr/local/bin so it's on PATH in
+# every new terminal without rc-file edits. /usr/local/bin is on the default
+# PATH on both macOS and Linux. Requires sudo; falls back silently if not
+# available (PATH edits below still cover the user's shell).
+install_symlink() {
+    local target="${INSTALL_DIR}/nanosb"
+    local link="/usr/local/bin/nanosb"
+
+    [ -f "$target" ] || return 0
+
+    header "Linking nanosb into /usr/local/bin"
+
+    if [ ! -d /usr/local/bin ]; then
+        sudo mkdir -p /usr/local/bin 2>/dev/null || {
+            warn "Could not create /usr/local/bin — skipping symlink"
+            info "nanosb still available at ${target}"
+            return 0
+        }
+    fi
+
+    if sudo -n true 2>/dev/null; then
+        sudo ln -sf "$target" "$link"
+        success "Linked ${link} → ${target}"
+    else
+        info "sudo password required to link nanosb into /usr/local/bin"
+        if sudo ln -sf "$target" "$link"; then
+            success "Linked ${link} → ${target}"
+        else
+            warn "Skipped /usr/local/bin symlink — nanosb available at ${target}"
+            info "Add ${INSTALL_DIR} to PATH manually or re-run installer with sudo"
+        fi
+    fi
+}
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 install_deps
 download_binary
 [[ "$OS" == "Darwin" ]] && { header "Codesigning nanosb"; codesign_binary; }
+install_symlink
 
 # PATH check — auto-configure if missing
 if ! printf '%s' ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
@@ -247,6 +284,7 @@ case "$OS" in
 esac
 cat <<EOF
   nanosb     → ${INSTALL_DIR}/nanosb
+  symlink    → /usr/local/bin/nanosb
   libkrunfw  → ${NANOSANDBOX_HOME}/libs/
   gvproxy    → ${INSTALL_DIR}/gvproxy
   backend    → ${backend}
@@ -254,8 +292,9 @@ cat <<EOF
   Run 'nanosb doctor' to verify the installation.
 EOF
 
-# If PATH was just configured, remind user to reload
-if ! printf '%s' ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
+# If neither the /usr/local/bin symlink nor the current PATH includes nanosb,
+# remind the user to reload their shell rc.
+if [ ! -L /usr/local/bin/nanosb ] && ! printf '%s' ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
     echo ""
     info "To start using nanosb in this terminal, run:"
     echo ""

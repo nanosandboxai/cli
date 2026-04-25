@@ -76,13 +76,25 @@ remove_binary() {
         info "Removed legacy ${LEGACY_INSTALL_DIR}/nanosb"
     fi
 
-    # Also check common alternative locations
-    for candidate in /usr/local/bin/nanosb; do
-        if [[ -f "$candidate" ]]; then
-            warn "Found another nanosb at: $candidate"
-            warn "Remove manually with: sudo rm -f $candidate"
-        fi
-    done
+    # Remove /usr/local/bin symlink if it points at our nanosb. Only remove
+    # symlinks (not real binaries) and only ones we own. If a real binary
+    # exists at /usr/local/bin/nanosb, warn the user — that's not ours.
+    sym="/usr/local/bin/nanosb"
+    if [[ -L "$sym" ]]; then
+        target="$(readlink "$sym" 2>/dev/null || true)"
+        case "$target" in
+            "${INSTALL_DIR}/nanosb"|"${LEGACY_INSTALL_DIR}/nanosb")
+                sudo rm -f "$sym" 2>/dev/null || rm -f "$sym" 2>/dev/null || true
+                success "Removed symlink $sym"
+                ;;
+            *)
+                warn "Symlink $sym points to $target — leaving in place"
+                ;;
+        esac
+    elif [[ -f "$sym" ]]; then
+        warn "Found another nanosb at: $sym"
+        warn "Remove manually with: sudo rm -f $sym"
+    fi
 }
 
 # =============================================================================
