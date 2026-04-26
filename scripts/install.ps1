@@ -111,18 +111,21 @@ function Install-NanosandboxCLI {
     # --- Install runtime dependencies ---
     Write-Info "Installing runtime dependencies..."
     $depsRepo = "nanosandboxai/install-deps"
-    $depsTag = $null
-    try {
-        $depsReleases = Invoke-RestMethod "https://api.github.com/repos/$depsRepo/releases?per_page=1"
-        $depsTag = $depsReleases[0].tag_name
-        $depsUrl = "https://github.com/$depsRepo/releases/download/$depsTag/install.ps1"
-    } catch {
-        $depsUrl = "https://github.com/$depsRepo/releases/latest/download/install.ps1"
-    }
+    # cli and install-deps publish coordinated rc tags, so reuse $resolvedVersion
+    # instead of re-querying the install-deps API (the default /releases ordering
+    # is by tag commit date, which can return a stale tag whose install.ps1 asset
+    # doesn't exist yet).
+    $depsTag = $resolvedVersion
+    $depsUrl = "https://github.com/$depsRepo/releases/download/$depsTag/install.ps1"
     try {
         Write-Info "Fetching install-deps ($depsTag)..."
         $depsScript = Invoke-RestMethod $depsUrl
+        # The script ends with `Install-NanosandboxDeps @args`, which would run
+        # with empty $args here. Strip that auto-invocation so we can call the
+        # function ourselves with the version pinned.
+        $depsScript = $depsScript -replace 'Install-NanosandboxDeps\s+@args\s*$', ''
         Invoke-Expression $depsScript
+        Install-NanosandboxDeps -Version $resolvedVersion -InstallDir $InstallDir
         Write-Ok "Runtime dependencies installed"
     } catch {
         Write-Warn "Failed to install runtime dependencies automatically: $_"
