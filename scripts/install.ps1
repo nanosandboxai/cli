@@ -95,7 +95,7 @@ function Install-NanosandboxCLI {
     Write-Info "Install directory: $InstallDir"
 
     # --- Download nanosb.exe ---
-    $binaryName = "nanosb-windows-amd64.exe"
+    $binaryName = "nanosb.exe"
     $downloadUrl = "https://github.com/$releaseRepo/releases/download/$resolvedVersion/$binaryName"
     $destPath = Join-Path $InstallDir "nanosb.exe"
 
