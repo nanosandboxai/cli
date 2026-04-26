@@ -75,15 +75,15 @@ jobs:
 
       - name: Build extract_kernel tool
         if: steps.kernel-cache.outputs.cache-hit != 'true'
-        run: |
-          cd runtime
-          cargo build --release -p extract_kernel
+        # tools/extract_kernel is in runtime's workspace `exclude` list, so
+        # build it standalone from its own directory.
+        run: cargo build --release --manifest-path runtime/tools/extract_kernel/Cargo.toml
 
       - name: Extract vmlinux.bin + addr files
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p kernel-bundle
-          ./runtime/target/release/extract_kernel \
+          ./runtime/tools/extract_kernel/target/release/extract_kernel \
             --elf runtime/deps/libkrunfw/libkrunfw.so \
             kernel-bundle
           echo "=== Extracted ==="
