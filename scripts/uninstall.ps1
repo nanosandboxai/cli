@@ -55,13 +55,15 @@ function Uninstall-NanosandboxCLI {
     $depsExist = (Test-Path (Join-Path $libsDir "libkrunfw.dll")) -or
                  (Test-Path (Join-Path $libsDir "busybox")) -or
                  (Test-Path (Join-Path $libsDir "vsock_proxy")) -or
+                 (Test-Path (Join-Path $libsDir "plan9_mount")) -or
                  # Legacy: old install-deps placed deps at root level
                  (Test-Path (Join-Path $InstallDir "libkrunfw.dll")) -or
                  (Test-Path (Join-Path $InstallDir "busybox")) -or
-                 (Test-Path (Join-Path $InstallDir "vsock_proxy"))
+                 (Test-Path (Join-Path $InstallDir "vsock_proxy")) -or
+                 (Test-Path (Join-Path $InstallDir "plan9_mount"))
 
     if ($depsExist) {
-        Write-Host "  Runtime dependencies found (libkrunfw.dll, busybox, vsock_proxy)." -ForegroundColor White
+        Write-Host "  Runtime dependencies found (libkrunfw.dll, busybox, vsock_proxy, plan9_mount)." -ForegroundColor White
         $answer = Read-Host "  Also remove runtime dependencies? [y/N]"
         if ($answer -match '^[Yy]') {
             # Remove from libs/ (current layout)
@@ -70,7 +72,7 @@ function Uninstall-NanosandboxCLI {
                 Write-Ok "Removed $libsDir"
             }
             # Remove legacy root-level deps
-            foreach ($file in @('libkrunfw.dll', 'busybox', 'vsock_proxy')) {
+            foreach ($file in @('libkrunfw.dll', 'busybox', 'vsock_proxy', 'plan9_mount')) {
                 $path = Join-Path $InstallDir $file
                 if (Test-Path $path) {
                     Remove-Item $path -Force
@@ -88,7 +90,7 @@ function Uninstall-NanosandboxCLI {
         $children = Get-ChildItem $InstallDir -ErrorAction SilentlyContinue
         # Check for cache/logs/data dirs (anything beyond the binary and deps)
         $dataItems = $children | Where-Object {
-            $_.Name -notin @('nanosb.exe', 'libkrunfw.dll', 'busybox', 'vsock_proxy', 'libs')
+            $_.Name -notin @('nanosb.exe', 'libkrunfw.dll', 'busybox', 'vsock_proxy', 'plan9_mount', 'libs')
         }
     }
 
