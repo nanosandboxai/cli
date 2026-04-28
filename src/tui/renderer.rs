@@ -1206,9 +1206,6 @@ fn render_headless_panel(
 
     let text = if !state.agent_text.is_empty() {
         state.agent_text.clone()
-    } else if !state.raw_lines.is_empty() {
-        // Events received but no text yet — agent is initializing
-        "Agent initializing...".to_string()
     } else {
         "Waiting for agent output...".to_string()
     };

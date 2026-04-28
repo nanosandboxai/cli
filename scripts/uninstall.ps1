@@ -98,7 +98,7 @@ function Uninstall-NanosandboxCLI {
         foreach ($item in $dataItems) {
             Write-Host "    - $($item.Name)" -ForegroundColor DarkGray
         }
-        $answer = Read-Host "  Remove all cached data (images, logs, VHDX)? [y/N]"
+        $answer = Read-Host "  Remove all cached data (images, logs, rootfs)? [y/N]"
         if ($answer -match '^[Yy]') {
             Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
             Write-Ok "Removed $InstallDir and all contents"

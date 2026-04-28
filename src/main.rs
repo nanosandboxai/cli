@@ -74,10 +74,6 @@ mod cli {
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long = "env-file", global = true)]
         pub env_file: Vec<String>,
-
-        /// Root filesystem mode for Windows VMs: vhdx or plan9 (default: vhdx)
-        #[arg(long = "rootfs-mode", global = true)]
-        pub rootfs_mode: Option<String>,
     }
 
     #[derive(Subcommand)]
@@ -115,6 +111,11 @@ mod cli {
             /// Read environment variables from a file
             #[arg(long = "env-file")]
             env_file: Option<String>,
+
+            /// Forward host port to guest. Format: HOST:GUEST or PORT (same on both).
+            /// Repeatable. Example: --port 1455 --port 8080:80
+            #[arg(short = 'p', long = "port")]
+            ports: Vec<String>,
 
             /// Timeout in seconds (default: 600)
             #[arg(long, default_value = "600")]
@@ -416,15 +417,6 @@ mod cli {
                         anyhow::anyhow!("{}", e)
                     })?;
 
-                // Parse --rootfs-mode flag (Windows only).
-                let cli_rootfs_mode = cli.rootfs_mode.as_deref()
-                    .map(|s| s.parse::<sandbox::RootfsMode>())
-                    .transpose()
-                    .map_err(|e| {
-                        error!("Failed to parse --rootfs-mode flag: {}", e);
-                        anyhow::anyhow!("{}", e)
-                    })?;
-
                 // Apply CLI flag overrides (merge step 4).
                 sandbox::apply_cli_overrides(
                     &mut sandbox_configs,
@@ -433,7 +425,6 @@ mod cli {
                     cli.timeout,
                     cli_permissions,
                     &cli_env,
-                    cli_rootfs_mode,
                 );
 
                 // Filter to a single sandbox if --sandbox is specified.
@@ -477,14 +468,12 @@ mod cli {
                 memory,
                 env,
                 env_file,
+                ports,
                 timeout,
                 buffered,
                 command,
             }) => {
-                let run_rootfs_mode = cli.rootfs_mode.as_deref()
-                    .map(|s| s.parse::<sandbox::RootfsMode>())
-                    .transpose()
-                    .map_err(|e| anyhow::anyhow!("Invalid --rootfs-mode: {}", e))?;
+                let port_pairs = parse_port_specs(&ports)?;
                 cmd_run(
                     &image,
                     name,
@@ -492,12 +481,12 @@ mod cli {
                     memory,
                     &env,
                     env_file.as_deref(),
+                    &port_pairs,
                     timeout,
                     buffered,
                     &command,
                     cli.format,
                     cli.verbose,
-                    run_rootfs_mode,
                 )
                 .await
             }
@@ -643,6 +632,27 @@ mod cli {
     /// By default, output is streamed in real-time (like `docker run`).
     /// Use `--buffered` or `--format json` for buffered output.
     #[allow(clippy::too_many_arguments)]
+    /// Parse `--port` specs into (host, guest) pairs. Format: "HOST:GUEST" or "PORT" (same).
+    fn parse_port_specs(specs: &[String]) -> anyhow::Result<Vec<(u16, u16)>> {
+        let mut out = Vec::with_capacity(specs.len());
+        for s in specs {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            let pair = if let Some((h, g)) = s.split_once(':') {
+                let host: u16 = h.parse().map_err(|_| anyhow::anyhow!("invalid host port in '{}'", s))?;
+                let guest: u16 = g.parse().map_err(|_| anyhow::anyhow!("invalid guest port in '{}'", s))?;
+                (host, guest)
+            } else {
+                let p: u16 = s.parse().map_err(|_| anyhow::anyhow!("invalid port '{}'", s))?;
+                (p, p)
+            };
+            out.push(pair);
+        }
+        Ok(out)
+    }
+
     async fn cmd_run(
         image: &str,
         name: Option<String>,
@@ -650,12 +660,12 @@ mod cli {
         memory: u32,
         env_args: &[String],
         env_file: Option<&str>,
+        ports: &[(u16, u16)],
         timeout: u32,
         buffered: bool,
         command: &[String],
         format: OutputFormat,
         verbose: bool,
-        rootfs_mode: Option<sandbox::RootfsMode>,
     ) -> anyhow::Result<()> {
         preflight_check().await?;
 
@@ -688,12 +698,12 @@ mod cli {
             .memory_mb(memory)
             .timeout_secs(timeout);
 
-        if let Some(mode) = rootfs_mode {
-            builder = builder.rootfs_mode(mode);
-        }
-
         for (key, value) in &env_vars {
             builder = builder.env(key, value);
+        }
+
+        for (host, guest) in ports {
+            builder = builder.port(*host, *guest);
         }
 
         let config = builder.build();

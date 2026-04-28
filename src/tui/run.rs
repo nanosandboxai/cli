@@ -2842,17 +2842,33 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             continue;
         }
 
-        // Try to parse as JSON
+        // Try to parse as JSON. Lines that aren't JSON (shell errors,
+        // stderr, escape-only chunks) are still streaming output the user
+        // wants to see — surface them inline with an [exec] tag so nothing
+        // is silently dropped.
         let json: serde_json::Value = match serde_json::from_str(clean) {
             Ok(v) => v,
-            Err(_) => continue, // Not JSON — shell prompt, etc.
+            Err(_) => {
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[exec] ");
+                state.agent_text.push_str(clean);
+                state.agent_text.push('\n');
+                if state.status == "starting" {
+                    state.status = "running".to_string();
+                    state.started_at = std::time::Instant::now();
+                }
+                continue;
+            }
         };
 
-        state.raw_lines.push(clean.to_string());
-
         // Transition from "starting" once we receive any valid JSON.
+        // Also reset the elapsed timer here so it measures agent execution
+        // time, not VM boot + agent CLI init time (which can be ~30s).
         if state.status == "starting" {
             state.status = "running".to_string();
+            state.started_at = std::time::Instant::now();
         }
 
         let event_type = json
@@ -2860,51 +2876,123 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             .and_then(|t| t.as_str())
             .unwrap_or("");
 
+        // Trace every parsed event so we can diagnose missing-output bugs.
+        // Truncated to keep logs readable for long content blocks.
+        tracing::info!(
+            "[parse_headless] event_type={:?} raw_len={} agent_text_len={}",
+            event_type, clean.len(), state.agent_text.len()
+        );
+
         match event_type {
             // =================================================================
-            // Claude Code: -p --output-format stream-json
+            // Claude Code: -p --output-format stream-json (full SSE schema)
             // =================================================================
 
-            // Token-level streaming delta (requires --include-partial-messages)
+            // Granular SSE events from --include-partial-messages.
+            // The Anthropic Messages stream nests its event family under .event.type:
+            //   message_start, content_block_start, content_block_delta,
+            //   content_block_stop, message_delta, message_stop, ping
             "stream_event" => {
-                if let Some(delta_text) = json
-                    .pointer("/event/delta/text")
+                let inner_type = json
+                    .pointer("/event/type")
                     .and_then(|v| v.as_str())
-                {
-                    state.agent_text.push_str(delta_text);
-                    state.status = "thinking".to_string();
-                }
-                // Tool use block start
-                if let Some(name) = json
-                    .pointer("/event/content_block/name")
-                    .and_then(|v| v.as_str())
-                {
-                    state.tool_calls.push(super::app::HeadlessToolCall {
-                        tool_name: name.to_string(),
-                        input_summary: String::new(),
-                        output_preview: String::new(),
-                        status: "running".to_string(),
-                    });
-                    state.status = "tool_use".to_string();
-                }
-            }
-            // Complete assistant turn (text + tool_use blocks in content array)
-            "assistant" => {
-                if let Some(content) = json.get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                {
-                    for block in content {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            state.agent_text.push_str(text);
+                    .unwrap_or("");
+                match inner_type {
+                    "message_start" => {
+                        if let Some(model) = json
+                            .pointer("/event/message/model")
+                            .and_then(|v| v.as_str())
+                        {
+                            state.status = format!("running ({})", model);
+                        }
+                    }
+                    "content_block_start" => {
+                        let block_type = json
+                            .pointer("/event/content_block/type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match block_type {
+                            "tool_use" => {
+                                let name = json
+                                    .pointer("/event/content_block/name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("tool");
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: name.to_string(),
+                                    input_summary: String::new(),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                                state.status = "tool_use".to_string();
+                            }
+                            "thinking" => {
+                                state.status = "thinking".to_string();
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_delta" => {
+                        let delta_type = json
+                            .pointer("/event/delta/type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match delta_type {
+                            "text_delta" => {
+                                if let Some(text) = json
+                                    .pointer("/event/delta/text")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    state.agent_text.push_str(text);
+                                    state.status = "thinking".to_string();
+                                }
+                            }
+                            "thinking_delta" => {
+                                if let Some(text) = json
+                                    .pointer("/event/delta/thinking")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    state.agent_text.push_str(text);
+                                    state.status = "thinking".to_string();
+                                }
+                            }
+                            "input_json_delta" => {
+                                if let Some(partial) = json
+                                    .pointer("/event/delta/partial_json")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if let Some(last) = state.tool_calls.last_mut() {
+                                        let mut combined = last.input_summary.clone();
+                                        combined.push_str(partial);
+                                        last.input_summary = truncate_str(&combined, 80);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_stop" => {
+                        if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
                             state.agent_text.push('\n');
                         }
-                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                            let input = block.get("input").map(|v| v.to_string()).unwrap_or_default();
+                    }
+                    // Lifecycle markers — no payload to render.
+                    "message_delta" | "message_stop" | "ping" => {}
+                    // Legacy / un-nested form — preserve prior shallow extraction.
+                    _ => {
+                        if let Some(text) = json
+                            .pointer("/event/delta/text")
+                            .and_then(|v| v.as_str())
+                        {
+                            state.agent_text.push_str(text);
+                            state.status = "thinking".to_string();
+                        }
+                        if let Some(name) = json
+                            .pointer("/event/content_block/name")
+                            .and_then(|v| v.as_str())
+                        {
                             state.tool_calls.push(super::app::HeadlessToolCall {
                                 tool_name: name.to_string(),
-                                input_summary: truncate_str(&input, 80),
+                                input_summary: String::new(),
                                 output_preview: String::new(),
                                 status: "running".to_string(),
                             });
@@ -2913,29 +3001,108 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                     }
                 }
             }
-            // Claude final result
-            "result" => {
-                if let Some(text) = json.get("result").and_then(|r| r.as_str()) {
-                    state.agent_text.push_str(text);
+            // Complete assistant turn — content[] holds text, thinking, and tool_use blocks.
+            "assistant" => {
+                if let Some(content) = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    for block in content {
+                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match block_type {
+                            "text" => {
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    state.agent_text.push_str(text);
+                                    state.agent_text.push('\n');
+                                }
+                            }
+                            "thinking" => {
+                                if let Some(text) = block.get("thinking").and_then(|t| t.as_str()) {
+                                    state.agent_text.push_str(text);
+                                    state.agent_text.push('\n');
+                                }
+                            }
+                            "tool_use" => {
+                                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                                let input = block.get("input").map(|v| v.to_string()).unwrap_or_default();
+                                let summary = truncate_str(&input, 200);
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[tool:{}] {}\n", name, summary));
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: name.to_string(),
+                                    input_summary: truncate_str(&input, 80),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                                state.status = "tool_use".to_string();
+                            }
+                            _ => {
+                                // Unknown content block — best-effort text extraction.
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    state.agent_text.push_str(text);
+                                    state.agent_text.push('\n');
+                                }
+                            }
+                        }
+                    }
                 }
-                state.finish("completed");
+            }
+            // Claude final result. May indicate API failure via is_error/api_error_status
+            // even when subtype="success" (Claude Code emits a synthetic result on auth
+            // or quota errors, e.g. "Credit balance is too low" with HTTP 400).
+            "result" => {
+                let is_error = json.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let api_status = json.get("api_error_status").and_then(|v| v.as_i64());
+                let result_text = json.get("result").and_then(|r| r.as_str()).unwrap_or("");
+
+                if is_error || api_status.is_some() {
+                    let header = match api_status {
+                        Some(code) => format!("[error] API {}: ", code),
+                        None => "[error] ".to_string(),
+                    };
+                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                        state.agent_text.push('\n');
+                    }
+                    state.agent_text.push_str(&header);
+                    state.agent_text.push_str(result_text);
+                    state.agent_text.push('\n');
+                    tracing::info!("[parse_headless] result is_error=true api={:?} text={:?}", api_status, result_text);
+                    state.finish("error");
+                } else {
+                    if !result_text.is_empty() {
+                        state.agent_text.push_str(result_text);
+                    }
+                    tracing::info!("[parse_headless] result success len={}", result_text.len());
+                    state.finish("completed");
+                }
             }
 
             // =================================================================
             // Codex: exec --json (NDJSON streaming)
             // =================================================================
 
-            // Lifecycle events (no content to extract)
-            "thread.started" | "turn.started" => {}
+            // Lifecycle events with no content payload.
+            // Surface them as visible markers so the user sees activity.
+            "thread.started" | "turn.started" => {
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[");
+                state.agent_text.push_str(event_type);
+                state.agent_text.push_str("]\n");
+            }
+            // End-of-turn — for one-shot `exec --json`, this signals run completion.
             "turn.completed" => {
-                // Mark last tool as done if still running
                 if let Some(last) = state.tool_calls.last_mut() {
                     if last.status == "running" {
                         last.status = "done".to_string();
                     }
                 }
+                state.finish("completed");
             }
-            // Item events — the main content carriers
+            // Item events — the main content carriers.
             "item.started" | "item.updated" | "item.completed" => {
                 if let Some(item) = json.get("item") {
                     let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -2954,6 +3121,10 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                             if event_type == "item.started" {
                                 let cmd = item.get("command")
                                     .and_then(|v| v.as_str()).unwrap_or("command");
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("$ {}\n", cmd));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: "command".to_string(),
                                     input_summary: truncate_str(cmd, 80),
@@ -2963,11 +3134,26 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 state.status = "tool_use".to_string();
                             }
                             if event_type == "item.completed" {
+                                let exit_code = item.get("exit_code")
+                                    .and_then(|v| v.as_i64()).unwrap_or(0);
+                                let output = item.get("aggregated_output")
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                if !output.is_empty() {
+                                    state.agent_text.push_str(&truncate_str(output, 800));
+                                    if !state.agent_text.ends_with('\n') {
+                                        state.agent_text.push('\n');
+                                    }
+                                }
+                                if exit_code != 0 {
+                                    state.agent_text.push_str(&format!("[exit {}]\n", exit_code));
+                                }
                                 if let Some(last) = state.tool_calls.last_mut() {
-                                    last.status = "done".to_string();
-                                    if let Some(output) = item.get("aggregated_output")
-                                        .and_then(|v| v.as_str())
-                                    {
+                                    last.status = if exit_code == 0 {
+                                        "done".to_string()
+                                    } else {
+                                        "error".to_string()
+                                    };
+                                    if !output.is_empty() {
                                         last.output_preview = truncate_str(output, 120);
                                     }
                                 }
@@ -2977,6 +3163,10 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                             if event_type == "item.started" {
                                 let path = item.get("path")
                                     .and_then(|v| v.as_str()).unwrap_or("file");
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[file] {}\n", path));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: "file_change".to_string(),
                                     input_summary: truncate_str(path, 80),
@@ -2986,8 +3176,20 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 state.status = "tool_use".to_string();
                             }
                             if event_type == "item.completed" {
+                                let summary = item.get("diff")
+                                    .or_else(|| item.get("summary"))
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                if !summary.is_empty() {
+                                    state.agent_text.push_str(&truncate_str(summary, 400));
+                                    if !state.agent_text.ends_with('\n') {
+                                        state.agent_text.push('\n');
+                                    }
+                                }
                                 if let Some(last) = state.tool_calls.last_mut() {
                                     last.status = "done".to_string();
+                                    if !summary.is_empty() {
+                                        last.output_preview = truncate_str(summary, 120);
+                                    }
                                 }
                             }
                         }
@@ -2999,9 +3201,43 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 let input = item.get("arguments")
                                     .or_else(|| item.get("query"))
                                     .map(|v| v.to_string()).unwrap_or_default();
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[{}] {}\n", name, truncate_str(&input, 200)));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: name.to_string(),
                                     input_summary: truncate_str(&input, 80),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                                state.status = "tool_use".to_string();
+                            }
+                            if event_type == "item.completed" {
+                                let output = item.get("result")
+                                    .or_else(|| item.get("output"))
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                if !output.is_empty() {
+                                    state.agent_text.push_str(&format!("[result] {}\n", truncate_str(output, 400)));
+                                }
+                                if let Some(last) = state.tool_calls.last_mut() {
+                                    last.status = "done".to_string();
+                                    if !output.is_empty() {
+                                        last.output_preview = truncate_str(output, 120);
+                                    }
+                                }
+                            }
+                        }
+                        "todo_list" | "patch_apply" | "plan_update" => {
+                            // Codex extension item types — surface as a tool entry.
+                            if event_type == "item.started" {
+                                let summary = item.get("summary")
+                                    .or_else(|| item.get("path"))
+                                    .or_else(|| item.get("title"))
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: item_type.to_string(),
+                                    input_summary: truncate_str(summary, 80),
                                     output_preview: String::new(),
                                     status: "running".to_string(),
                                 });
@@ -3013,7 +3249,24 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 }
                             }
                         }
-                        _ => {}
+                        _ => {
+                            // Unknown subtype — render the raw type name so users see it.
+                            if event_type == "item.started" && !item_type.is_empty() {
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: item_type.to_string(),
+                                    input_summary: String::new(),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                            }
+                            if event_type == "item.completed" {
+                                if let Some(last) = state.tool_calls.last_mut() {
+                                    if last.status == "running" {
+                                        last.status = "done".to_string();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3022,7 +3275,7 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             // Goose: run --output-format stream-json
             // =================================================================
 
-            // Message event — assistant text and tool requests
+            // Message event — assistant text, tool requests, and tool responses.
             "message" => {
                 if let Some(content) = json.get("message")
                     .and_then(|m| m.get("content"))
@@ -3043,6 +3296,10 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                     .and_then(|v| v.as_str()).unwrap_or("tool");
                                 let args = block.pointer("/tool_call/arguments")
                                     .map(|v| v.to_string()).unwrap_or_default();
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[tool:{}] {}\n", name, truncate_str(&args, 200)));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: name.to_string(),
                                     input_summary: truncate_str(&args, 80),
@@ -3052,54 +3309,151 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 state.status = "tool_use".to_string();
                             }
                             "tool_response" => {
-                                // Mark matching tool call as done
+                                let is_error = block.get("is_error")
+                                    .and_then(|v| v.as_bool()).unwrap_or(false);
                                 if let Some(last) = state.tool_calls.last_mut() {
-                                    if last.status == "running" {
-                                        last.status = "done".to_string();
+                                    last.status = if is_error {
+                                        "error".to_string()
+                                    } else {
+                                        "done".to_string()
+                                    };
+                                    // Goose response payloads can live in tool_result[],
+                                    // content[], or a flat output string.
+                                    let mut output = String::new();
+                                    if let Some(arr) = block.pointer("/tool_result")
+                                        .and_then(|v| v.as_array())
+                                    {
+                                        for c in arr {
+                                            if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                                output.push_str(t);
+                                            }
+                                        }
+                                    } else if let Some(arr) = block.get("content")
+                                        .and_then(|v| v.as_array())
+                                    {
+                                        for c in arr {
+                                            if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                                output.push_str(t);
+                                            }
+                                        }
+                                    } else if let Some(s) = block.get("output")
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        output.push_str(s);
+                                    } else if let Some(s) = block.get("content")
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        output.push_str(s);
+                                    }
+                                    if !output.is_empty() {
+                                        last.output_preview = truncate_str(&output, 120);
                                     }
                                 }
+                                // Surface response inline regardless of tool_calls state.
+                                let mut output = String::new();
+                                if let Some(arr) = block.pointer("/tool_result")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for c in arr {
+                                        if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                            output.push_str(t);
+                                        }
+                                    }
+                                } else if let Some(arr) = block.get("content")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for c in arr {
+                                        if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                            output.push_str(t);
+                                        }
+                                    }
+                                } else if let Some(s) = block.get("output")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    output.push_str(s);
+                                } else if let Some(s) = block.get("content")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    output.push_str(s);
+                                }
+                                let tag = if is_error { "[result:error]" } else { "[result]" };
+                                let display = if output.is_empty() { "(empty)" } else { output.as_str() };
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("{} {}\n", tag, truncate_str(display, 400)));
+                            }
+                            "image" => {
+                                state.agent_text.push_str("[image]\n");
                             }
                             _ => {}
                         }
                     }
                 }
             }
-            // Notification — extension log/progress messages
+            // Notification — extension log / progress messages with severity.
             "notification" => {
-                if let Some(msg) = json.pointer("/log/message").and_then(|v| v.as_str()) {
-                    let ext = json.get("extension_id")
-                        .and_then(|v| v.as_str()).unwrap_or("ext");
+                let msg = json.pointer("/log/message")
+                    .or_else(|| json.pointer("/progress/message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let level = json.pointer("/log/level")
+                    .and_then(|v| v.as_str()).unwrap_or("info");
+                let ext = json.get("extension_id")
+                    .and_then(|v| v.as_str()).unwrap_or("ext");
+                if !msg.is_empty() {
+                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                        state.agent_text.push('\n');
+                    }
+                    state.agent_text.push_str(&format!("[{}:{}] {}\n", ext, level, truncate_str(msg, 200)));
                     state.tool_calls.push(super::app::HeadlessToolCall {
                         tool_name: ext.to_string(),
                         input_summary: truncate_str(msg, 80),
                         output_preview: String::new(),
-                        status: "done".to_string(),
+                        status: if level == "error" || level == "warn" {
+                            "error".to_string()
+                        } else {
+                            "done".to_string()
+                        },
                     });
                 }
             }
-            // Goose completion
+            // Goose completion / cancellation.
             "complete" => {
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[done]\n");
                 state.finish("completed");
+            }
+            "cancelled" => {
+                state.agent_text.push_str("[cancelled]\n");
+                state.finish("error");
             }
 
             // =================================================================
             // Cursor: -p --output-format stream-json
             // =================================================================
 
-            // Thinking deltas — token-level streaming of reasoning.
-            // Accumulate without newlines; only add a newline on "completed".
+            // Thinking — token-level reasoning stream.
             "thinking" => {
                 let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-                if subtype == "delta" {
-                    if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
-                        state.agent_text.push_str(text);
+                match subtype {
+                    "started" => {
+                        state.status = "thinking".to_string();
                     }
-                    state.status = "thinking".to_string();
-                } else if subtype == "completed" {
-                    // Add a newline after the full thinking block.
-                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
-                        state.agent_text.push('\n');
+                    "delta" => {
+                        if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+                            state.agent_text.push_str(text);
+                        }
+                        state.status = "thinking".to_string();
                     }
+                    "completed" => {
+                        if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                            state.agent_text.push('\n');
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -3107,26 +3461,28 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             // e.g. {"tool_call": {"shellToolCall": {"args": {"command": "ls"}}}}
             "tool_call" => {
                 let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                let tc_obj = json.get("tool_call").and_then(|v| v.as_object()).cloned();
                 if subtype == "started" {
-                    // Extract tool name from the first key of the tool_call object.
-                    let tc_obj = json.get("tool_call").and_then(|v| v.as_object());
-                    let (name, input) = if let Some(obj) = tc_obj {
+                    let (name, input) = if let Some(ref obj) = tc_obj {
                         let key = obj.keys().next().map(|k| k.as_str()).unwrap_or("tool");
-                        // Friendly name: strip "ToolCall" suffix.
                         let friendly = key.strip_suffix("ToolCall").unwrap_or(key);
-                        // Extract primary arg: command, path, query, or pattern.
                         let args = obj.values().next()
                             .and_then(|v| v.get("args"))
                             .and_then(|a| a.as_object());
                         let input = args.and_then(|a| {
                             a.get("command").or_else(|| a.get("path"))
                                 .or_else(|| a.get("query")).or_else(|| a.get("pattern"))
+                                .or_else(|| a.get("url")).or_else(|| a.get("file_path"))
                                 .and_then(|v| v.as_str())
                         }).unwrap_or("");
                         (friendly.to_string(), input.to_string())
                     } else {
                         ("tool".to_string(), String::new())
                     };
+                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                        state.agent_text.push('\n');
+                    }
+                    state.agent_text.push_str(&format!("[tool:{}] {}\n", name, truncate_str(&input, 200)));
                     state.tool_calls.push(super::app::HeadlessToolCall {
                         tool_name: name,
                         input_summary: truncate_str(&input, 80),
@@ -3135,13 +3491,51 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                     });
                     state.status = "tool_use".to_string();
                 } else if subtype == "completed" {
+                    let mut found_output: Option<(String, bool)> = None;
+                    if let Some(ref obj) = tc_obj {
+                        if let Some((_, val)) = obj.iter().next() {
+                            let candidates = [
+                                ("/result/success/output", false),
+                                ("/result/success/content", false),
+                                ("/result/success/text", false),
+                                ("/result/success/result", false),
+                                ("/result/success/message", false),
+                                ("/result/error/output", true),
+                                ("/result/error/message", true),
+                            ];
+                            for (path, is_err) in candidates.iter() {
+                                if let Some(out) = val.pointer(path).and_then(|v| v.as_str()) {
+                                    found_output = Some((out.to_string(), *is_err));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some((ref out, is_err)) = found_output {
+                        let tag = if is_err { "[result:error]" } else { "[result]" };
+                        if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                            state.agent_text.push('\n');
+                        }
+                        state.agent_text.push_str(&format!("{} {}\n", tag, truncate_str(out, 400)));
+                    }
                     if let Some(last) = state.tool_calls.last_mut() {
                         last.status = "done".to_string();
-                        // Extract output preview for shell commands.
-                        if let Some(output) = json.pointer("/tool_call/shellToolCall/result/success/output")
+                        if let Some((out, is_err)) = found_output {
+                            last.output_preview = truncate_str(&out, 120);
+                            if is_err {
+                                last.status = "error".to_string();
+                            }
+                        }
+                    }
+                } else if subtype == "failed" || subtype == "error" {
+                    if let Some(last) = state.tool_calls.last_mut() {
+                        last.status = "error".to_string();
+                        let err = json.pointer("/error/message")
+                            .or_else(|| json.get("error"))
                             .and_then(|v| v.as_str())
-                        {
-                            last.output_preview = truncate_str(output, 120);
+                            .unwrap_or("");
+                        if !err.is_empty() {
+                            last.output_preview = truncate_str(err, 120);
                         }
                     }
                 }
@@ -3151,41 +3545,135 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             // Lifecycle and system events
             // =================================================================
 
-            // System init — extract model info for display
+            // System init — extract model info for display and surface inline.
             "system" => {
-                if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
+                let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                let model = json.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                let cwd = json.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+                if !model.is_empty() {
                     state.status = format!("running ({})", model);
                 }
+                let mut header = String::from("[system");
+                if !subtype.is_empty() {
+                    header.push(':');
+                    header.push_str(subtype);
+                }
+                header.push(']');
+                if !model.is_empty() {
+                    header.push_str(" model=");
+                    header.push_str(model);
+                }
+                if !cwd.is_empty() {
+                    header.push_str(" cwd=");
+                    header.push_str(cwd);
+                }
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str(&header);
+                state.agent_text.push('\n');
             }
 
-            // Tool result events (Claude `user` with tool_result)
+            // Tool result events (Claude `user` with tool_result blocks).
+            // The result content can be a string, an array of {type,text} blocks,
+            // or absent entirely (legacy form — just acknowledge tool done).
             "user" => {
-                // Mark the last tool call as done when we get its result
-                if let Some(last) = state.tool_calls.last_mut() {
+                let content = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array());
+                if let Some(blocks) = content {
+                    for block in blocks {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                            let is_error = block.get("is_error")
+                                .and_then(|v| v.as_bool()).unwrap_or(false);
+                            let mut output = String::new();
+                            if let Some(s) = block.get("content").and_then(|v| v.as_str()) {
+                                output.push_str(s);
+                            } else if let Some(arr) = block.get("content").and_then(|v| v.as_array()) {
+                                for c in arr {
+                                    if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                        output.push_str(t);
+                                    }
+                                }
+                            }
+                            // Surface the tool result inline in the panel.
+                            let tag = if is_error { "[result:error]" } else { "[result]" };
+                            let display = if output.is_empty() { "(empty)" } else { output.as_str() };
+                            if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                state.agent_text.push('\n');
+                            }
+                            state.agent_text.push_str(&format!("{} {}\n", tag, truncate_str(display, 400)));
+                            if let Some(last) = state.tool_calls.last_mut() {
+                                last.status = if is_error {
+                                    "error".to_string()
+                                } else {
+                                    "done".to_string()
+                                };
+                                if !output.is_empty() {
+                                    last.output_preview = truncate_str(&output, 120);
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(last) = state.tool_calls.last_mut() {
                     if last.status == "running" {
                         last.status = "done".to_string();
                     }
                 }
             }
 
-            // Errors — show as text so the user sees them
+            // Errors — surface as visible text so the user sees them.
             "error" | "turn.failed" => {
-                let msg = json.get("error")
-                    .and_then(|e| e.get("message").or(Some(e)))
+                let msg = json.pointer("/error/message")
                     .and_then(|v| v.as_str())
+                    .or_else(|| json.get("error").and_then(|v| v.as_str()))
                     .or_else(|| json.get("message").and_then(|v| v.as_str()))
                     .unwrap_or("unknown error");
-                state.agent_text.push_str(&format!("[error] {}\n", msg));
+                let code = json.pointer("/error/code")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| json.pointer("/error/type").and_then(|v| v.as_str()));
+                let header = match code {
+                    Some(c) => format!("[error {}] ", c),
+                    None => "[error] ".to_string(),
+                };
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str(&header);
+                state.agent_text.push_str(msg);
+                state.agent_text.push('\n');
                 state.finish("error");
             }
 
-            // Silent lifecycle events
-            "model_change" => {}
+            // Model change — surface inline, others are too chatty to render.
+            "model_change" => {
+                let model = json.get("model")
+                    .or_else(|| json.get("to"))
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[model_change] ");
+                state.agent_text.push_str(model);
+                state.agent_text.push('\n');
+                if !model.is_empty() {
+                    state.status = format!("running ({})", model);
+                }
+            }
+
+            // Truly silent lifecycle events — no payload, very chatty.
+            "ping" | "keepalive" | "heartbeat"
+            | "session.created" | "session.updated"
+            | "usage" | "rate_limit" => {}
 
             _ => {
-                // Unknown event — try to extract text but don't add newlines
-                // (could be streaming deltas from an unknown agent).
-                if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+                // Unknown event — try several common text-bearing fields.
+                let extracted = json.get("text").and_then(|v| v.as_str())
+                    .or_else(|| json.pointer("/delta/text").and_then(|v| v.as_str()))
+                    .or_else(|| json.pointer("/data/text").and_then(|v| v.as_str()))
+                    .or_else(|| json.get("content").and_then(|v| v.as_str()))
+                    .or_else(|| json.get("output").and_then(|v| v.as_str()));
+                if let Some(text) = extracted {
                     state.agent_text.push_str(text);
                 }
             }
@@ -3314,13 +3802,14 @@ fn add_agent(
 
     // Build sandbox config.
     // Agent VMs need enough memory for the agent CLI + runtime overhead.
+    // Claude/Codex (Node.js) working set is ~1.5-2GB; 1024 OOM-killed it.
     let project_path = project
         .map(std::path::PathBuf::from)
         .or_else(|| app.project_path.clone());
 
     let mut builder = SandboxConfig::builder()
         .image(&image_name)
-        .memory_mb(1024);
+        .memory_mb(2048);
 
     // Set agent type on panel (not on SandboxConfig builder).
     if let Ok(agent_type) = agent.parse::<sandbox::AgentType>() {

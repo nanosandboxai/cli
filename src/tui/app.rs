@@ -169,8 +169,6 @@ pub struct HeadlessState {
     pub agent_text: String,
     /// Tool call log entries.
     pub tool_calls: Vec<HeadlessToolCall>,
-    /// Raw NDJSON lines accumulated (for fallback display).
-    pub raw_lines: Vec<String>,
     /// Partial line buffer for incomplete NDJSON lines spanning SSH chunks.
     pub line_buffer: String,
     /// Scroll offset for the output area.
@@ -190,7 +188,6 @@ impl HeadlessState {
             status: "starting".to_string(),
             agent_text: String::new(),
             tool_calls: Vec::new(),
-            raw_lines: Vec::new(),
             line_buffer: String::new(),
             scroll_offset: 0,
             auto_scroll: true,
