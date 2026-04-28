@@ -25,7 +25,17 @@ $ErrorActionPreference = "Stop"
 function Install-NanosandboxCLI {
     param(
         [string]$Version = "",
-        [string]$InstallDir = "$env:USERPROFILE\.nanosandbox"
+        [string]$InstallDir = "$env:USERPROFILE\.nanosandbox",
+        # Skip the Windows Defender exclusion prompt entirely. nanosb.exe is an
+        # unsigned Rust binary which Defender's ML heuristics frequently flag
+        # as a generic threat (Wacatac etc.). Adding an exclusion for the
+        # install dir prevents the .exe from being silently quarantined on
+        # download. Pass -SkipDefenderExclusion to opt out (e.g. when the
+        # install dir is already covered by an existing exclusion).
+        [switch]$SkipDefenderExclusion,
+        # Skip the prompt and add the exclusion automatically. Useful for
+        # unattended/CI installs.
+        [switch]$AddDefenderExclusion
     )
 
     # --- Helpers ---
@@ -93,6 +103,66 @@ function Install-NanosandboxCLI {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
     Write-Info "Install directory: $InstallDir"
+
+    # --- Windows Defender exclusion (must run BEFORE download) ---
+    # Without this, Defender's ML heuristics frequently quarantine the freshly
+    # downloaded nanosb.exe as a generic threat, leaving an empty install dir
+    # and a confusing "command not recognized" error for the user.
+    if (-not $SkipDefenderExclusion) {
+        $defender = Get-MpComputerStatus -ErrorAction SilentlyContinue
+        $defenderActive = $defender -and $defender.RealTimeProtectionEnabled
+        if ($defenderActive) {
+            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+            $alreadyExcluded = $false
+            try {
+                $existing = (Get-MpPreference).ExclusionPath
+                if ($existing -and ($existing -contains $InstallDir)) {
+                    $alreadyExcluded = $true
+                }
+            } catch { }
+
+            if ($alreadyExcluded) {
+                Write-Info "$InstallDir already excluded from Windows Defender"
+            } elseif (-not $isAdmin) {
+                Write-Warn "Windows Defender real-time protection is active."
+                Write-Warn "nanosb.exe is unsigned and may be flagged as a generic threat by Defender's ML heuristics."
+                Write-Warn "To add an exclusion automatically, re-run this installer in an elevated (Administrator) PowerShell."
+                Write-Warn "Or manually run, as Administrator:"
+                Write-Warn "  Add-MpPreference -ExclusionPath '$InstallDir'"
+                Write-Warn "  Add-MpPreference -ExclusionProcess 'nanosb.exe'"
+                Write-Host ""
+                $answer = Read-Host "  Continue without an exclusion (download may be quarantined)? [y/N]"
+                if ($answer -notmatch '^[Yy]') {
+                    Write-Info "Aborted by user. Re-run as Administrator to add the exclusion automatically."
+                    return
+                }
+            } else {
+                $consent = $AddDefenderExclusion
+                if (-not $consent) {
+                    Write-Warn "Windows Defender real-time protection is active."
+                    Write-Warn "nanosb.exe is unsigned and may be flagged as a generic threat by Defender's ML heuristics."
+                    Write-Warn "Adding a path exclusion for $InstallDir will prevent silent quarantine of the downloaded binary."
+                    Write-Host ""
+                    $answer = Read-Host "  Add Windows Defender exclusion for $InstallDir ? [Y/n]"
+                    if ($answer -notmatch '^[Nn]') { $consent = $true }
+                }
+                if ($consent) {
+                    try {
+                        Add-MpPreference -ExclusionPath $InstallDir -ErrorAction Stop
+                        Add-MpPreference -ExclusionProcess "nanosb.exe" -ErrorAction Stop
+                        Write-Ok "Added Windows Defender exclusion: $InstallDir"
+                        Write-Ok "Added Windows Defender process exclusion: nanosb.exe"
+                    } catch {
+                        Write-Warn "Failed to add Defender exclusion: $_"
+                        Write-Warn "Proceeding anyway -- download may be quarantined."
+                    }
+                } else {
+                    Write-Info "Skipped Defender exclusion -- download may be quarantined."
+                }
+            }
+        }
+    }
 
     # --- Download nanosb.exe ---
     $binaryName = "nanosb.exe"
