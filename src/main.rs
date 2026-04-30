@@ -283,7 +283,7 @@ mod cli {
             use tracing_subscriber::util::SubscriberInitExt;
             use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-            let logs_dir = runtime::logging::logs_dir();
+            let logs_dir = logs_dir();
             let file_setup = if let Err(e) = std::fs::create_dir_all(&logs_dir) {
                 eprintln!("Warning: could not create logs directory {}: {}", logs_dir.display(), e);
                 None
@@ -1151,7 +1151,7 @@ mod cli {
 
         if result.is_ok() {
             println!("{}", "Ready to run sandboxes.".green());
-            let logs_dir = runtime::logging::logs_dir();
+            let logs_dir = logs_dir();
             println!("  Logs: {}", logs_dir.display());
         } else {
             println!("{}", "Cannot run sandboxes. Fix the errors above.".red());
@@ -1482,6 +1482,19 @@ mod cli {
             }
         }
         let _ = w.flush();
+    }
+
+    /// Returns the logs directory: `~/.nanosandbox/logs/` on all platforms.
+    fn logs_dir() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| {
+                #[cfg(target_os = "windows")]
+                { std::path::PathBuf::from(".") }
+                #[cfg(not(target_os = "windows"))]
+                { std::path::PathBuf::from("/tmp") }
+            })
+            .join(".nanosandbox")
+            .join("logs")
     }
 
     /// Remove log files older than `retention_days` from the given directory.
