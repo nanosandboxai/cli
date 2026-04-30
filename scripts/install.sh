@@ -129,19 +129,26 @@ download_binary() {
         return 0
     fi
 
-    if [[ "$OS" != "Darwin" || "$ARCH" != "arm64" ]]; then
-        warn "Pre-built binaries are available for macOS arm64 only."
-        info "For other platforms, build from source:"
-        info "  git clone https://github.com/nanosandboxai/runtime.git"
-        info "  cd runtime && cargo build --release --features cli"
-        return 0
-    fi
+    # Pick the right release asset for the current platform.
+    local asset
+    case "${OS}-${ARCH}" in
+        Darwin-arm64)            asset="nanosb" ;;
+        Linux-x86_64|Linux-amd64) asset="nanosb-linux-amd64" ;;
+        *)
+            warn "No pre-built binary for ${OS} ${ARCH}."
+            info "Available pre-built targets: macOS arm64, Linux x86_64."
+            info "For other platforms, build from source:"
+            info "  git clone https://github.com/nanosandboxai/runtime.git"
+            info "  cd runtime && cargo build --release --features cli"
+            return 0
+            ;;
+    esac
 
     local url
     if [[ "$NANOSB_VERSION" == "latest" ]]; then
-        url="https://github.com/${RELEASE_REPO}/releases/latest/download/nanosb"
+        url="https://github.com/${RELEASE_REPO}/releases/latest/download/${asset}"
     else
-        url="https://github.com/${RELEASE_REPO}/releases/download/v${NANOSB_VERSION}/nanosb"
+        url="https://github.com/${RELEASE_REPO}/releases/download/v${NANOSB_VERSION}/${asset}"
     fi
 
     if command -v nanosb &>/dev/null; then
