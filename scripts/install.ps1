@@ -160,16 +160,31 @@ function Install-NanosandboxCLI {
     }
 
     # -- Single reboot if any feature needed it --
+    # Register a RunOnce key so the installer resumes automatically after reboot.
     if ($rebootNeeded) {
         Write-Host ""
         Write-Warn "A restart is required to activate the features installed above."
-        Write-Warn "After restarting, re-run this installer to complete nanosb installation."
         Write-Host ""
+
+        # Build the resume command: re-run this installer with the same version arg
+        # from a PowerShell window that opens automatically after login.
+        $resumeArgs = if ($Version) { "-Version $Version" } else { "" }
+        $resumeCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " +
+            "\"irm https://raw.githubusercontent.com/nanosandboxai/cli/main/scripts/install.ps1 | iex $resumeArgs\""
+        try {
+            $runOnceKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+            Set-ItemProperty -Path $runOnceKey -Name "NanosbInstall" -Value $resumeCmd -ErrorAction Stop
+            Write-Ok "Installer will resume automatically after restart."
+        } catch {
+            Write-Warn "Could not register auto-resume: $_"
+            Write-Warn "After restarting, re-run this installer manually to complete nanosb installation."
+        }
+
         $restart = Read-Host "  Restart now? [Y/n]"
         if ($restart -notmatch '^[Nn]') {
             Restart-Computer -Force
         } else {
-            Write-Info "Please restart your computer and then re-run this installer."
+            Write-Info "Please restart your computer — the installer will resume automatically."
         }
         return
     }
