@@ -11,11 +11,15 @@
     4. Adds the install directory to the user PATH
 
 .EXAMPLE
-    # Install latest stable version
-    irm https://github.com/nanosandboxai/cli/releases/latest/download/install.ps1 | iex
+    # Install latest version (use raw.githubusercontent.com — release asset URLs return octet-stream
+    # which PowerShell's irm cannot pipe directly to iex)
+    irm https://raw.githubusercontent.com/nanosandboxai/cli/main/scripts/install.ps1 | iex
 
-    # Install specific version (stable or pre-release)
-    .\install.ps1 -Version v0.2.0-rc5
+    # Install specific version (pin to a tag)
+    irm https://raw.githubusercontent.com/nanosandboxai/cli/v0.2.0-rc17/scripts/install.ps1 | iex
+
+    # Or download and run locally:
+    .\install.ps1 -Version v0.2.0-rc17
     .\install.ps1 -Version v0.2.0
 #>
 
