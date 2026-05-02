@@ -14,8 +14,6 @@ path = "src/main.rs"
 [dependencies]
 # Sandbox SDK — wraps nanosandbox runtime with agent-aware features.
 sandbox = { git = "https://github.com/nanosandboxai/sandbox.git", branch = "feature/runtime-sandbox-separation" }
-# Direct runtime access for logging and low-level runtime APIs.
-runtime = { git = "https://github.com/nanosandboxai/runtime.git", branch = "feature/runtime-sandbox-separation" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
