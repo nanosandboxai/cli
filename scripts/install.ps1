@@ -168,9 +168,13 @@ function Install-NanosandboxCLI {
 
         # Build the resume command: re-run this installer with the same version arg
         # from a PowerShell window that opens automatically after login.
-        $resumeArgs = if ($Version) { "-Version $Version" } else { "" }
-        $resumeCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " +
-            "\"irm https://raw.githubusercontent.com/nanosandboxai/cli/main/scripts/install.ps1 | iex $resumeArgs\""
+        $resumeUrl = 'https://raw.githubusercontent.com/nanosandboxai/cli/main/scripts/install.ps1'
+        $resumeInner = if ($Version) {
+            "& ([scriptblock]::Create((irm '$resumeUrl'))) -Version '$Version'"
+        } else {
+            "irm '$resumeUrl' | iex"
+        }
+        $resumeCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$resumeInner`""
         try {
             $runOnceKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
             Set-ItemProperty -Path $runOnceKey -Name "NanosbInstall" -Value $resumeCmd -ErrorAction Stop
