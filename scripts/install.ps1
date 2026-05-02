@@ -72,7 +72,52 @@ function Install-NanosandboxCLI {
         $hyperv = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -ErrorAction SilentlyContinue
         if (-not $hyperv -or $hyperv.State -ne "Enabled") {
             Write-Warn "Hyper-V is not enabled. It is required for VM execution."
-            Write-Warn "Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All"
+            Write-Host ""
+
+            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+            if (-not $isAdmin) {
+                Write-Warn "Enabling Hyper-V requires Administrator privileges."
+                Write-Warn "Please re-run this installer in an elevated (Administrator) PowerShell,"
+                Write-Warn "or enable Hyper-V manually with:"
+                Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All"
+                Write-Warn "Then restart your computer and re-run this installer."
+                Write-Host ""
+                $answer = Read-Host "  Continue without Hyper-V (nanosb will not work)? [y/N]"
+                if ($answer -notmatch '^[Yy]') {
+                    Write-Info "Aborted. Re-run as Administrator to enable Hyper-V automatically."
+                    return
+                }
+            } else {
+                $answer = Read-Host "  Enable Hyper-V now? [Y/n]"
+                if ($answer -notmatch '^[Nn]') {
+                    Write-Info "Enabling Hyper-V (this may take a few minutes)..."
+                    try {
+                        $result = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart -ErrorAction Stop
+                        Write-Ok "Hyper-V enabled successfully."
+                        if ($result.RestartNeeded) {
+                            Write-Host ""
+                            Write-Warn "A system restart is required to activate Hyper-V."
+                            Write-Warn "After restarting, re-run this installer to finish nanosb installation."
+                            Write-Host ""
+                            $restart = Read-Host "  Restart now? [y/N]"
+                            if ($restart -match '^[Yy]') {
+                                Restart-Computer -Force
+                            } else {
+                                Write-Info "Please restart your computer and then re-run this installer."
+                            }
+                            return
+                        }
+                    } catch {
+                        Write-Warn "Failed to enable Hyper-V: $_"
+                        Write-Warn "Try manually in an elevated PowerShell:"
+                        Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All"
+                    }
+                } else {
+                    Write-Warn "Skipping Hyper-V setup. nanosb will not function without it."
+                }
+            }
         } else {
             Write-Ok "Hyper-V enabled"
         }
