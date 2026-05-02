@@ -374,6 +374,7 @@ jobs:
 
       - name: Stage release files
         run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           mkdir -p release
           cp artifacts/nanosb-darwin-arm64/nanosb release/nanosb
           cp artifacts/nanosb-linux-amd64/nanosb-linux-amd64 release/nanosb-linux-amd64
@@ -383,6 +384,10 @@ jobs:
           cp scripts/install.ps1 release/install.ps1
           cp scripts/uninstall.ps1 release/uninstall.ps1
           chmod +x release/install.sh release/uninstall.sh
+          # Stamp the release tag into installer example URLs so users always
+          # get the correct pinned raw URL for this specific release.
+          sed -i "s|raw.githubusercontent.com/nanosandboxai/cli/[^/]*/scripts/|raw.githubusercontent.com/nanosandboxai/cli/${TAG_NAME}/scripts/|g" \
+            release/install.ps1 release/install.sh
           echo "=== Release files ==="
           ls -la release/
 
