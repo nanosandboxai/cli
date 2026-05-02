@@ -140,8 +140,14 @@ function Install-NanosandboxCLI {
         $wslExe = Join-Path $env:SystemRoot "System32\wsl.exe"
         $wsl2Ready = $false
         if (Test-Path $wslExe) {
-            & $wslExe --status *>$null
-            if ($LASTEXITCODE -eq 0) { $wsl2Ready = $true }
+            # Use Start-Process to fully isolate wsl.exe — direct invocation
+            # leaks stderr as RemoteException in PS 5.1 regardless of redirects.
+            $proc = Start-Process -FilePath $wslExe -ArgumentList '--status' `
+                -Wait -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput "$env:TEMP\nanosb-wsl-out.txt" `
+                -RedirectStandardError  "$env:TEMP\nanosb-wsl-err.txt"
+            Remove-Item "$env:TEMP\nanosb-wsl-out.txt","$env:TEMP\nanosb-wsl-err.txt" -Force -ErrorAction SilentlyContinue
+            if ($proc.ExitCode -eq 0) { $wsl2Ready = $true }
         }
         if ($wsl2Ready) {
             Write-Ok "WSL2 available"
