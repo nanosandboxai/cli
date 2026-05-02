@@ -140,7 +140,7 @@ function Install-NanosandboxCLI {
         $wslExe = Join-Path $env:SystemRoot "System32\wsl.exe"
         $wsl2Ready = $false
         if (Test-Path $wslExe) {
-            & $wslExe --status 2>&1 | Out-Null
+            & $wslExe --status *>$null
             if ($LASTEXITCODE -eq 0) { $wsl2Ready = $true }
         }
         if ($wsl2Ready) {
