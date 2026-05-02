@@ -125,6 +125,62 @@ function Install-NanosandboxCLI {
         }
     }
 
+    # --- Windows Hypervisor Platform (WHPX) check ---
+    # WHPX exposes the hypervisor API to user-mode processes (libkrunfw.dll).
+    # Hyper-V alone is not enough — WHPX must also be enabled.
+    $whpx = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
+    if (-not $whpx -or $whpx.State -ne "Enabled") {
+        Write-Warn "Windows Hypervisor Platform (WHPX) is not enabled. It is required for VM execution."
+        Write-Host ""
+
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+        if (-not $isAdmin) {
+            Write-Warn "Enabling WHPX requires Administrator privileges."
+            Write-Warn "Please re-run this installer in an elevated (Administrator) PowerShell,"
+            Write-Warn "or enable it manually with:"
+            Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All"
+            Write-Warn "Then restart your computer and re-run this installer."
+            Write-Host ""
+            $answer = Read-Host "  Continue without WHPX (nanosb will not work)? [y/N]"
+            if ($answer -notmatch '^[Yy]') {
+                Write-Info "Aborted. Re-run as Administrator to enable WHPX automatically."
+                return
+            }
+        } else {
+            $answer = Read-Host "  Enable Windows Hypervisor Platform now? [Y/n]"
+            if ($answer -notmatch '^[Nn]') {
+                Write-Info "Enabling Windows Hypervisor Platform..."
+                try {
+                    $result = Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart -ErrorAction Stop
+                    Write-Ok "Windows Hypervisor Platform enabled."
+                    if ($result.RestartNeeded) {
+                        Write-Host ""
+                        Write-Warn "A system restart is required to activate WHPX."
+                        Write-Warn "After restarting, re-run this installer to finish nanosb installation."
+                        Write-Host ""
+                        $restart = Read-Host "  Restart now? [y/N]"
+                        if ($restart -match '^[Yy]') {
+                            Restart-Computer -Force
+                        } else {
+                            Write-Info "Please restart your computer and then re-run this installer."
+                        }
+                        return
+                    }
+                } catch {
+                    Write-Warn "Failed to enable WHPX: $_"
+                    Write-Warn "Try manually in an elevated PowerShell:"
+                    Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All"
+                }
+            } else {
+                Write-Warn "Skipping WHPX setup. nanosb will not function without it."
+            }
+        }
+    } else {
+        Write-Ok "Windows Hypervisor Platform (WHPX) enabled"
+    }
+
     # --- WSL2 check and auto-install ---
     # nanosb on Windows uses WSL2 as the Linux kernel layer for VM execution.
     if (-not $SkipWsl2Check) {
