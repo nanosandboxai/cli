@@ -66,58 +66,31 @@ function Install-NanosandboxCLI {
         return
     }
 
-    # Check Hyper-V: try the service first (works on both Server and Desktop), fall back to feature check
+    # --- Windows prerequisites ---
+    # Enable all required features in one pass, then do a single reboot if needed.
+    # Features required: Hyper-V, Windows Hypervisor Platform (WHPX), WSL2.
+    # VC++ Redistributable is installed inline (no reboot needed).
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    $rebootNeeded = $false
+
+    # -- Hyper-V --
     $vmcompute = Get-Service vmcompute -ErrorAction SilentlyContinue
     if ($vmcompute -and $vmcompute.Status -eq 'Running') {
-        Write-Ok "Hyper-V / HCS enabled (vmcompute running)"
+        Write-Ok "Hyper-V enabled"
     } else {
         $hyperv = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -ErrorAction SilentlyContinue
         if (-not $hyperv -or $hyperv.State -ne "Enabled") {
-            Write-Warn "Hyper-V is not enabled. It is required for VM execution."
-            Write-Host ""
-
-            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator)
-
             if (-not $isAdmin) {
-                Write-Warn "Enabling Hyper-V requires Administrator privileges."
-                Write-Warn "Please re-run this installer in an elevated (Administrator) PowerShell,"
-                Write-Warn "or enable Hyper-V manually with:"
-                Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All"
-                Write-Warn "Then restart your computer and re-run this installer."
-                Write-Host ""
-                $answer = Read-Host "  Continue without Hyper-V (nanosb will not work)? [y/N]"
-                if ($answer -notmatch '^[Yy]') {
-                    Write-Info "Aborted. Re-run as Administrator to enable Hyper-V automatically."
-                    return
-                }
+                Write-Warn "Hyper-V is not enabled (requires Administrator to fix)."
             } else {
-                $answer = Read-Host "  Enable Hyper-V now? [Y/n]"
-                if ($answer -notmatch '^[Nn]') {
-                    Write-Info "Enabling Hyper-V (this may take a few minutes)..."
-                    try {
-                        $result = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart -ErrorAction Stop
-                        Write-Ok "Hyper-V enabled successfully."
-                        if ($result.RestartNeeded) {
-                            Write-Host ""
-                            Write-Warn "A system restart is required to activate Hyper-V."
-                            Write-Warn "After restarting, re-run this installer to finish nanosb installation."
-                            Write-Host ""
-                            $restart = Read-Host "  Restart now? [y/N]"
-                            if ($restart -match '^[Yy]') {
-                                Restart-Computer -Force
-                            } else {
-                                Write-Info "Please restart your computer and then re-run this installer."
-                            }
-                            return
-                        }
-                    } catch {
-                        Write-Warn "Failed to enable Hyper-V: $_"
-                        Write-Warn "Try manually in an elevated PowerShell:"
-                        Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All"
-                    }
-                } else {
-                    Write-Warn "Skipping Hyper-V setup. nanosb will not function without it."
+                Write-Info "Enabling Hyper-V..."
+                try {
+                    $r = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart -ErrorAction Stop
+                    Write-Ok "Hyper-V enabled"
+                    if ($r.RestartNeeded) { $rebootNeeded = $true }
+                } catch {
+                    Write-Warn "Failed to enable Hyper-V: $_"
                 }
             }
         } else {
@@ -125,66 +98,26 @@ function Install-NanosandboxCLI {
         }
     }
 
-    # --- Windows Hypervisor Platform (WHPX) check ---
-    # WHPX exposes the hypervisor API to user-mode processes (libkrunfw.dll).
-    # Hyper-V alone is not enough — WHPX must also be enabled.
+    # -- Windows Hypervisor Platform (WHPX) --
     $whpx = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
     if (-not $whpx -or $whpx.State -ne "Enabled") {
-        Write-Warn "Windows Hypervisor Platform (WHPX) is not enabled. It is required for VM execution."
-        Write-Host ""
-
-        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-            [Security.Principal.WindowsBuiltInRole]::Administrator)
-
         if (-not $isAdmin) {
-            Write-Warn "Enabling WHPX requires Administrator privileges."
-            Write-Warn "Please re-run this installer in an elevated (Administrator) PowerShell,"
-            Write-Warn "or enable it manually with:"
-            Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All"
-            Write-Warn "Then restart your computer and re-run this installer."
-            Write-Host ""
-            $answer = Read-Host "  Continue without WHPX (nanosb will not work)? [y/N]"
-            if ($answer -notmatch '^[Yy]') {
-                Write-Info "Aborted. Re-run as Administrator to enable WHPX automatically."
-                return
-            }
+            Write-Warn "Windows Hypervisor Platform is not enabled (requires Administrator to fix)."
         } else {
-            $answer = Read-Host "  Enable Windows Hypervisor Platform now? [Y/n]"
-            if ($answer -notmatch '^[Nn]') {
-                Write-Info "Enabling Windows Hypervisor Platform..."
-                try {
-                    $result = Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart -ErrorAction Stop
-                    Write-Ok "Windows Hypervisor Platform enabled."
-                    if ($result.RestartNeeded) {
-                        Write-Host ""
-                        Write-Warn "A system restart is required to activate WHPX."
-                        Write-Warn "After restarting, re-run this installer to finish nanosb installation."
-                        Write-Host ""
-                        $restart = Read-Host "  Restart now? [y/N]"
-                        if ($restart -match '^[Yy]') {
-                            Restart-Computer -Force
-                        } else {
-                            Write-Info "Please restart your computer and then re-run this installer."
-                        }
-                        return
-                    }
-                } catch {
-                    Write-Warn "Failed to enable WHPX: $_"
-                    Write-Warn "Try manually in an elevated PowerShell:"
-                    Write-Warn "    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All"
-                }
-            } else {
-                Write-Warn "Skipping WHPX setup. nanosb will not function without it."
+            Write-Info "Enabling Windows Hypervisor Platform..."
+            try {
+                $r = Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart -ErrorAction Stop
+                Write-Ok "Windows Hypervisor Platform enabled"
+                if ($r.RestartNeeded) { $rebootNeeded = $true }
+            } catch {
+                Write-Warn "Failed to enable Windows Hypervisor Platform: $_"
             }
         }
     } else {
-        Write-Ok "Windows Hypervisor Platform (WHPX) enabled"
+        Write-Ok "Windows Hypervisor Platform enabled"
     }
 
-    # --- Visual C++ Redistributable (required by libkrunfw.dll) ---
-    # libkrunfw.dll is dynamically linked against VCRUNTIME140.dll. Without the
-    # VC++ Redistributable installed, libkrunfw.dll silently fails to load and
-    # the VM cannot start.
+    # -- Visual C++ Redistributable (no reboot needed) --
     $vcKey = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
     $vcInstalled = (Get-ItemProperty $vcKey -ErrorAction SilentlyContinue).Installed -eq 1
     if (-not $vcInstalled) {
@@ -199,80 +132,52 @@ function Install-NanosandboxCLI {
             Write-Warn "Install manually from: https://aka.ms/vs/17/release/vc_redist.x64.exe"
         }
     } else {
-        Write-Ok "Visual C++ Redistributable already installed"
+        Write-Ok "Visual C++ Redistributable installed"
     }
 
-    # --- WSL2 check and auto-install ---
-    # nanosb on Windows uses WSL2 as the Linux kernel layer for VM execution.
+    # -- WSL2 --
     if (-not $SkipWsl2Check) {
         $wslExe = Join-Path $env:SystemRoot "System32\wsl.exe"
         $wsl2Ready = $false
-
         if (Test-Path $wslExe) {
-            # wsl.exe exists — probe whether WSL2 is configured and responsive.
-            # --status exits 0 when WSL2 kernel is present; non-zero on fresh systems.
             $wslOut = & $wslExe --status 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                $wsl2Ready = $true
-                Write-Ok "WSL2 is available"
+            if ($LASTEXITCODE -eq 0) { $wsl2Ready = $true }
+        }
+        if ($wsl2Ready) {
+            Write-Ok "WSL2 available"
+        } elseif (-not $isAdmin) {
+            Write-Warn "WSL2 is not installed (requires Administrator to fix)."
+        } else {
+            Write-Info "Installing WSL2..."
+            try {
+                & $wslExe --install --no-launch 2>&1 | ForEach-Object { Write-Host "  $_" }
+                Write-Ok "WSL2 installed"
+                $rebootNeeded = $true
+            } catch {
+                Write-Warn "WSL2 installation failed: $_"
             }
         }
+    }
 
-        if (-not $wsl2Ready) {
-            Write-Warn "WSL2 is not installed or not configured."
-            Write-Info "WSL2 is required for nanosb to run Linux VMs on Windows."
-            Write-Host ""
-
-            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator)
-
-            if (-not $isAdmin) {
-                Write-Warn "Installing WSL2 requires Administrator privileges."
-                Write-Warn "Please re-run this installer in an elevated (Administrator) PowerShell,"
-                Write-Warn "or install WSL2 manually with:"
-                Write-Warn "    wsl --install"
-                Write-Warn "Then restart your computer and re-run this installer."
-                Write-Host ""
-                $answer = Read-Host "  Continue without WSL2 (nanosb may not work)? [y/N]"
-                if ($answer -notmatch '^[Yy]') {
-                    Write-Info "Aborted. Re-run as Administrator to install WSL2 automatically."
-                    return
-                }
-            } else {
-                $answer = Read-Host "  Install WSL2 now? [Y/n]"
-                if ($answer -notmatch '^[Nn]') {
-                    Write-Info "Installing WSL2 (this may take a few minutes)..."
-                    try {
-                        # --no-launch prevents the Ubuntu terminal from opening immediately.
-                        # WSL2 kernel + default Ubuntu distro will be set up; a reboot is
-                        # required before the WSL2 kernel becomes active.
-                        & $wslExe --install --no-launch 2>&1 | ForEach-Object { Write-Host "  $_" }
-                        if ($LASTEXITCODE -eq 0) {
-                            Write-Ok "WSL2 installed successfully."
-                        } else {
-                            Write-Warn "WSL2 installer exited with code $LASTEXITCODE — a reboot may still be needed."
-                        }
-                    } catch {
-                        Write-Warn "WSL2 installation failed: $_"
-                        Write-Warn "Try manually in an elevated PowerShell: wsl --install"
-                    }
-
-                    Write-Host ""
-                    Write-Warn "A system restart is required to complete WSL2 setup."
-                    Write-Warn "After restarting, re-run this installer to finish nanosb installation."
-                    Write-Host ""
-                    $restart = Read-Host "  Restart now? [y/N]"
-                    if ($restart -match '^[Yy]') {
-                        Restart-Computer -Force
-                    } else {
-                        Write-Info "Please restart your computer and then re-run this installer."
-                    }
-                    return
-                } else {
-                    Write-Warn "Skipping WSL2 installation. nanosb may not function correctly."
-                }
-            }
+    # -- Single reboot if any feature needed it --
+    if ($rebootNeeded) {
+        Write-Host ""
+        Write-Warn "A restart is required to activate the features installed above."
+        Write-Warn "After restarting, re-run this installer to complete nanosb installation."
+        Write-Host ""
+        $restart = Read-Host "  Restart now? [Y/n]"
+        if ($restart -notmatch '^[Nn]') {
+            Restart-Computer -Force
+        } else {
+            Write-Info "Please restart your computer and then re-run this installer."
         }
+        return
+    }
+
+    if (-not $isAdmin) {
+        Write-Warn "Some prerequisites could not be checked (not running as Administrator)."
+        Write-Warn "Re-run as Administrator for a fully automated setup."
+        Write-Host ""
     }
 
     # --- Resolve version ---
