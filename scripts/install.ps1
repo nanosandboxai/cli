@@ -5,9 +5,10 @@
 
 .DESCRIPTION
     Downloads and installs the nanosb CLI binary and runtime dependencies on Windows.
-    1. Downloads the nanosb.exe binary from GitHub Releases
-    2. Installs runtime dependencies via install-deps
-    3. Adds the install directory to the user PATH
+    1. Checks prerequisites (Hyper-V, WSL2) and installs WSL2 if missing
+    2. Downloads the nanosb.exe binary from GitHub Releases
+    3. Installs runtime dependencies via install-deps
+    4. Adds the install directory to the user PATH
 
 .EXAMPLE
     # Install latest stable version
@@ -35,7 +36,10 @@ function Install-NanosandboxCLI {
         [switch]$SkipDefenderExclusion,
         # Skip the prompt and add the exclusion automatically. Useful for
         # unattended/CI installs.
-        [switch]$AddDefenderExclusion
+        [switch]$AddDefenderExclusion,
+        # Skip WSL2 prerequisite check entirely (for advanced users who know
+        # they don't need WSL2 or will install it separately).
+        [switch]$SkipWsl2Check
     )
 
     # --- Helpers ---
@@ -67,6 +71,79 @@ function Install-NanosandboxCLI {
             Write-Warn "Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All"
         } else {
             Write-Ok "Hyper-V enabled"
+        }
+    }
+
+    # --- WSL2 check and auto-install ---
+    # nanosb on Windows uses WSL2 as the Linux kernel layer for VM execution.
+    if (-not $SkipWsl2Check) {
+        $wslExe = Join-Path $env:SystemRoot "System32\wsl.exe"
+        $wsl2Ready = $false
+
+        if (Test-Path $wslExe) {
+            # wsl.exe exists — probe whether WSL2 is configured and responsive.
+            # --status exits 0 when WSL2 kernel is present; non-zero on fresh systems.
+            $wslOut = & $wslExe --status 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $wsl2Ready = $true
+                Write-Ok "WSL2 is available"
+            }
+        }
+
+        if (-not $wsl2Ready) {
+            Write-Warn "WSL2 is not installed or not configured."
+            Write-Info "WSL2 is required for nanosb to run Linux VMs on Windows."
+            Write-Host ""
+
+            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+            if (-not $isAdmin) {
+                Write-Warn "Installing WSL2 requires Administrator privileges."
+                Write-Warn "Please re-run this installer in an elevated (Administrator) PowerShell,"
+                Write-Warn "or install WSL2 manually with:"
+                Write-Warn "    wsl --install"
+                Write-Warn "Then restart your computer and re-run this installer."
+                Write-Host ""
+                $answer = Read-Host "  Continue without WSL2 (nanosb may not work)? [y/N]"
+                if ($answer -notmatch '^[Yy]') {
+                    Write-Info "Aborted. Re-run as Administrator to install WSL2 automatically."
+                    return
+                }
+            } else {
+                $answer = Read-Host "  Install WSL2 now? [Y/n]"
+                if ($answer -notmatch '^[Nn]') {
+                    Write-Info "Installing WSL2 (this may take a few minutes)..."
+                    try {
+                        # --no-launch prevents the Ubuntu terminal from opening immediately.
+                        # WSL2 kernel + default Ubuntu distro will be set up; a reboot is
+                        # required before the WSL2 kernel becomes active.
+                        & $wslExe --install --no-launch 2>&1 | ForEach-Object { Write-Host "  $_" }
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Ok "WSL2 installed successfully."
+                        } else {
+                            Write-Warn "WSL2 installer exited with code $LASTEXITCODE — a reboot may still be needed."
+                        }
+                    } catch {
+                        Write-Warn "WSL2 installation failed: $_"
+                        Write-Warn "Try manually in an elevated PowerShell: wsl --install"
+                    }
+
+                    Write-Host ""
+                    Write-Warn "A system restart is required to complete WSL2 setup."
+                    Write-Warn "After restarting, re-run this installer to finish nanosb installation."
+                    Write-Host ""
+                    $restart = Read-Host "  Restart now? [y/N]"
+                    if ($restart -match '^[Yy]') {
+                        Restart-Computer -Force
+                    } else {
+                        Write-Info "Please restart your computer and then re-run this installer."
+                    }
+                    return
+                } else {
+                    Write-Warn "Skipping WSL2 installation. nanosb may not function correctly."
+                }
+            }
         }
     }
 
