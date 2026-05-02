@@ -13,7 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 # Sandbox SDK — wraps nanosandbox runtime with agent-aware features.
-sandbox = { git = "https://github.com/nanosandboxai/sandbox.git", branch = "feature/runtime-sandbox-separation" }
+sandbox = { path = "../sandbox/crates/sandbox" }
+# Direct runtime access for logging and low-level runtime APIs.
+runtime = { path = "../runtime/crates/runtime" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -62,10 +64,10 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 
-# Patch vm-memory to the fork that fixes cross-platform compilation issues.
-# Required because runtime's workspace patch doesn't propagate through git deps.
+# On Windows, redirect vm-memory to the patched fork that compiles on non-Unix.
+# This is needed because the CLI is outside the runtime workspace which has its own patch.
 [patch.crates-io]
-vm-memory = { git = "https://github.com/nanosandboxai/runtime.git", branch = "feature/runtime-sandbox-separation" }
+vm-memory = { path = "../runtime/deps/libkrun/src/vm-memory-win" }
 
 [profile.release]
 lto = true
