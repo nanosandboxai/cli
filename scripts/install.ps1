@@ -188,7 +188,7 @@ function Install-NanosandboxCLI {
     $vcKey = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
     $vcInstalled = (Get-ItemProperty $vcKey -ErrorAction SilentlyContinue).Installed -eq 1
     if (-not $vcInstalled) {
-        Write-Info "Installing Visual C++ 2015-2022 Redistributable (required by libkrunfw.dll)..."
+        Write-Info "Installing Visual C++ 2015-2022 Redistributable..."
         try {
             $vcInstaller = Join-Path $env:TEMP "vc_redist.x64.exe"
             Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcInstaller -UseBasicParsing
