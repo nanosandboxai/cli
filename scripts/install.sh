@@ -3,6 +3,11 @@
 # Nanosandbox CLI Installer
 #
 # Installs the nanosb CLI binary and its runtime dependencies.
+# Everything is installed under ~/.nanosandbox/ (no sudo required):
+#
+#   ~/.nanosandbox/bin/nanosb     — CLI binary
+#   ~/.nanosandbox/bin/gvproxy    — networking daemon (via install-deps)
+#   ~/.nanosandbox/libs/          — shared libraries (via install-deps)
 #
 #   1. Installs runtime dependencies via install-deps (libkrunfw + gvproxy)
 #   2. Downloads the nanosb binary
@@ -14,7 +19,7 @@
 # Environment variables:
 #   NANOSB_VERSION   - CLI version to install (default: "latest")
 #   DEPS_VERSION     - Dependencies version (default: "latest")
-#   INSTALL_DIR      - Binary install directory (default: ~/.local/bin)
+#   NANOSANDBOX_HOME - Base directory (default: ~/.nanosandbox)
 #   NANOSB_BINARY    - Path to a local binary to install (skips download)
 #
 
@@ -26,7 +31,8 @@ NANOSB_VERSION="${NANOSB_VERSION:-latest}"
 NANOSB_VERSION="${NANOSB_VERSION#v}"   # strip leading "v" — tags use v-prefix internally
 DEPS_VERSION="${DEPS_VERSION:-latest}"
 RELEASE_REPO="nanosandboxai/cli"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+NANOSANDBOX_HOME="${NANOSANDBOX_HOME:-$HOME/.nanosandbox}"
+INSTALL_DIR="${NANOSANDBOX_HOME}/bin"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -96,7 +102,7 @@ install_deps() {
     fi
 
     info "Running install-deps installer..."
-    if DEPS_VERSION="$resolved_version" bash "$tmpfile"; then
+    if DEPS_VERSION="$resolved_version" NANOSANDBOX_HOME="$NANOSANDBOX_HOME" bash "$tmpfile"; then
         success "Runtime dependencies installed"
     else
         warn "install-deps installer exited with an error"
@@ -123,19 +129,26 @@ download_binary() {
         return 0
     fi
 
-    if [[ "$OS" != "Darwin" || "$ARCH" != "arm64" ]]; then
-        warn "Pre-built binaries are available for macOS arm64 only."
-        info "For other platforms, build from source:"
-        info "  git clone https://github.com/nanosandboxai/runtime.git"
-        info "  cd runtime && cargo build --release --features cli"
-        return 0
-    fi
+    # Pick the right release asset for the current platform.
+    local asset
+    case "${OS}-${ARCH}" in
+        Darwin-arm64)            asset="nanosb" ;;
+        Linux-x86_64|Linux-amd64) asset="nanosb-linux-amd64" ;;
+        *)
+            warn "No pre-built binary for ${OS} ${ARCH}."
+            info "Available pre-built targets: macOS arm64, Linux x86_64."
+            info "For other platforms, build from source:"
+            info "  git clone https://github.com/nanosandboxai/runtime.git"
+            info "  cd runtime && cargo build --release --features cli"
+            return 0
+            ;;
+    esac
 
     local url
     if [[ "$NANOSB_VERSION" == "latest" ]]; then
-        url="https://github.com/${RELEASE_REPO}/releases/latest/download/nanosb"
+        url="https://github.com/${RELEASE_REPO}/releases/latest/download/${asset}"
     else
-        url="https://github.com/${RELEASE_REPO}/releases/download/v${NANOSB_VERSION}/nanosb"
+        url="https://github.com/${RELEASE_REPO}/releases/download/v${NANOSB_VERSION}/${asset}"
     fi
 
     if command -v nanosb &>/dev/null; then
@@ -163,8 +176,7 @@ codesign_binary() {
         for candidate in \
             "$(command -v nanosb 2>/dev/null || true)" \
             "./target/debug/nanosb" \
-            "./target/release/nanosb" \
-            "/usr/local/bin/nanosb"; do
+            "./target/release/nanosb"; do
             if [[ -n "$candidate" && -f "$candidate" ]]; then
                 binary_path="$candidate"
                 break
@@ -200,19 +212,74 @@ PLIST
     rm -f "$entitlements"
 }
 
+# ─── /usr/local/bin symlink ──────────────────────────────────────────────────
+
+# Symlinks ~/.nanosandbox/bin/nanosb into /usr/local/bin so it's on PATH in
+# every new terminal without rc-file edits. /usr/local/bin is on the default
+# PATH on both macOS and Linux. Requires sudo; falls back silently if not
+# available (PATH edits below still cover the user's shell).
+install_symlink() {
+    local target="${INSTALL_DIR}/nanosb"
+    local link="/usr/local/bin/nanosb"
+
+    [ -f "$target" ] || return 0
+
+    header "Linking nanosb into /usr/local/bin"
+
+    if [ ! -d /usr/local/bin ]; then
+        sudo mkdir -p /usr/local/bin 2>/dev/null || {
+            warn "Could not create /usr/local/bin — skipping symlink"
+            info "nanosb still available at ${target}"
+            return 0
+        }
+    fi
+
+    if sudo -n true 2>/dev/null; then
+        sudo ln -sf "$target" "$link"
+        success "Linked ${link} → ${target}"
+    else
+        info "sudo password required to link nanosb into /usr/local/bin"
+        if sudo ln -sf "$target" "$link"; then
+            success "Linked ${link} → ${target}"
+        else
+            warn "Skipped /usr/local/bin symlink — nanosb available at ${target}"
+            info "Add ${INSTALL_DIR} to PATH manually or re-run installer with sudo"
+        fi
+    fi
+}
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 install_deps
 download_binary
 [[ "$OS" == "Darwin" ]] && { header "Codesigning nanosb"; codesign_binary; }
+install_symlink
 
-# PATH check
+# PATH check — auto-configure if missing
 if ! printf '%s' ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
-    header "PATH not configured"
-    warn "${INSTALL_DIR} is not in your PATH"
-    info "Add to your shell profile:"
-    info "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
-    info "Then: source ~/.zshrc"
+    header "Configuring PATH"
+
+    path_line="export PATH=\"${INSTALL_DIR}:\$PATH\""
+    path_added=false
+
+    for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+        [ -f "$rc" ] || continue
+        if ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+            printf '\n# Added by Nanosandbox installer\n%s\n' "$path_line" >> "$rc"
+            success "Added to $(basename "$rc")"
+            path_added=true
+        fi
+    done
+
+    if [ "$path_added" = false ]; then
+        default_rc="$HOME/.bashrc"
+        [ "$OS" = "Darwin" ] && default_rc="$HOME/.zshrc"
+        printf '\n# Added by Nanosandbox installer\n%s\n' "$path_line" >> "$default_rc"
+        success "Added to $(basename "$default_rc")"
+    fi
+
+    export PATH="${INSTALL_DIR}:$PATH"
+    info "PATH updated for this session"
 fi
 
 # Summary
@@ -224,9 +291,20 @@ case "$OS" in
 esac
 cat <<EOF
   nanosb     → ${INSTALL_DIR}/nanosb
-  libkrunfw  → /usr/local/lib/
-  gvproxy    → ${HOME}/.local/bin/gvproxy
+  symlink    → /usr/local/bin/nanosb
+  libkrunfw  → ${NANOSANDBOX_HOME}/libs/
+  gvproxy    → ${INSTALL_DIR}/gvproxy
   backend    → ${backend}
 
   Run 'nanosb doctor' to verify the installation.
 EOF
+
+# If neither the /usr/local/bin symlink nor the current PATH includes nanosb,
+# remind the user to reload their shell rc.
+if [ ! -L /usr/local/bin/nanosb ] && ! printf '%s' ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
+    echo ""
+    info "To start using nanosb in this terminal, run:"
+    echo ""
+    echo "    source ~/.zshrc"
+    echo ""
+fi

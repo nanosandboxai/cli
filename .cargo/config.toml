@@ -1,0 +1,4 @@
+[target.x86_64-pc-windows-msvc]
+# Statically link the MSVC CRT so nanosb.exe has no VCRUNTIME140.dll dependency.
+# Without this, the binary fails to launch on clean Windows machines.
+rustflags = ["-C", "target-feature=+crt-static"]

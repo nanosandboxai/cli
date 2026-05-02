@@ -169,8 +169,6 @@ pub struct HeadlessState {
     pub agent_text: String,
     /// Tool call log entries.
     pub tool_calls: Vec<HeadlessToolCall>,
-    /// Raw NDJSON lines accumulated (for fallback display).
-    pub raw_lines: Vec<String>,
     /// Partial line buffer for incomplete NDJSON lines spanning SSH chunks.
     pub line_buffer: String,
     /// Scroll offset for the output area.
@@ -179,6 +177,8 @@ pub struct HeadlessState {
     pub auto_scroll: bool,
     /// Start time for elapsed display.
     pub started_at: std::time::Instant,
+    /// Set when the task finishes (completed/error). Freezes the elapsed timer.
+    pub completed_at: Option<std::time::Instant>,
 }
 
 impl HeadlessState {
@@ -188,11 +188,27 @@ impl HeadlessState {
             status: "starting".to_string(),
             agent_text: String::new(),
             tool_calls: Vec::new(),
-            raw_lines: Vec::new(),
             line_buffer: String::new(),
             scroll_offset: 0,
             auto_scroll: true,
             started_at: std::time::Instant::now(),
+            completed_at: None,
+        }
+    }
+
+    /// Elapsed time since task start. Freezes at completion.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.completed_at
+            .unwrap_or_else(std::time::Instant::now)
+            .duration_since(self.started_at)
+    }
+
+    /// Mark the task as finished with the given status ("completed" or "error").
+    /// Freezes the elapsed timer on the first call; idempotent afterwards.
+    pub fn finish(&mut self, status: &str) {
+        self.status = status.to_string();
+        if self.completed_at.is_none() {
+            self.completed_at = Some(std::time::Instant::now());
         }
     }
 }
@@ -285,7 +301,7 @@ pub struct AgentPanel {
     /// Key: dedup key, Value: (full URL, timestamp of last growth).
     pub pending_urls: HashMap<String, (String, std::time::Instant)>,
     /// Active project mount for this panel's sandbox.
-    pub project_mount: Option<sandbox::nanosandbox::project::ProjectMount>,
+    pub project_mount: Option<sandbox::ProjectMount>,
     /// Last known HEAD SHA in the clone (for commit auto-sync detection).
     pub last_known_head: Option<String>,
     /// Initial HEAD SHA of the clone at creation (base for committed files diff).
