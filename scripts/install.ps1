@@ -181,6 +181,27 @@ function Install-NanosandboxCLI {
         Write-Ok "Windows Hypervisor Platform (WHPX) enabled"
     }
 
+    # --- Visual C++ Redistributable (required by libkrunfw.dll) ---
+    # libkrunfw.dll is dynamically linked against VCRUNTIME140.dll. Without the
+    # VC++ Redistributable installed, libkrunfw.dll silently fails to load and
+    # the VM cannot start.
+    $vcKey = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    $vcInstalled = (Get-ItemProperty $vcKey -ErrorAction SilentlyContinue).Installed -eq 1
+    if (-not $vcInstalled) {
+        Write-Info "Installing Visual C++ 2015-2022 Redistributable (required by libkrunfw.dll)..."
+        try {
+            $vcInstaller = Join-Path $env:TEMP "vc_redist.x64.exe"
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcInstaller -UseBasicParsing
+            Start-Process -FilePath $vcInstaller -ArgumentList "/install", "/quiet", "/norestart" -Wait
+            Write-Ok "Visual C++ Redistributable installed"
+        } catch {
+            Write-Warn "Failed to install Visual C++ Redistributable: $_"
+            Write-Warn "Install manually from: https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        }
+    } else {
+        Write-Ok "Visual C++ Redistributable already installed"
+    }
+
     # --- WSL2 check and auto-install ---
     # nanosb on Windows uses WSL2 as the Linux kernel layer for VM execution.
     if (-not $SkipWsl2Check) {
