@@ -381,10 +381,7 @@ mod cli {
                 // Auto-load .env from project directory (lowest priority).
                 // Check --project flag first, then CWD if it's a git repo.
                 let auto_env_dir = cli.project.as_ref().map(std::path::PathBuf::from)
-                    .or_else(|| {
-                        let cwd = std::env::current_dir().ok()?;
-                        if cwd.join(".git").exists() { Some(cwd) } else { None }
-                    });
+                    .or_else(|| std::env::current_dir().ok());
                 if let Some(ref dir) = auto_env_dir {
                     let env_path = dir.join(".env");
                     if env_path.exists() {
@@ -445,17 +442,11 @@ mod cli {
                     sandbox_configs
                 };
 
-                // Project path for sandboxes without explicit project config.
+                // Always use CWD as project path so non-git directories get session
+                // persistence and project mounting (git is initialised in source on first use).
                 let project_path = cli.project
                     .map(std::path::PathBuf::from)
-                    .or_else(|| {
-                        let cwd = std::env::current_dir().ok()?;
-                        if cwd.join(".git").exists() {
-                            Some(cwd)
-                        } else {
-                            None
-                        }
-                    });
+                    .or_else(|| std::env::current_dir().ok());
 
                 nanosb_cli::tui::run::run_tui(project_path, sandbox_configs).await
             }
