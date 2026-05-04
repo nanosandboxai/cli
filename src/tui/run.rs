@@ -22,7 +22,7 @@ use ratatui::Terminal;
 use tokio::sync::{mpsc, Mutex};
 
 use nanosandbox::{McpServerConfig, SandboxConfig};
-use nanosandbox::runtime::validation::{
+use nanosandbox::validation::{
     validate_runtime_prerequisites_detailed, ValidationResult,
 };
 use nanosandbox::Sandbox;
@@ -97,6 +97,10 @@ pub async fn run_tui(
                         }
                     }
                     // Remove session file + agent state directories.
+                    let _ = nanosandbox::session::Session::delete(pp, true);
+                    None
+                }
+                nanosandbox::session::ResumeChoice::Destroy => {
                     let _ = nanosandbox::session::Session::delete(pp, true);
                     None
                 }
@@ -2940,7 +2944,7 @@ fn add_agent(
 
     // Pass auto_sync setting to project config so sandbox creation
     // knows whether to use setup() or setup_deferred().
-    if let Some(ref mut proj) = config.project {
+    if let Some(ref mut proj) = config.sandbox.project {
         proj.auto_sync = app.settings.gitsync.auto_sync;
     }
 
@@ -2958,6 +2962,7 @@ fn add_agent(
     let tx = tx.clone();
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
+        let resolved_agent = config.resolved_agent.clone();
         let _ = tx.send(AppEvent::SandboxCreating {
             panel_idx,
             message: "Pulling image...".into(),
@@ -2975,8 +2980,17 @@ fn add_agent(
                     message: "Booting microVM...".into(),
                 });
 
+                // Stagger VM starts to avoid concurrent gvproxy/VM-subprocess races.
+                // create() (image pull + rootfs) runs in parallel; start() is staggered.
+                if panel_idx > 0 {
+                    tokio::time::sleep(Duration::from_millis(panel_idx as u64 * 600)).await;
+                }
+
                 match sandbox.start().await {
                     Ok(()) => {
+                        if let Some(resolved) = &resolved_agent {
+                            let _ = sandbox.bootstrap_agent(resolved).await;
+                        }
                         // Take the project mount from the sandbox so we can
                         // store it on the panel for teardown on kill.
                         let project_mount = sandbox.take_project_mount();
@@ -3013,13 +3027,13 @@ fn add_agent_from_config(
     mut config: SandboxConfig,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    let display_name = config.name.clone();
+    let display_name = config.sandbox.name.clone();
 
     // Detect the base agent type: explicit config.agent_type > image name > key.
     let agent_type = config
         .agent_type
         .map(|t| t.to_string())
-        .or_else(|| detect_agent_type_from_image(&config.image))
+        .or_else(|| detect_agent_type_from_image(&config.sandbox.image))
         .unwrap_or_else(|| key.to_string());
 
     let mut panel = AgentPanel::new(&agent_type);
@@ -3033,7 +3047,7 @@ fn add_agent_from_config(
     }
 
     // Copy env vars from config to panel.
-    for (k, v) in &config.env {
+    for (k, v) in &config.sandbox.env {
         panel.env.insert(k.clone(), v.clone());
     }
 
@@ -3048,9 +3062,9 @@ fn add_agent_from_config(
 
     // If config doesn't have a project but --project flag was set,
     // inject it into the config so the sandbox mounts it.
-    if config.project.is_none() {
+    if config.sandbox.project.is_none() {
         if let Some(ref project_path) = app.project_path {
-            config.project = Some(nanosandbox::ProjectConfig {
+            config.sandbox.project = Some(nanosandbox::ProjectConfig {
                 path: project_path.clone(),
                 branch: None,
                 mount_point: "/workspace".to_string(),
@@ -3059,7 +3073,7 @@ fn add_agent_from_config(
         }
     } else {
         // Config has a project — just set auto_sync from settings.
-        if let Some(ref mut proj) = config.project {
+        if let Some(ref mut proj) = config.sandbox.project {
             proj.auto_sync = app.settings.gitsync.auto_sync;
         }
     }
@@ -3076,6 +3090,7 @@ fn add_agent_from_config(
     let tx = tx.clone();
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
+        let resolved_agent = config.resolved_agent.clone();
         let _ = tx.send(AppEvent::SandboxCreating {
             panel_idx,
             message: "Pulling image...".into(),
@@ -3093,8 +3108,16 @@ fn add_agent_from_config(
                     message: "Booting microVM...".into(),
                 });
 
+                // Stagger VM starts to avoid concurrent gvproxy/VM-subprocess races.
+                if panel_idx > 0 {
+                    tokio::time::sleep(Duration::from_millis(panel_idx as u64 * 600)).await;
+                }
+
                 match sandbox.start().await {
                     Ok(()) => {
+                        if let Some(resolved) = &resolved_agent {
+                            let _ = sandbox.bootstrap_agent(resolved).await;
+                        }
                         let project_mount = sandbox.take_project_mount();
                         let sb = Arc::new(Mutex::new(sandbox));
                         let _ = tx.send(AppEvent::SandboxReady {
@@ -3137,17 +3160,17 @@ fn resume_session(
         let mut config = sp.config.clone();
 
         // Normalize the image in case the session was saved with a bare name.
-        config.image = nanosandbox::config::normalize_image(&config.image);
+        config.sandbox.image = nanosandbox::config::normalize_image(&config.sandbox.image);
 
         // Re-populate env vars from host environment (secrets are not stored in session).
         for key in &sp.env_keys {
             if let Ok(val) = std::env::var(key) {
-                config.env.insert(key.clone(), val);
+                config.sandbox.env.insert(key.clone(), val);
             }
         }
 
         // Set up the agent panel.
-        let agent_type = detect_agent_type_from_image(&config.image)
+        let agent_type = detect_agent_type_from_image(&config.sandbox.image)
             .unwrap_or_else(|| sp.agent_name.clone());
 
         let mut panel = AgentPanel::new(&agent_type);
@@ -3164,7 +3187,7 @@ fn resume_session(
         panel.original_config = Some(config.clone());
 
         // Copy env vars from config to panel.
-        for (k, v) in &config.env {
+        for (k, v) in &config.sandbox.env {
             panel.env.insert(k.clone(), v.clone());
         }
 
@@ -3178,7 +3201,7 @@ fn resume_session(
         }
 
         // If the project clone still exists, mount it directly instead of
-        // creating a new one. We set config.project = None so that
+        // creating a new one. We set config.sandbox.project = None so that
         // setup_project_mount() inside Sandbox::create() is skipped, and add
         // the VirtioFS mount for the existing clone ourselves.
         //
@@ -3187,6 +3210,7 @@ fn resume_session(
         // pointed to a different directory).
         let panel_project_path = sp
             .config
+            .sandbox
             .project
             .as_ref()
             .map(|p| p.path.clone())
@@ -3195,9 +3219,9 @@ fn resume_session(
         if let Some(ref clone_path) = sp.clone_path {
             if clone_path.exists() {
                 // Add VirtioFS mount for existing clone directly.
-                config.mounts.push(nanosandbox::Mount::virtiofs(clone_path, "/workspace"));
-                // Do NOT set config.project — this skips setup_project_mount().
-                config.project = None;
+                config.sandbox.mounts.push(nanosandbox::Mount::virtiofs(clone_path, "/workspace"));
+                // Do NOT set config.sandbox.project — this skips setup_project_mount().
+                config.sandbox.project = None;
 
                 // Create a ProjectMount on the panel to handle suspend/teardown.
                 if let Ok(mut pm) = nanosandbox::project::ProjectMount::detect(&panel_project_path) {
@@ -3206,7 +3230,7 @@ fn resume_session(
                 }
             } else {
                 // Clone dir is gone — create a fresh clone from the branch.
-                config.project = Some(nanosandbox::ProjectConfig {
+                config.sandbox.project = Some(nanosandbox::ProjectConfig {
                     path: panel_project_path,
                     branch: sp
                         .branches
@@ -3234,6 +3258,7 @@ fn resume_session(
         let tx = tx.clone();
         let image_manager = app.image_manager.clone();
         tokio::spawn(async move {
+            let resolved_agent = config.resolved_agent.clone();
             let _ = tx.send(AppEvent::SandboxCreating {
                 panel_idx,
                 message: "Pulling image...".into(),
@@ -3251,8 +3276,16 @@ fn resume_session(
                         message: "Booting microVM...".into(),
                     });
 
+                    // Stagger VM starts to avoid concurrent gvproxy/VM-subprocess races.
+                    if panel_idx > 0 {
+                        tokio::time::sleep(Duration::from_millis(panel_idx as u64 * 600)).await;
+                    }
+
                     match sandbox.start().await {
                         Ok(()) => {
+                            if let Some(resolved) = &resolved_agent {
+                                let _ = sandbox.bootstrap_agent(resolved).await;
+                            }
                             let project_mount = sandbox.take_project_mount();
                             let sb = Arc::new(Mutex::new(sandbox));
                             let _ = tx.send(AppEvent::SandboxReady {
@@ -3334,15 +3367,14 @@ fn handle_env(app: &mut App, assignment: Option<(String, String)>) {
 
 /// Handle `/mcp list` — list MCP servers in the focused panel's sandbox.
 async fn handle_mcp_list(app: &mut App) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .focused_panel_ref()
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: "No sandbox attached to this panel.".to_string(),
             });
@@ -3353,32 +3385,28 @@ async fn handle_mcp_list(app: &mut App) {
     let sb = sandbox.lock().await;
     match sb.list_mcp_servers().await {
         Ok(servers) => {
-            if servers.is_empty() {
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "No MCP servers configured.".to_string(),
-                });
+            let content = if servers.is_empty() {
+                "No MCP servers configured.".to_string()
             } else {
-                let mut lines = Vec::new();
-                lines.push("MCP Servers:".to_string());
-                for (name, cfg) in &servers {
+                let mut lines = vec!["MCP Servers:".to_string()];
+                let mut sorted: Vec<_> = servers.iter().collect();
+                sorted.sort_by_key(|(n, _)| n.as_str());
+                for (name, cfg) in sorted {
                     let status = if cfg.enabled { "enabled" } else { "disabled" };
                     lines.push(format!(
-                        "  {} [{}] - {} {}",
-                        name,
-                        status,
-                        cfg.command,
-                        cfg.args.join(" "),
+                        "  {} [{}]  {} {}",
+                        name, status, cfg.command, cfg.args.join(" "),
                     ));
                 }
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: lines.join("\n"),
-                });
-            }
+                lines.join("\n")
+            };
+            app.set_system_message_persistent(ChatMessage {
+                role: MessageRole::System,
+                content,
+            });
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: format!("Failed to list MCP servers: {}", e),
             });
@@ -3388,15 +3416,14 @@ async fn handle_mcp_list(app: &mut App) {
 
 /// Handle `/mcp add <name> <command> [args]`.
 async fn handle_mcp_add(app: &mut App, name: &str, command: &str, args: &[String]) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .focused_panel_ref()
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: "No sandbox attached to this panel.".to_string(),
             });
@@ -3412,33 +3439,26 @@ async fn handle_mcp_add(app: &mut App, name: &str, command: &str, args: &[String
     };
 
     let sb = sandbox.lock().await;
-    match sb.add_mcp_server(name, config).await {
-        Ok(()) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' added.", name),
-            });
-        }
-        Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to add MCP server '{}': {}", name, e),
-            });
-        }
-    }
+    let content = match sb.add_mcp_server(name, config).await {
+        Ok(()) => match sb.restart_agent("mcp_update").await {
+            Ok(_) => format!("MCP server '{}' added — agent session reloaded.", name),
+            Err(e) => format!("MCP server '{}' added, but failed to reload agent: {}", name, e),
+        },
+        Err(e) => format!("Failed to add MCP server '{}': {}", name, e),
+    };
+    app.set_system_message(ChatMessage { role: MessageRole::System, content });
 }
 
 /// Handle `/mcp remove <name>`.
 async fn handle_mcp_remove(app: &mut App, name: &str) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .focused_panel_ref()
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: "No sandbox attached to this panel.".to_string(),
             });
@@ -3447,33 +3467,26 @@ async fn handle_mcp_remove(app: &mut App, name: &str) {
     };
 
     let sb = sandbox.lock().await;
-    match sb.remove_mcp_server(name).await {
-        Ok(()) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' removed.", name),
-            });
-        }
-        Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to remove MCP server '{}': {}", name, e),
-            });
-        }
-    }
+    let content = match sb.remove_mcp_server(name).await {
+        Ok(()) => match sb.restart_agent("mcp_update").await {
+            Ok(_) => format!("MCP server '{}' removed — agent session reloaded.", name),
+            Err(e) => format!("MCP server '{}' removed, but failed to reload agent: {}", name, e),
+        },
+        Err(e) => format!("Failed to remove MCP server '{}': {}", name, e),
+    };
+    app.set_system_message(ChatMessage { role: MessageRole::System, content });
 }
 
 /// Handle `/mcp enable <name>`.
 async fn handle_mcp_enable(app: &mut App, name: &str) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .focused_panel_ref()
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: "No sandbox attached to this panel.".to_string(),
             });
@@ -3482,33 +3495,26 @@ async fn handle_mcp_enable(app: &mut App, name: &str) {
     };
 
     let sb = sandbox.lock().await;
-    match sb.enable_mcp_server(name).await {
-        Ok(()) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' enabled.", name),
-            });
-        }
-        Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to enable MCP server '{}': {}", name, e),
-            });
-        }
-    }
+    let content = match sb.enable_mcp_server(name).await {
+        Ok(()) => match sb.restart_agent("mcp_update").await {
+            Ok(_) => format!("MCP server '{}' enabled — agent session reloaded.", name),
+            Err(e) => format!("MCP server '{}' enabled, but failed to reload agent: {}", name, e),
+        },
+        Err(e) => format!("Failed to enable MCP server '{}': {}", name, e),
+    };
+    app.set_system_message(ChatMessage { role: MessageRole::System, content });
 }
 
 /// Handle `/mcp disable <name>`.
 async fn handle_mcp_disable(app: &mut App, name: &str) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .focused_panel_ref()
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: "No sandbox attached to this panel.".to_string(),
             });
@@ -3517,20 +3523,14 @@ async fn handle_mcp_disable(app: &mut App, name: &str) {
     };
 
     let sb = sandbox.lock().await;
-    match sb.disable_mcp_server(name).await {
-        Ok(()) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' disabled.", name),
-            });
-        }
-        Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to disable MCP server '{}': {}", name, e),
-            });
-        }
-    }
+    let content = match sb.disable_mcp_server(name).await {
+        Ok(()) => match sb.restart_agent("mcp_update").await {
+            Ok(_) => format!("MCP server '{}' disabled — agent session reloaded.", name),
+            Err(e) => format!("MCP server '{}' disabled, but failed to reload agent: {}", name, e),
+        },
+        Err(e) => format!("Failed to disable MCP server '{}': {}", name, e),
+    };
+    app.set_system_message(ChatMessage { role: MessageRole::System, content });
 }
 
 // ========== Agents Registry Loader ==========
@@ -3584,6 +3584,7 @@ fn build_session_from_app(
                 permissions: panel.permissions,
                 agent_type: panel.agent_type,
                 model: panel.model.clone(),
+                prompt: panel.headless_state.as_ref().map(|h| h.task.clone()),
                 env_keys,
                 visible: panel.visible,
                 had_interaction: panel.had_interaction,
@@ -3614,6 +3615,7 @@ fn merge_resolved_agent_into_config(
     resolved.auto_mode = config.auto_mode;
     resolved.permissions = config.permissions;
     resolved.agent_type = config.agent_type;
+    resolved.claude_settings = config.claude_settings.clone();
     config.resolved_agent = Some(resolved);
 }
 
@@ -3656,15 +3658,12 @@ fn load_agents_registry() -> Option<nanosandbox::AgentsRegistryClient> {
 
 // ========== Skills Handlers ==========
 
-fn push_skills_feedback(app: &mut App, content: String, status: Option<String>) {
-    if let Some(status_msg) = status {
-        app.set_status_message(status_msg);
-    }
-    if let Some(panel) = app.focused_panel_mut() {
-        panel.chat_history.push(ChatMessage {
-            role: MessageRole::System,
-            content,
-        });
+fn push_skills_feedback(app: &mut App, content: String, persistent: bool) {
+    let msg = ChatMessage { role: MessageRole::System, content };
+    if persistent {
+        app.set_system_message_persistent(msg);
+    } else {
+        app.set_system_message(msg);
     }
 }
 
@@ -3678,11 +3677,7 @@ async fn handle_skills_list(app: &mut App) {
     {
         Some(sb) => sb,
         None => {
-            push_skills_feedback(
-                app,
-                "No sandbox attached to this panel.".to_string(),
-                Some("No sandbox attached to this panel.".to_string()),
-            );
+            push_skills_feedback(app, "No sandbox attached to this panel.".to_string(), true);
             return;
         }
     };
@@ -3690,17 +3685,13 @@ async fn handle_skills_list(app: &mut App) {
     let sb = sandbox.lock().await;
     match sb.list_skills().await {
         Ok(skills) => {
-            if skills.is_empty() {
-                push_skills_feedback(
-                    app,
-                    "No skills configured. Use /skills add <name> to add from the registry."
-                        .to_string(),
-                    Some("No skills configured.".to_string()),
-                );
+            let content = if skills.is_empty() {
+                "No skills configured. Use /skills add <name> to add from the registry.".to_string()
             } else {
-                let mut lines = Vec::new();
-                lines.push("Skills:".to_string());
-                for (name, skill) in &skills {
+                let mut lines = vec!["Skills:".to_string()];
+                let mut sorted: Vec<_> = skills.iter().collect();
+                sorted.sort_by_key(|(n, _)| n.as_str());
+                for (name, skill) in sorted {
                     let desc = if skill.description.is_empty() {
                         String::new()
                     } else {
@@ -3708,19 +3699,12 @@ async fn handle_skills_list(app: &mut App) {
                     };
                     lines.push(format!("  {}{}", name, desc));
                 }
-                push_skills_feedback(
-                    app,
-                    lines.join("\n"),
-                    Some(format!("Listed {} skill(s).", skills.len())),
-                );
-            }
+                lines.join("\n")
+            };
+            push_skills_feedback(app, content, true);
         }
         Err(e) => {
-            push_skills_feedback(
-                app,
-                format!("Failed to list skills: {}", e),
-                Some(format!("Failed to list skills: {}", e)),
-            );
+            push_skills_feedback(app, format!("Failed to list skills: {}", e), true);
         }
     }
 }
@@ -3736,7 +3720,7 @@ async fn handle_skills_add(app: &mut App, name: &str) {
                 push_skills_feedback(
                     app,
                     format!("Failed to resolve skill '{}': {}", name, e),
-                    Some(format!("Failed to resolve skill '{}': {}", name, e)),
+                    true,
                 );
                 return;
             }
@@ -3745,7 +3729,7 @@ async fn handle_skills_add(app: &mut App, name: &str) {
             push_skills_feedback(
                 app,
                 "No agents registry loaded. Set NANOSB_REGISTRY_PATH or place registry at ~/.nanosandbox/agents-registry/.".to_string(),
-                Some("No agents registry loaded.".to_string()),
+                true,
             );
             return;
         }
@@ -3762,7 +3746,7 @@ async fn handle_skills_add(app: &mut App, name: &str) {
             push_skills_feedback(
                 app,
                 "No sandbox attached to this panel.".to_string(),
-                Some("No sandbox attached to this panel.".to_string()),
+                true,
             );
             return;
         }
@@ -3779,17 +3763,13 @@ async fn handle_skills_add(app: &mut App, name: &str) {
                     name, e
                 ),
             };
-            push_skills_feedback(
-                app,
-                content,
-                Some(format!("Skill '{}' added.", name)),
-            );
+            push_skills_feedback(app, content, false);
         }
         Err(e) => {
             push_skills_feedback(
                 app,
                 format!("Failed to add skill '{}': {}", name, e),
-                Some(format!("Failed to add '{}': {}", name, e)),
+                true,
             );
         }
     }
@@ -3806,11 +3786,7 @@ async fn handle_skills_remove(app: &mut App, name: &str) {
     {
         Some(sb) => sb,
         None => {
-            push_skills_feedback(
-                app,
-                "No sandbox attached to this panel.".to_string(),
-                Some("No sandbox attached to this panel.".to_string()),
-            );
+            push_skills_feedback(app, "No sandbox attached to this panel.".to_string(), true);
             return;
         }
     };
@@ -3826,17 +3802,13 @@ async fn handle_skills_remove(app: &mut App, name: &str) {
                     name, e
                 ),
             };
-            push_skills_feedback(
-                app,
-                content,
-                Some(format!("Skill '{}' removed.", name)),
-            );
+            push_skills_feedback(app, content, false);
         }
         Err(e) => {
             push_skills_feedback(
                 app,
                 format!("Failed to remove skill '{}': {}", name, e),
-                Some(format!("Failed to remove '{}': {}", name, e)),
+                true,
             );
         }
     }
@@ -3868,12 +3840,7 @@ fn handle_skills_show(app: &mut App, name: &str) {
         None => "No agents registry loaded. Set NANOSB_REGISTRY_PATH or place registry at ~/.nanosandbox/agents-registry/.".to_string(),
     };
 
-    if let Some(panel) = app.focused_panel_mut() {
-        panel.chat_history.push(ChatMessage {
-            role: MessageRole::System,
-            content,
-        });
-    }
+    app.set_system_message_persistent(ChatMessage { role: MessageRole::System, content });
 }
 
 // ========== Agent Handlers ==========
@@ -3963,11 +3930,12 @@ async fn handle_agent_set(app: &mut App, name: &str) {
         }
     };
 
-    // Inherit auto_mode, permissions, and agent_type from sandbox config
+    // Inherit auto_mode, permissions, agent_type, and claude_settings from sandbox config
     let sb = sandbox.lock().await;
     resolved.auto_mode = sb.config().auto_mode;
     resolved.permissions = sb.config().permissions;
     resolved.agent_type = sb.config().agent_type;
+    resolved.claude_settings = sb.config().claude_settings.clone();
     match sb.bootstrap_agent(&resolved).await {
         Ok(()) => {
             let skill_count = resolved.skills.len();
