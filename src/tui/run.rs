@@ -1663,14 +1663,13 @@ async fn handle_command(
                     Command::McpDisable { name } => handle_mcp_disable(app, &name).await,
                     _ => unreachable!(),
                 };
-                // After MCP mutation, trigger a reconnect to re-launch the agent
-                // with updated MCP config. Uses the existing Reconnect command logic.
+                // After MCP mutation, prompt the user to reload.
+                // Don't auto-reconnect — let the user decide when to restart.
                 if needs_reconnect {
-                    if let Some(panel) = app.panels.get_mut(app.focused_panel) {
-                        panel.is_resumed = true;
-                    }
-                    // Box::pin to avoid recursive async — delegate to the Reconnect handler.
-                    Box::pin(handle_command(app, Command::Reconnect, tx)).await;
+                    app.set_system_message_persistent(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Run /reconnect to reload the agent with updated MCP config.".to_string(),
+                    });
                 }
             }
         }
