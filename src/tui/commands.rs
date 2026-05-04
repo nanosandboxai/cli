@@ -47,35 +47,26 @@ pub enum Command {
     McpList,
     /// Add a new MCP server configuration.
     McpAdd {
-        /// Server name.
         name: String,
-        /// Command to run.
         command: String,
-        /// Arguments for the command.
         args: Vec<String>,
-        /// Apply to all sandboxes (--all flag).
-        all: bool,
+        /// Target scope: None = focused, Some("all") = all, Some(name) = specific sandbox.
+        target: Option<String>,
     },
     /// Remove an MCP server by name.
     McpRemove {
-        /// Server name.
         name: String,
-        /// Apply to all sandboxes (--all flag).
-        all: bool,
+        target: Option<String>,
     },
     /// Enable an MCP server by name.
     McpEnable {
-        /// Server name.
         name: String,
-        /// Apply to all sandboxes (--all flag).
-        all: bool,
+        target: Option<String>,
     },
     /// Disable an MCP server by name.
     McpDisable {
-        /// Server name.
         name: String,
-        /// Apply to all sandboxes (--all flag).
-        all: bool,
+        target: Option<String>,
     },
     /// Set or list environment variables for the focused panel.
     Env {
@@ -427,21 +418,43 @@ fn parse_focus(parts: &[&str]) -> ParseResult {
     }
 }
 
+/// Extract --all or --sandbox <name> from args. Returns (target, remaining_positional_args).
+/// target: None = focused panel, Some("all") = all panels, Some(name) = specific sandbox.
+fn parse_mcp_target<'a>(args: &[&'a str]) -> (Option<String>, Vec<&'a str>) {
+    let mut target = None;
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--all" => { target = Some("all".to_string()); i += 1; }
+            "--sandbox" | "-s" => {
+                if let Some(name) = args.get(i + 1) {
+                    target = Some(name.to_string());
+                    i += 2;
+                } else {
+                    i += 1; // skip dangling --sandbox
+                }
+            }
+            other => { positional.push(other); i += 1; }
+        }
+    }
+    (target, positional)
+}
+
 fn parse_mcp(parts: &[&str]) -> ParseResult {
     match parts.get(1).copied() {
         None => ParseResult::Ok(Command::McpToggle),
         Some("list") => ParseResult::Ok(Command::McpList),
         Some("add") => {
-            // Parse --all flag and filter it out from positional args
-            let has_all = parts[2..].iter().any(|p| *p == "--all");
-            let positional: Vec<&str> = parts[2..].iter().copied().filter(|p| *p != "--all").collect();
+            // Parse --all / --sandbox <name> and filter from positional args
+            let (target, positional) = parse_mcp_target(&parts[2..]);
             let name = match positional.first() {
                 Some(n) => n.to_string(),
                 None => {
                     return ParseResult::Err(
-                        "Usage: /mcp add [--all] <name> <command> [args...]\n\
+                        "Usage: /mcp add [--all | --sandbox <name>] <name> <command> [args...]\n\
                          Example: /mcp add github npx @github/mcp-server\n\
-                         Use --all to add to all sandboxes."
+                         --all: all sandboxes  --sandbox <name>: specific sandbox"
                             .to_string(),
                     );
                 }
@@ -451,44 +464,40 @@ fn parse_mcp(parts: &[&str]) -> ParseResult {
                 None => {
                     return ParseResult::Err(format!(
                         "Missing command for MCP server '{}'.\n\
-                         Usage: /mcp add [--all] <name> <command> [args...]\n\
-                         Example: /mcp add {} npx @some/mcp-server",
-                        name, name,
+                         Usage: /mcp add [--all | --sandbox <name>] <name> <command> [args...]",
+                        name,
                     ));
                 }
             };
             let args: Vec<String> = positional[2..].iter().map(|s| s.to_string()).collect();
-            ParseResult::Ok(Command::McpAdd { name, command, args, all: has_all })
+            ParseResult::Ok(Command::McpAdd { name, command, args, target })
         }
         Some("remove") => {
-            let has_all = parts[2..].iter().any(|p| *p == "--all");
-            let positional: Vec<&str> = parts[2..].iter().copied().filter(|p| *p != "--all").collect();
+            let (target, positional) = parse_mcp_target(&parts[2..]);
             match positional.first() {
-                Some(name) => ParseResult::Ok(Command::McpRemove { name: name.to_string(), all: has_all }),
+                Some(name) => ParseResult::Ok(Command::McpRemove { name: name.to_string(), target }),
                 None => ParseResult::Err(
-                    "Usage: /mcp remove [--all] <name>\n\
+                    "Usage: /mcp remove [--all | --sandbox <name>] <server>\n\
                      Use /mcp list to see configured servers.".to_string(),
                 ),
             }
         }
         Some("enable") => {
-            let has_all = parts[2..].iter().any(|p| *p == "--all");
-            let positional: Vec<&str> = parts[2..].iter().copied().filter(|p| *p != "--all").collect();
+            let (target, positional) = parse_mcp_target(&parts[2..]);
             match positional.first() {
-                Some(name) => ParseResult::Ok(Command::McpEnable { name: name.to_string(), all: has_all }),
+                Some(name) => ParseResult::Ok(Command::McpEnable { name: name.to_string(), target }),
                 None => ParseResult::Err(
-                    "Usage: /mcp enable [--all] <name>\n\
+                    "Usage: /mcp enable [--all | --sandbox <name>] <server>\n\
                      Use /mcp list to see configured servers.".to_string(),
                 ),
             }
         }
         Some("disable") => {
-            let has_all = parts[2..].iter().any(|p| *p == "--all");
-            let positional: Vec<&str> = parts[2..].iter().copied().filter(|p| *p != "--all").collect();
+            let (target, positional) = parse_mcp_target(&parts[2..]);
             match positional.first() {
-                Some(name) => ParseResult::Ok(Command::McpDisable { name: name.to_string(), all: has_all }),
+                Some(name) => ParseResult::Ok(Command::McpDisable { name: name.to_string(), target }),
                 None => ParseResult::Err(
-                    "Usage: /mcp disable [--all] <name>\n\
+                    "Usage: /mcp disable [--all | --sandbox <name>] <server>\n\
                      Use /mcp list to see configured servers.".to_string(),
                 ),
             }

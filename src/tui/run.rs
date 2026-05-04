@@ -1679,25 +1679,64 @@ async fn handle_command(
                         .to_string(),
                 });
             } else {
-                // Determine target panels: focused only, or all (--all flag).
-                let use_all = matches!(&cmd,
-                    Command::McpAdd { all: true, .. } |
-                    Command::McpRemove { all: true, .. } |
-                    Command::McpEnable { all: true, .. } |
-                    Command::McpDisable { all: true, .. }
-                );
-                let target_panels: Vec<(usize, _)> = if use_all {
-                    app.panels.iter().enumerate()
-                        .filter_map(|(i, p)| p.sandbox.as_ref().cloned().map(|sb| (i, sb)))
-                        .collect()
-                } else {
-                    app.panels.get(app.focused_panel)
-                        .and_then(|p| p.sandbox.as_ref().cloned().map(|sb| (app.focused_panel, sb)))
-                        .into_iter().collect()
+                // Determine target panels from --all / --sandbox <name> / default (focused).
+                let target_ref = match &cmd {
+                    Command::McpAdd { target, .. } |
+                    Command::McpRemove { target, .. } |
+                    Command::McpEnable { target, .. } |
+                    Command::McpDisable { target, .. } => target.clone(),
+                    _ => None,
+                };
+                let (target_panels, scope): (Vec<(usize, _)>, String) = match target_ref.as_deref() {
+                    Some("all") => {
+                        let panels: Vec<_> = app.panels.iter().enumerate()
+                            .filter_map(|(i, p)| p.sandbox.as_ref().cloned().map(|sb| (i, sb)))
+                            .collect();
+                        let count = panels.len();
+                        (panels, format!("all {} sandboxes", count))
+                    }
+                    Some(name) => {
+                        match app.resolve_panel_target(Some(name)) {
+                            Some(idx) => {
+                                let label = app.panels[idx].display_name.clone()
+                                    .unwrap_or_else(|| app.panels[idx].agent_name.clone());
+                                match app.panels[idx].sandbox.as_ref().cloned() {
+                                    Some(sb) => (vec![(idx, sb)], label),
+                                    None => {
+                                        app.set_system_message(ChatMessage {
+                                            role: MessageRole::System,
+                                            content: format!("Sandbox '{}' has no running VM.", name),
+                                        });
+                                        return;
+                                    }
+                                }
+                            }
+                            None => {
+                                app.set_system_message(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("No sandbox matching '{}'.", name),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                    None => {
+                        match app.panels.get(app.focused_panel)
+                            .and_then(|p| p.sandbox.as_ref().cloned().map(|sb| (app.focused_panel, sb)))
+                        {
+                            Some(pair) => (vec![pair], "focused sandbox".to_string()),
+                            None => {
+                                app.set_system_message(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: "No sandbox attached to focused panel.".to_string(),
+                                });
+                                return;
+                            }
+                        }
+                    }
                 };
 
                 let mut affected_panels = Vec::new();
-                let scope = if use_all { "all sandboxes" } else { "focused sandbox" };
 
                 match cmd {
                     Command::McpList => { handle_mcp_list(app).await; },
