@@ -448,6 +448,9 @@ pub struct App {
     pub destroy_on_quit: bool,
     /// Command history for shell-like Up/Down navigation in the global bar.
     pub command_history: CommandHistory,
+    /// Pending confirmation prompt: message + list of panel indices to reconnect on 'y'.
+    /// Shown as a system popup; 'y' triggers reconnect, 'n'/Esc dismisses.
+    pub pending_reconnect: Option<Vec<usize>>,
 }
 
 impl Default for App {
@@ -494,6 +497,7 @@ impl App {
             image_manager: None,
             destroy_on_quit: false,
             command_history: CommandHistory::new(),
+            pending_reconnect: None,
         }
     }
 

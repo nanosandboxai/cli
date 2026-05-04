@@ -855,6 +855,32 @@ async fn handle_key_event(
     key: KeyEvent,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
+    // Pending reconnect confirmation: intercept y/n before anything else.
+    if app.pending_reconnect.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let panel_indices = app.pending_reconnect.take().unwrap();
+                app.system_messages.clear();
+                app.system_message_ticks = None;
+                for &idx in &panel_indices {
+                    // Trigger reconnect for each affected panel.
+                    let saved_focus = app.focused_panel;
+                    app.focused_panel = idx;
+                    Box::pin(handle_command(app, Command::Reconnect, tx)).await;
+                    app.focused_panel = saved_focus;
+                }
+                return;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.pending_reconnect = None;
+                app.system_messages.clear();
+                app.system_message_ticks = None;
+                return;
+            }
+            _ => return, // Swallow other keys while prompt is active
+        }
+    }
+
     // Loading mode: swallow all keystrokes except navigation.
     if app.input_focus == InputFocus::Panel {
         if let Some(panel) = app.panels.get(app.focused_panel) {
@@ -1653,22 +1679,99 @@ async fn handle_command(
                         .to_string(),
                 });
             } else {
-                let needs_reconnect = match cmd {
-                    Command::McpList => { handle_mcp_list(app).await; false },
-                    Command::McpAdd { name, command, args } => {
-                        handle_mcp_add(app, &name, &command, &args).await
+                // Determine target panels: focused only, or all (--all flag).
+                let use_all = matches!(&cmd,
+                    Command::McpAdd { all: true, .. } |
+                    Command::McpRemove { all: true, .. } |
+                    Command::McpEnable { all: true, .. } |
+                    Command::McpDisable { all: true, .. }
+                );
+                let target_panels: Vec<(usize, _)> = if use_all {
+                    app.panels.iter().enumerate()
+                        .filter_map(|(i, p)| p.sandbox.as_ref().cloned().map(|sb| (i, sb)))
+                        .collect()
+                } else {
+                    app.panels.get(app.focused_panel)
+                        .and_then(|p| p.sandbox.as_ref().cloned().map(|sb| (app.focused_panel, sb)))
+                        .into_iter().collect()
+                };
+
+                let mut affected_panels = Vec::new();
+                let scope = if use_all { "all sandboxes" } else { "focused sandbox" };
+
+                match cmd {
+                    Command::McpList => { handle_mcp_list(app).await; },
+                    Command::McpAdd { name, command, args, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            let cfg = McpServerConfig {
+                                command: command.clone(),
+                                args: args.clone(),
+                                env: HashMap::new(),
+                                enabled: true,
+                            };
+                            if sb.add_mcp_server(&name, cfg).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' added to {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
                     }
-                    Command::McpRemove { name } => handle_mcp_remove(app, &name).await,
-                    Command::McpEnable { name } => handle_mcp_enable(app, &name).await,
-                    Command::McpDisable { name } => handle_mcp_disable(app, &name).await,
+                    Command::McpRemove { name, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            if sb.remove_mcp_server(&name).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' removed from {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
+                    }
+                    Command::McpEnable { name, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            if sb.enable_mcp_server(&name).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' enabled in {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
+                    }
+                    Command::McpDisable { name, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            if sb.disable_mcp_server(&name).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' disabled in {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
+                    }
                     _ => unreachable!(),
                 };
-                // After MCP mutation, prompt the user to reload.
-                // Don't auto-reconnect — let the user decide when to restart.
-                if needs_reconnect {
+                // After MCP mutation, ask the user to confirm reload.
+                if !affected_panels.is_empty() {
+                    let count = affected_panels.len();
+                    app.pending_reconnect = Some(affected_panels);
                     app.set_system_message_persistent(ChatMessage {
                         role: MessageRole::System,
-                        content: "Run /reconnect to reload the agent with updated MCP config.".to_string(),
+                        content: format!("Reload {} agent session(s) to apply changes? (y/n)", count),
                     });
                 }
             }
@@ -3422,156 +3525,6 @@ async fn handle_mcp_list(app: &mut App) {
     }
 }
 
-/// Handle `/mcp add <name> <command> [args]`. Returns true if the agent should be reconnected.
-async fn handle_mcp_add(app: &mut App, name: &str, command: &str, args: &[String]) -> bool {
-    let sandbox = match app
-        .focused_panel_ref()
-        .and_then(|p| p.sandbox.as_ref())
-        .cloned()
-    {
-        Some(sb) => sb,
-        None => {
-            app.set_system_message_persistent(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
-            return false;
-        }
-    };
-
-    let config = McpServerConfig {
-        command: command.to_string(),
-        args: args.to_vec(),
-        env: HashMap::new(),
-        enabled: true,
-    };
-
-    let sb = sandbox.lock().await;
-    match sb.add_mcp_server(name, config).await {
-        Ok(()) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' added — reloading agent session...", name),
-            });
-            true
-        }
-        Err(e) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to add MCP server '{}': {}", name, e),
-            });
-            false
-        }
-    }
-}
-
-/// Handle `/mcp remove <name>`. Returns true if the agent should be reconnected.
-async fn handle_mcp_remove(app: &mut App, name: &str) -> bool {
-    let sandbox = match app
-        .focused_panel_ref()
-        .and_then(|p| p.sandbox.as_ref())
-        .cloned()
-    {
-        Some(sb) => sb,
-        None => {
-            app.set_system_message_persistent(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
-            return false;
-        }
-    };
-
-    let sb = sandbox.lock().await;
-    match sb.remove_mcp_server(name).await {
-        Ok(()) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' removed — reloading agent session...", name),
-            });
-            true
-        }
-        Err(e) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to remove MCP server '{}': {}", name, e),
-            });
-            false
-        }
-    }
-}
-
-/// Handle `/mcp enable <name>`. Returns true if the agent should be reconnected.
-async fn handle_mcp_enable(app: &mut App, name: &str) -> bool {
-    let sandbox = match app
-        .focused_panel_ref()
-        .and_then(|p| p.sandbox.as_ref())
-        .cloned()
-    {
-        Some(sb) => sb,
-        None => {
-            app.set_system_message_persistent(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
-            return false;
-        }
-    };
-
-    let sb = sandbox.lock().await;
-    match sb.enable_mcp_server(name).await {
-        Ok(()) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' enabled — reloading agent session...", name),
-            });
-            true
-        }
-        Err(e) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to enable MCP server '{}': {}", name, e),
-            });
-            false
-        }
-    }
-}
-
-/// Handle `/mcp disable <name>`. Returns true if the agent should be reconnected.
-async fn handle_mcp_disable(app: &mut App, name: &str) -> bool {
-    let sandbox = match app
-        .focused_panel_ref()
-        .and_then(|p| p.sandbox.as_ref())
-        .cloned()
-    {
-        Some(sb) => sb,
-        None => {
-            app.set_system_message_persistent(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
-            return false;
-        }
-    };
-
-    let sb = sandbox.lock().await;
-    match sb.disable_mcp_server(name).await {
-        Ok(()) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("MCP server '{}' disabled — reloading agent session...", name),
-            });
-            true
-        }
-        Err(e) => {
-            app.set_system_message(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to disable MCP server '{}': {}", name, e),
-            });
-            false
-        }
-    }
-}
 
 // ========== Agents Registry Loader ==========
 
