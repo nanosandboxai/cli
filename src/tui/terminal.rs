@@ -49,6 +49,16 @@ impl SshTerminal {
         if self.auto_scroll {
             self.scroll_offset = 0;
             self.parser.set_scrollback(0);
+        } else {
+            // vt100 auto-increments scrollback_offset internally as new lines
+            // push content into the scrollback buffer (grid.rs scroll logic),
+            // but only caps to scrollback.len() — not to rows_len. If the
+            // offset exceeds rows_len, visible_rows() underflows and panics:
+            //   rows_len - scrollback_offset (usize subtraction overflow)
+            // Re-sync our tracked value from vt100 and clamp to rows_len.
+            let rows = self.size.1 as usize;
+            self.scroll_offset = self.parser.screen().scrollback().min(rows);
+            self.parser.set_scrollback(self.scroll_offset);
         }
     }
 
@@ -415,6 +425,15 @@ fn agent_cli_command(
             match effective {
                 Permissions::AllowAll => {
                     parts.push("--dangerously-skip-permissions".to_string());
+                    // Load gateway-generated MCP config and CLAUDE.md instructions.
+                    // --mcp-config loads MCP servers from ~/.claude.json (user scope).
+                    // --add-dir loads CLAUDE.md from ~/.claude/ (gateway-written instructions).
+                    parts.extend([
+                        "--mcp-config".to_string(),
+                        "$HOME/.claude.json".to_string(),
+                        "--add-dir".to_string(),
+                        "$HOME/.claude".to_string(),
+                    ]);
                 }
                 Permissions::AcceptEdits => {
                     parts.extend([
@@ -976,6 +995,8 @@ mod tests {
         use nanosandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::AllowAll, false, false, None).unwrap();
         assert!(cmd.contains("--dangerously-skip-permissions"));
+        assert!(cmd.contains("--mcp-config"));
+        assert!(cmd.contains("--add-dir"));
         assert!(!cmd.contains(" -p ")); // not headless (space-delimited to avoid matching inside --dangerously-skip-permissions)
 
         let cmd = agent_cli_command("codex", Permissions::AllowAll, false, false, None).unwrap();
