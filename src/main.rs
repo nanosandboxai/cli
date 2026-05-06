@@ -396,7 +396,7 @@ mod cli {
                         for (_, config) in sandbox_configs.iter_mut() {
                             for (k, v) in &project_env {
                                 // Only set if not already defined by sandbox.yml
-                                config.runtime.env.entry(k.clone()).or_insert_with(|| v.clone());
+                                config.sandbox.env.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                         }
                     }
@@ -428,7 +428,7 @@ mod cli {
                 let sandbox_configs = if let Some(ref name) = cli.sandbox {
                     let filtered: Vec<_> = sandbox_configs
                         .into_iter()
-                        .filter(|(key, config)| key == name || config.runtime.name == *name)
+                        .filter(|(key, config)| key == name || config.sandbox.name == *name)
                         .collect();
                     if filtered.is_empty() {
                         error!("Sandbox '{}' not found in config files", name);
@@ -693,11 +693,11 @@ mod cli {
             builder = builder.env(key, value);
         }
 
-        for (host, guest) in ports {
-            builder = builder.port(*host, *guest);
-        }
+        let mut config = builder.build();
 
-        let config = builder.build();
+        for (host, guest) in ports {
+            config.sandbox.network.port_mappings.push(sandbox::PortMapping::tcp(*host, *guest));
+        }
 
         let pb = create_pull_progress();
         pb.set_message("Creating sandbox...");
@@ -1049,7 +1049,8 @@ mod cli {
 
     /// Check runtime prerequisites and display status
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
-        use sandbox::runtime::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::validation::validate_runtime_prerequisites_detailed;
+
 
         let result = validate_runtime_prerequisites_detailed().await;
 
@@ -1071,7 +1072,7 @@ mod cli {
     }
 
     /// Print doctor results as colored checklist
-    fn print_doctor_results(result: &sandbox::runtime::runtime::ValidationResult) {
+    fn print_doctor_results(result: &sandbox::validation::ValidationResult) {
         println!();
         println!("Checking runtime prerequisites...");
         println!();
@@ -1246,7 +1247,7 @@ mod cli {
     }
 
     fn doctor_results_to_json(
-        result: &sandbox::runtime::runtime::ValidationResult,
+        result: &sandbox::validation::ValidationResult,
     ) -> serde_json::Value {
         serde_json::json!({
             "ok": result.is_ok(),
@@ -1434,7 +1435,8 @@ mod cli {
 
     /// Run preflight validation, showing doctor output on failure.
     async fn preflight_check() -> anyhow::Result<()> {
-        use sandbox::runtime::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::validation::validate_runtime_prerequisites_detailed;
+
 
         let result = validate_runtime_prerequisites_detailed().await;
         if !result.is_ok() {
@@ -1526,7 +1528,7 @@ fn main() -> anyhow::Result<()> {
     // — before any threads are created — the child runs in a clean,
     // single-threaded process where hv_vm_create() works correctly.
     if std::env::args().nth(1).as_deref() == Some("internal-boot-vm") {
-        sandbox::runtime::runtime::handle_boot_vm_subprocess();
+        sandbox::handle_boot_vm_subprocess();
         // ^ never returns
     }
 
