@@ -6,13 +6,13 @@ mod cli {
     use clap::{Parser, Subcommand, ValueEnum};
     use colored::Colorize;
     use indicatif::{ProgressBar, ProgressStyle};
-    use nanosandbox::runtime::validation::{
-        validate_runtime_prerequisites_detailed, ValidationResult,
-    };
-    use nanosandbox::{ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
+    use sandbox::{normalize_image, ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
     use std::io::Write;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Mutex;
     use tabled::{Table, Tabled};
+    use tracing::{error, warn};
 
     /// Output format for commands
     #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -111,6 +111,11 @@ mod cli {
             /// Read environment variables from a file
             #[arg(long = "env-file")]
             env_file: Option<String>,
+
+            /// Forward host port to guest. Format: HOST:GUEST or PORT (same on both).
+            /// Repeatable. Example: --port 1455 --port 8080:80
+            #[arg(short = 'p', long = "port")]
+            ports: Vec<String>,
 
             /// Timeout in seconds (default: 600)
             #[arg(long, default_value = "600")]
@@ -265,19 +270,77 @@ mod cli {
     pub async fn run() -> anyhow::Result<()> {
         let cli = Cli::parse();
 
-        if cli.verbose && cli.command.is_some() {
-            tracing_subscriber::fmt()
-                .with_env_filter("nanosandbox=debug")
-                .init();
-        } else if cli.command.is_some() {
-            // Install a silent logger so that the runtime's
-            // env_logger::try_init_from_env() (inside Sandbox::create / libkrun)
-            // finds one already present and skips installing its own default
-            // logger that would print INFO messages to stderr.
-            let _ = env_logger::Builder::from_env(
-                env_logger::Env::default().default_filter_or("off"),
-            )
-            .try_init();
+        // Initialize logging:
+        // - File: always writes to ~/.nanosandbox/logs/nanosb.YYYY-MM-DD (daily rotation)
+        // - File level: WARN by default, override with NANOSB_LOG=debug|info|trace
+        // - Stderr: only when --verbose (always debug level)
+        // - Old logs (>7 days) are cleaned up on startup
+        // The _log_guard must be held alive for the duration of the program.
+        let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+
+        {
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            use tracing_subscriber::{EnvFilter, Layer, fmt};
+
+            let logs_dir = logs_dir();
+            let file_setup = if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+                eprintln!("Warning: could not create logs directory {}: {}", logs_dir.display(), e);
+                None
+            } else {
+                cleanup_old_logs(&logs_dir, 7);
+                let file_appender = tracing_appender::rolling::daily(&logs_dir, "nanosb");
+                let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+                Some((non_blocking, guard))
+            };
+
+            if let Some((file_writer, guard)) = file_setup {
+                _log_guard = Some(guard);
+
+                // In TUI mode (cli.command is None) we can't write to stderr —
+                // it corrupts the ratatui alternate screen. So default to info
+                // there to capture the SSE/exec diagnostics. For command mode,
+                // keep warn so we don't spam the file unnecessarily.
+                let default_level = if cli.command.is_none() { "info" } else { "warn" };
+                let file_level = std::env::var("NANOSB_LOG")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| default_level.to_string());
+                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
+                let file_layer = fmt::layer()
+                    .with_writer(file_writer)
+                    .with_ansi(false)
+                    .with_filter(EnvFilter::new(&file_filter));
+
+                // Only attach a stderr layer when there's a command AND --verbose.
+                // TUI must never write to stderr (it breaks the alternate screen).
+                if cli.command.is_some() && cli.verbose {
+                    let stderr_layer = fmt::layer()
+                        .with_writer(std::io::stderr)
+                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug"));
+
+                    tracing_subscriber::registry()
+                        .with(file_layer)
+                        .with(stderr_layer)
+                        .init();
+                } else {
+                    tracing_subscriber::registry()
+                        .with(file_layer)
+                        .init();
+                }
+            } else {
+                _log_guard = None;
+                if cli.command.is_some() && cli.verbose {
+                    tracing_subscriber::fmt()
+                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug")
+                        .init();
+                } else {
+                    let _ = env_logger::Builder::from_env(
+                        env_logger::Env::default().default_filter_or("off"),
+                    )
+                    .try_init();
+                }
+            }
         }
 
         match cli.command {
@@ -291,7 +354,7 @@ mod cli {
 
                 // Auto-detect sandbox.yml in CWD.
                 let cwd = std::env::current_dir()?;
-                if nanosandbox::find_sandbox_file(&cwd).is_some()
+                if sandbox::find_sandbox_file(&cwd).is_some()
                     && !config_paths.contains(&cwd)
                 {
                     config_paths.insert(0, cwd.clone());
@@ -300,7 +363,7 @@ mod cli {
                 // Also auto-detect sandbox.yml in --project path.
                 if let Some(ref project) = cli.project {
                     let project_dir = std::path::PathBuf::from(project);
-                    if nanosandbox::find_sandbox_file(&project_dir).is_some()
+                    if sandbox::find_sandbox_file(&project_dir).is_some()
                         && !config_paths.contains(&project_dir)
                     {
                         config_paths.push(project_dir);
@@ -311,28 +374,29 @@ mod cli {
                 let mut sandbox_configs = if config_paths.is_empty() {
                     Vec::new()
                 } else {
-                    nanosandbox::load_sandbox_files(&config_paths)
+                    sandbox::load_sandbox_files(&config_paths)
                         .map_err(|e| anyhow::anyhow!("{}", e))?
                 };
 
                 // Auto-load .env from project directory (lowest priority).
                 // Check --project flag first, then CWD if it's a git repo.
                 let auto_env_dir = cli.project.as_ref().map(std::path::PathBuf::from)
-                    .or_else(|| {
-                        let cwd = std::env::current_dir().ok()?;
-                        if cwd.join(".git").exists() { Some(cwd) } else { None }
-                    });
+                    .or_else(|| std::env::current_dir().ok());
                 if let Some(ref dir) = auto_env_dir {
                     let env_path = dir.join(".env");
                     if env_path.exists() {
-                        let project_env = nanosandbox::config::file::load_env_file(
+                        let project_env = sandbox::config::file::load_env_file(
                             &env_path.to_string_lossy(),
                             dir,
-                        ).map_err(|e| anyhow::anyhow!("{}", e))?;
+                        )
+                        .map_err(|e| {
+                            error!("Failed to load env file {:?}: {}", env_path, e);
+                            anyhow::anyhow!("{}", e)
+                        })?;
                         for (_, config) in sandbox_configs.iter_mut() {
                             for (k, v) in &project_env {
                                 // Only set if not already defined by sandbox.yml
-                                config.env.entry(k.clone()).or_insert_with(|| v.clone());
+                                config.sandbox.env.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                         }
                     }
@@ -343,12 +407,15 @@ mod cli {
 
                 // Parse --permissions flag.
                 let cli_permissions = cli.permissions.as_deref()
-                    .map(|s| s.parse::<nanosandbox::Permissions>())
+                    .map(|s| s.parse::<sandbox::Permissions>())
                     .transpose()
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    .map_err(|e| {
+                        error!("Failed to parse --permissions flag: {}", e);
+                        anyhow::anyhow!("{}", e)
+                    })?;
 
                 // Apply CLI flag overrides (merge step 4).
-                nanosandbox::config::file::apply_cli_overrides(
+                sandbox::apply_cli_overrides(
                     &mut sandbox_configs,
                     cli.cpus,
                     cli.memory,
@@ -361,9 +428,10 @@ mod cli {
                 let sandbox_configs = if let Some(ref name) = cli.sandbox {
                     let filtered: Vec<_> = sandbox_configs
                         .into_iter()
-                        .filter(|(key, config)| key == name || config.name == *name)
+                        .filter(|(key, config)| key == name || config.sandbox.name == *name)
                         .collect();
                     if filtered.is_empty() {
+                        error!("Sandbox '{}' not found in config files", name);
                         anyhow::bail!(
                             "Sandbox '{}' not found in config files",
                             name
@@ -374,17 +442,11 @@ mod cli {
                     sandbox_configs
                 };
 
-                // Project path for sandboxes without explicit project config.
+                // Always use CWD as project path so non-git directories get session
+                // persistence and project mounting (git is initialised in source on first use).
                 let project_path = cli.project
                     .map(std::path::PathBuf::from)
-                    .or_else(|| {
-                        let cwd = std::env::current_dir().ok()?;
-                        if cwd.join(".git").exists() {
-                            Some(cwd)
-                        } else {
-                            None
-                        }
-                    });
+                    .or_else(|| std::env::current_dir().ok());
 
                 nanosb_cli::tui::run::run_tui(project_path, sandbox_configs).await
             }
@@ -397,10 +459,12 @@ mod cli {
                 memory,
                 env,
                 env_file,
+                ports,
                 timeout,
                 buffered,
                 command,
             }) => {
+                let port_pairs = parse_port_specs(&ports)?;
                 cmd_run(
                     &image,
                     name,
@@ -408,6 +472,7 @@ mod cli {
                     memory,
                     &env,
                     env_file.as_deref(),
+                    &port_pairs,
                     timeout,
                     buffered,
                     &command,
@@ -434,6 +499,7 @@ mod cli {
 
     /// Pull an image from a registry
     async fn cmd_pull(image: &str, format: OutputFormat, verbose: bool) -> anyhow::Result<()> {
+        let image = normalize_image(image);
         let pb = create_pull_progress();
         pb.set_message(format!("Pulling {}", image));
 
@@ -443,7 +509,7 @@ mod cli {
             pb.set_message("Connecting to registry...".to_string());
         }
 
-        let pulled = manager.pull(image).await?;
+        let pulled = manager.pull(&image).await?;
         pb.finish_and_clear();
 
         match format {
@@ -515,8 +581,10 @@ mod cli {
 
         // Parse --env-file(s) first (later files override earlier ones)
         for path in env_files {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("Failed to read env file '{}': {}", path, e))?;
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                error!("Failed to read env file '{}': {}", path, e);
+                anyhow::anyhow!("Failed to read env file '{}': {}", path, e)
+            })?;
             for line in content.lines() {
                 let line = line.trim();
                 // Skip empty lines and comments
@@ -538,6 +606,7 @@ mod cli {
                 if let Ok(value) = std::env::var(entry) {
                     vars.push((entry.to_string(), value));
                 } else {
+                    error!("Environment variable '{}' not found", entry);
                     anyhow::bail!(
                         "Environment variable '{}' not found. Use KEY=VALUE format.",
                         entry
@@ -554,6 +623,27 @@ mod cli {
     /// By default, output is streamed in real-time (like `docker run`).
     /// Use `--buffered` or `--format json` for buffered output.
     #[allow(clippy::too_many_arguments)]
+    /// Parse `--port` specs into (host, guest) pairs. Format: "HOST:GUEST" or "PORT" (same).
+    fn parse_port_specs(specs: &[String]) -> anyhow::Result<Vec<(u16, u16)>> {
+        let mut out = Vec::with_capacity(specs.len());
+        for s in specs {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            let pair = if let Some((h, g)) = s.split_once(':') {
+                let host: u16 = h.parse().map_err(|_| anyhow::anyhow!("invalid host port in '{}'", s))?;
+                let guest: u16 = g.parse().map_err(|_| anyhow::anyhow!("invalid guest port in '{}'", s))?;
+                (host, guest)
+            } else {
+                let p: u16 = s.parse().map_err(|_| anyhow::anyhow!("invalid port '{}'", s))?;
+                (p, p)
+            };
+            out.push(pair);
+        }
+        Ok(out)
+    }
+
     async fn cmd_run(
         image: &str,
         name: Option<String>,
@@ -561,6 +651,7 @@ mod cli {
         memory: u32,
         env_args: &[String],
         env_file: Option<&str>,
+        ports: &[(u16, u16)],
         timeout: u32,
         buffered: bool,
         command: &[String],
@@ -590,9 +681,10 @@ mod cli {
             }
         }
 
+        let image = normalize_image(image);
         let mut builder = SandboxConfig::builder()
             .name(&sandbox_name)
-            .image(image)
+            .image(&image)
             .cpus(cpus)
             .memory_mb(memory)
             .timeout_secs(timeout);
@@ -601,7 +693,11 @@ mod cli {
             builder = builder.env(key, value);
         }
 
-        let config = builder.build();
+        let mut config = builder.build();
+
+        for (host, guest) in ports {
+            config.sandbox.network.port_mappings.push(sandbox::PortMapping::tcp(*host, *guest));
+        }
 
         let pb = create_pull_progress();
         pb.set_message("Creating sandbox...");
@@ -612,19 +708,39 @@ mod cli {
         sandbox.start().await?;
         pb.finish_and_clear();
 
+        // Wrap sandbox in Arc<Mutex<Option>> so the Ctrl+C handler can
+        // take ownership and destroy it if the process is interrupted.
+        let shared: Arc<Mutex<Option<Sandbox>>> = Arc::new(Mutex::new(Some(sandbox)));
+
+        // Register Ctrl+C handler for VM cleanup on interruption.
+        let signal_ref = shared.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                warn!("Ctrl+C received, cleaning up sandbox");
+                eprintln!("\nInterrupted. Cleaning up sandbox...");
+                if let Some(sb) = signal_ref.lock().await.take() {
+                    let _ = sb.destroy().await;
+                }
+                eprintln!("Sandbox destroyed.");
+                std::process::exit(130);
+            }
+        });
+
         if command.is_empty() {
             // No command, just print sandbox info
+            let guard = shared.lock().await;
+            let sb = guard.as_ref().expect("sandbox exists");
             match format {
                 OutputFormat::Text => {
-                    println!("{} Sandbox {} started", "✓".green(), sandbox.id().bold());
+                    println!("{} Sandbox {} started", "✓".green(), sb.id().bold());
                     println!(
                         "Run commands with: nanosb exec {} <command>",
-                        &sandbox.id()[..12]
+                        &sb.id()[..12]
                     );
                 }
                 OutputFormat::Json => {
                     let json = serde_json::json!({
-                        "id": sandbox.id(),
+                        "id": sb.id(),
                         "status": "running",
                     });
                     println!("{}", serde_json::to_string_pretty(&json)?);
@@ -644,7 +760,11 @@ mod cli {
 
             if use_buffered {
                 // Buffered execution - output after completion
-                let result = sandbox.exec(cmd, &args).await?;
+                let result = {
+                    let mut guard = shared.lock().await;
+                    let sb = guard.as_mut().expect("sandbox exists");
+                    sb.exec(cmd, &args).await?
+                };
 
                 match format {
                     OutputFormat::Text => {
@@ -663,7 +783,9 @@ mod cli {
                 }
 
                 // Clean up sandbox
-                sandbox.destroy().await?;
+                if let Some(sb) = shared.lock().await.take() {
+                    sb.destroy().await?;
+                }
 
                 if result.exit_code != 0 {
                     std::process::exit(result.exit_code);
@@ -674,8 +796,10 @@ mod cli {
                 // streaming (e.g. LLM token deltas) can fill the terminal
                 // buffer, causing EAGAIN (os error 35). println! panics on
                 // write errors, so we retry with backoff instead.
-                let exit_code = sandbox
-                    .exec_stream(cmd, &args, |chunk| {
+                let exit_code = {
+                    let mut guard = shared.lock().await;
+                    let sb = guard.as_mut().expect("sandbox exists");
+                    sb.exec_stream(cmd, &args, |chunk| {
                         match chunk.stream {
                             Stream::Stdout => {
                                 let data = format!("{}\n", chunk.data);
@@ -691,10 +815,13 @@ mod cli {
                             }
                         }
                     })
-                    .await?;
+                    .await?
+                };
 
                 // Clean up sandbox
-                sandbox.destroy().await?;
+                if let Some(sb) = shared.lock().await.take() {
+                    sb.destroy().await?;
+                }
 
                 if exit_code != 0 {
                     std::process::exit(exit_code);
@@ -714,6 +841,7 @@ mod cli {
         verbose: bool,
     ) -> anyhow::Result<()> {
         if command.is_empty() {
+            error!("No command specified for exec");
             anyhow::bail!("No command specified. Usage: nanosb exec <sandbox> <command>");
         }
 
@@ -727,10 +855,16 @@ mod cli {
             .into_iter()
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
-        let sandbox_info =
-            sandbox_info.ok_or_else(|| anyhow::anyhow!("Sandbox not found: {}", sandbox_id))?;
+        let sandbox_info = sandbox_info.ok_or_else(|| {
+            error!("cmd_exec(): sandbox not found: {}", sandbox_id);
+            anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+        })?;
 
         if sandbox_info.status != SandboxStatus::Running {
+            error!(
+                "cmd_exec(): sandbox '{}' is not running (status: {:?})",
+                sandbox_id, sandbox_info.status
+            );
             anyhow::bail!(
                 "Sandbox {} is not running (status: {:?})",
                 sandbox_id,
@@ -842,7 +976,10 @@ mod cli {
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
         let sandbox_info =
-            sandbox_info.ok_or_else(|| anyhow::anyhow!("Sandbox not found: {}", sandbox_id))?;
+            sandbox_info.ok_or_else(|| {
+                error!("Sandbox not found for stop: {}", sandbox_id);
+                anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+            })?;
 
         if verbose {
             eprintln!(
@@ -873,9 +1010,13 @@ mod cli {
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
         let sandbox_info =
-            sandbox_info.ok_or_else(|| anyhow::anyhow!("Sandbox not found: {}", sandbox_id))?;
+            sandbox_info.ok_or_else(|| {
+                error!("Sandbox not found: {}", sandbox_id);
+                anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+            })?;
 
         if sandbox_info.status == SandboxStatus::Running && !force {
+            warn!("Attempted to remove running sandbox {}", sandbox_id);
             anyhow::bail!(
                 "Sandbox {} is running. Use -f to force removal.",
                 sandbox_id
@@ -908,6 +1049,9 @@ mod cli {
 
     /// Check runtime prerequisites and display status
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
+        use sandbox::validation::validate_runtime_prerequisites_detailed;
+
+
         let result = validate_runtime_prerequisites_detailed().await;
 
         match format {
@@ -928,7 +1072,7 @@ mod cli {
     }
 
     /// Print doctor results as colored checklist
-    fn print_doctor_results(result: &ValidationResult) {
+    fn print_doctor_results(result: &sandbox::validation::ValidationResult) {
         println!();
         println!("Checking runtime prerequisites...");
         println!();
@@ -938,6 +1082,8 @@ mod cli {
         let warnings = &result.warnings;
 
         let checks = get_platform_checks();
+
+        let check_names: Vec<&str> = checks.iter().map(|c| c.name).collect();
 
         for check in &checks {
             let failed = errors.iter().find(|e| e.check == check.name);
@@ -971,6 +1117,21 @@ mod cli {
             }
         }
 
+        // Show any errors that didn't match a known check name
+        for err in errors {
+            if !check_names.contains(&err.check.as_str()) {
+                println!(
+                    "  {} {}: {}",
+                    "[✗]".red().bold(),
+                    err.check,
+                    err.message
+                );
+                if let Some(ref hint) = &err.fix_hint {
+                    println!("      {}: {}", "Fix".yellow(), hint);
+                }
+            }
+        }
+
         println!();
         println!(
             "{} checks passed, {} errors, {} warnings",
@@ -982,6 +1143,8 @@ mod cli {
 
         if result.is_ok() {
             println!("{}", "Ready to run sandboxes.".green());
+            let logs_dir = logs_dir();
+            println!("  Logs: {}", logs_dir.display());
         } else {
             println!("{}", "Cannot run sandboxes. Fix the errors above.".red());
         }
@@ -1004,9 +1167,9 @@ mod cli {
                     ok_message: "Apple Silicon (aarch64)",
                 },
                 PlatformCheck {
-                    name: "libkrun Library",
-                    keyword: "libkrun",
-                    ok_message: "/opt/homebrew/lib/libkrun.dylib",
+                    name: "libkrunfw Kernel Firmware",
+                    keyword: "libkrunfw",
+                    ok_message: "found (libkrunfw.5.dylib)",
                 },
                 PlatformCheck {
                     name: "Hypervisor.framework",
@@ -1025,9 +1188,9 @@ mod cli {
         {
             vec![
                 PlatformCheck {
-                    name: "libkrun Library",
-                    keyword: "libkrun",
-                    ok_message: "found",
+                    name: "libkrunfw Kernel Firmware",
+                    keyword: "libkrunfw",
+                    ok_message: "found (libkrunfw.so.5)",
                 },
                 PlatformCheck {
                     name: "KVM Device",
@@ -1046,29 +1209,29 @@ mod cli {
         {
             vec![
                 PlatformCheck {
-                    name: "Windows Containers",
-                    keyword: "Containers",
-                    ok_message: "enabled",
+                    name: "HCS Service",
+                    keyword: "vmcompute",
+                    ok_message: "running (vmcompute)",
                 },
                 PlatformCheck {
-                    name: "containerd Service",
-                    keyword: "containerd",
-                    ok_message: "running",
-                },
-                PlatformCheck {
-                    name: "runhcs Shim",
-                    keyword: "runhcs",
+                    name: "WSL Kernel",
+                    keyword: "WSL kernel",
                     ok_message: "found",
                 },
                 PlatformCheck {
-                    name: "HCS Service",
-                    keyword: "HCS",
-                    ok_message: "running",
+                    name: "libkrunfw.dll",
+                    keyword: "libkrunfw.dll not found",
+                    ok_message: "found",
                 },
                 PlatformCheck {
-                    name: "Hyper-V",
-                    keyword: "Hyper-V",
-                    ok_message: "enabled",
+                    name: "Disk",
+                    keyword: "No SSD detected",
+                    ok_message: "SSD detected",
+                },
+                PlatformCheck {
+                    name: "Memory",
+                    keyword: "Low available memory",
+                    ok_message: "sufficient RAM available",
                 },
             ]
         }
@@ -1084,7 +1247,7 @@ mod cli {
     }
 
     fn doctor_results_to_json(
-        result: &ValidationResult,
+        result: &sandbox::validation::ValidationResult,
     ) -> serde_json::Value {
         serde_json::json!({
             "ok": result.is_ok(),
@@ -1168,7 +1331,7 @@ mod cli {
         };
 
         let canonical_path = project_path.canonicalize().unwrap_or_else(|_| project_path.clone());
-        let clones = nanosandbox::project::clones_dir(&canonical_path);
+        let clones = sandbox::project::clones_dir(&canonical_path);
         if !clones.exists() {
             println!("No nanosb clones found for {}", project_path.display());
             return Ok(());
@@ -1272,6 +1435,9 @@ mod cli {
 
     /// Run preflight validation, showing doctor output on failure.
     async fn preflight_check() -> anyhow::Result<()> {
+        use sandbox::validation::validate_runtime_prerequisites_detailed;
+
+
         let result = validate_runtime_prerequisites_detailed().await;
         if !result.is_ok() {
             print_doctor_results(&result);
@@ -1280,7 +1446,10 @@ mod cli {
             eprintln!("\nRun './scripts/install/macos.sh' to install dependencies.");
             #[cfg(target_os = "linux")]
             eprintln!("\nRun './scripts/install/linux.sh' to install dependencies.");
+            #[cfg(target_os = "windows")]
+            eprintln!("\nRun 'powershell -ExecutionPolicy Bypass -File .\\scripts\\install\\install.ps1' to install dependencies.\nOr use: irm https://github.com/nanosandboxai/install-deps/releases/latest/download/install.ps1 | iex");
 
+            error!("Runtime prerequisites not met");
             anyhow::bail!("Runtime prerequisites not met. Run 'nanosb doctor' for details.");
         }
         Ok(())
@@ -1307,6 +1476,46 @@ mod cli {
         }
         let _ = w.flush();
     }
+
+    /// Returns the logs directory: `~/.nanosandbox/logs/` on all platforms.
+    fn logs_dir() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| {
+                #[cfg(target_os = "windows")]
+                { std::path::PathBuf::from(".") }
+                #[cfg(not(target_os = "windows"))]
+                { std::path::PathBuf::from("/tmp") }
+            })
+            .join(".nanosandbox")
+            .join("logs")
+    }
+
+    /// Remove log files older than `retention_days` from the given directory.
+    fn cleanup_old_logs(dir: &std::path::Path, retention_days: u64) {
+        let cutoff = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(retention_days * 24 * 60 * 60);
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let _name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) if n.starts_with("nanosb.") || n.starts_with("vm-") => n,
+                _ => continue,
+            };
+
+            if let Ok(metadata) = path.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if modified < cutoff {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1318,9 +1527,8 @@ fn main() -> anyhow::Result<()> {
     // subprocess via posix_spawn (std::process::Command) and handling it here
     // — before any threads are created — the child runs in a clean,
     // single-threaded process where hv_vm_create() works correctly.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if std::env::args().nth(1).as_deref() == Some("internal-boot-vm") {
-        nanosandbox::runtime::handle_boot_vm_subprocess();
+        sandbox::handle_boot_vm_subprocess();
         // ^ never returns
     }
 

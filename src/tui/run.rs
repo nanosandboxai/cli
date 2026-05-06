@@ -2,13 +2,12 @@
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     MouseButton, MouseEvent, MouseEventKind,
     EnableMouseCapture, DisableMouseCapture,
     EnableBracketedPaste, DisableBracketedPaste,
@@ -21,11 +20,8 @@ use ratatui::prelude::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::{mpsc, Mutex};
 
-use nanosandbox::{McpServerConfig, SandboxConfig};
-use nanosandbox::validation::{
-    validate_runtime_prerequisites_detailed, ValidationResult,
-};
-use nanosandbox::Sandbox;
+use sandbox::{AgentSandboxConfig, McpServerConfig, SandboxConfig};
+use sandbox::Sandbox;
 
 use super::app::{
     AgentPanel, App, ChatMessage, InputFocus, MessageRole, MouseSelection, PanelMode,
@@ -35,13 +31,172 @@ use super::commands::{self, Command};
 use super::event::{spawn_terminal_event_reader, AppEvent};
 use super::renderer;
 
+/// Cross-platform stderr redirection helpers.
+///
+/// On Unix, native C libraries (libkrun, gvproxy) write to stderr via fprintf()
+/// which bypasses Rust's logging and corrupts the ratatui alternate screen.
+/// We redirect stderr to /dev/null while the TUI is active.
+/// On Windows, this is a no-op for now.
+mod stderr_redirect {
+    pub type SavedStderr = i32;
+
+    #[cfg(unix)]
+    pub fn save_and_redirect() -> SavedStderr {
+        use std::io;
+        use std::os::fd::AsRawFd;
+        let saved = unsafe { libc::dup(io::stderr().as_raw_fd()) };
+        let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
+        if dev_null >= 0 {
+            unsafe {
+                libc::dup2(dev_null, libc::STDERR_FILENO);
+                libc::close(dev_null);
+            }
+        }
+        saved
+    }
+
+    #[cfg(windows)]
+    mod win32 {
+        // MSVC CRT file descriptor functions (always available on Windows)
+        extern "C" {
+            fn _dup(fd: i32) -> i32;
+            fn _dup2(fd1: i32, fd2: i32) -> i32;
+            fn _open(filename: *const u8, oflag: i32, ...) -> i32;
+            fn _close(fd: i32) -> i32;
+        }
+        const O_WRONLY: i32 = 1;
+
+        pub fn dup(fd: i32) -> i32 { unsafe { _dup(fd) } }
+        pub fn dup2(src: i32, dst: i32) -> i32 { unsafe { _dup2(src, dst) } }
+        pub fn close(fd: i32) -> i32 { unsafe { _close(fd) } }
+        pub fn open_nul() -> i32 { unsafe { _open(b"NUL\0".as_ptr(), O_WRONLY) } }
+    }
+
+    #[cfg(windows)]
+    pub fn save_and_redirect() -> SavedStderr {
+        let saved = win32::dup(2);
+        let nul = win32::open_nul();
+        if nul >= 0 {
+            win32::dup2(nul, 2);
+            win32::close(nul);
+        }
+        saved
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn save_and_redirect() -> SavedStderr { -1 }
+
+    #[cfg(unix)]
+    pub fn restore(saved: SavedStderr) {
+        if saved >= 0 {
+            unsafe { libc::dup2(saved, libc::STDERR_FILENO); }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn restore(saved: SavedStderr) {
+        if saved >= 0 {
+            win32::dup2(saved, 2);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn restore(_saved: SavedStderr) {}
+
+    #[cfg(unix)]
+    pub fn redirect_to_null() {
+        let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
+        if dev_null >= 0 {
+            unsafe {
+                libc::dup2(dev_null, libc::STDERR_FILENO);
+                libc::close(dev_null);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn redirect_to_null() {
+        let nul = win32::open_nul();
+        if nul >= 0 {
+            win32::dup2(nul, 2);
+            win32::close(nul);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn redirect_to_null() {}
+
+    #[cfg(unix)]
+    pub fn restore_and_close(saved: SavedStderr) {
+        if saved >= 0 {
+            unsafe {
+                libc::dup2(saved, libc::STDERR_FILENO);
+                libc::close(saved);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn restore_and_close(saved: SavedStderr) {
+        if saved >= 0 {
+            win32::dup2(saved, 2);
+            win32::close(saved);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn restore_and_close(_saved: SavedStderr) {}
+}
+
+/// Fix Windows console input mode after crossterm setup.
+///
+/// crossterm's `enable_raw_mode()` and `EnableMouseCapture` both call
+/// `SetConsoleMode()` on the stdin handle, but they don't set the exact
+/// combination of flags we need for the TUI:
+///
+/// - **ENABLE_MOUSE_INPUT** — delivers mouse click/drag/scroll as input records
+/// - **ENABLE_EXTENDED_FLAGS** — required when modifying Quick-Edit mode
+/// - **~ENABLE_QUICK_EDIT_MODE** — prevents console from stealing mouse for selection
+/// - **~ENABLE_PROCESSED_INPUT** — delivers Ctrl+C as a key event, not a signal
+///
+/// This function must be called AFTER `enable_raw_mode()` + `EnableMouseCapture`
+/// so our changes aren't overwritten.
+#[cfg(target_os = "windows")]
+pub(super) fn fix_windows_console_mode() {
+    unsafe {
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> isize;
+            fn GetConsoleMode(hConsoleHandle: isize, lpMode: *mut u32) -> i32;
+            fn SetConsoleMode(hConsoleHandle: isize, dwMode: u32) -> i32;
+        }
+        const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+        const ENABLE_MOUSE_INPUT: u32 = 0x0010;
+        const ENABLE_QUICK_EDIT_MODE: u32 = 0x0040;
+        const ENABLE_EXTENDED_FLAGS: u32 = 0x0080;
+
+        let stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+        if stdin_handle != -1_isize {
+            let mut mode: u32 = 0;
+            if GetConsoleMode(stdin_handle, &mut mode) != 0 {
+                let new_mode = (mode
+                    & !ENABLE_QUICK_EDIT_MODE
+                    & !ENABLE_PROCESSED_INPUT)
+                    | ENABLE_MOUSE_INPUT
+                    | ENABLE_EXTENDED_FLAGS;
+                SetConsoleMode(stdin_handle, new_mode);
+            }
+        }
+    }
+}
+
 /// Run the TUI application.
 ///
 /// This enables raw mode, enters the alternate screen, and runs the main
 /// event loop. On exit (or error) it restores the terminal.
 pub async fn run_tui(
     project_path: Option<std::path::PathBuf>,
-    sandbox_configs: Vec<(String, nanosandbox::SandboxConfig)>,
+    sandbox_configs: Vec<(String, sandbox::AgentSandboxConfig)>,
 ) -> anyhow::Result<()> {
     // Check if we're running in a real terminal.
     if !io::stdout().is_terminal() {
@@ -60,7 +215,7 @@ pub async fn run_tui(
 
     // Validate runtime prerequisites before launching TUI.
     println!("\nChecking runtime prerequisites...\n");
-    let validation = validate_runtime_prerequisites_detailed().await;
+    let validation = sandbox::validation::validate_runtime_prerequisites_detailed().await;
 
     print_validation_results(&validation);
 
@@ -82,12 +237,12 @@ pub async fn run_tui(
     // This prompt is shown in the normal terminal (not the TUI) and must
     // happen BEFORE stderr is redirected (prompt_resume uses eprintln).
     let resume_session_data = if let Some(ref pp) = project_path {
-        if let Some(session) = nanosandbox::session::Session::load(pp) {
+        if let Some(session) = sandbox::session::Session::load(pp) {
             let issues = session.validate();
-            let choice = nanosandbox::session::prompt_resume(&session, &issues);
+            let choice = sandbox::session::prompt_resume(&session, &issues);
             match choice {
-                nanosandbox::session::ResumeChoice::Resume => Some(session),
-                nanosandbox::session::ResumeChoice::ClearAndRestart => {
+                sandbox::session::ResumeChoice::Resume => Some(session),
+                sandbox::session::ResumeChoice::ClearAndRestart | sandbox::session::ResumeChoice::Destroy => {
                     // Remove old project clones.
                     for panel in &session.panels {
                         if let Some(ref clone_path) = panel.clone_path {
@@ -97,11 +252,7 @@ pub async fn run_tui(
                         }
                     }
                     // Remove session file + agent state directories.
-                    let _ = nanosandbox::session::Session::delete(pp, true);
-                    None
-                }
-                nanosandbox::session::ResumeChoice::Destroy => {
-                    let _ = nanosandbox::session::Session::delete(pp, true);
+                    let _ = sandbox::session::Session::delete(pp, true);
                     None
                 }
             }
@@ -117,13 +268,19 @@ pub async fn run_tui(
     // which bypasses Rust's logging. Without this redirect those writes
     // corrupt the ratatui alternate screen or cause panics when the
     // terminal buffer fills up (EAGAIN / os error 35).
-    let saved_stderr = unsafe { libc::dup(io::stderr().as_raw_fd()) };
-    let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
-    if dev_null >= 0 {
-        unsafe {
-            libc::dup2(dev_null, libc::STDERR_FILENO);
-            libc::close(dev_null);
+    let saved_stderr = stderr_redirect::save_and_redirect();
+
+    // On Windows, disable the default Ctrl+C handler so we can handle it
+    // as a key event (forwarding 0x03 to SSH or copying selected text).
+    #[cfg(target_os = "windows")]
+    unsafe {
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: *const std::ffi::c_void,
+                add: i32,
+            ) -> i32;
         }
+        SetConsoleCtrlHandler(std::ptr::null(), 1);
     }
 
     // Set up terminal.
@@ -133,6 +290,10 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Fix console input flags AFTER crossterm setup (see fix_windows_console_mode doc).
+    #[cfg(target_os = "windows")]
+    fix_windows_console_mode();
+
     // Install a panic hook that restores the terminal before printing
     // the panic message. Without this, panics corrupt the alternate screen.
     let original_hook = std::panic::take_hook();
@@ -141,11 +302,7 @@ pub async fn run_tui(
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape, DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
         // Restore stderr so the panic message is visible.
-        if saved_stderr_for_hook >= 0 {
-            unsafe {
-                libc::dup2(saved_stderr_for_hook, libc::STDERR_FILENO);
-            }
-        }
+        stderr_redirect::restore(saved_stderr_for_hook);
         original_hook(info);
     }));
 
@@ -155,7 +312,7 @@ pub async fn run_tui(
 
     // Create shared image manager so all sandboxes coordinate pulls
     // (prevents concurrent downloads of the same image layers).
-    app.image_manager = nanosandbox::ImageManager::with_default_cache()
+    app.image_manager = sandbox::ImageManager::with_default_cache()
         .ok()
         .map(Arc::new);
 
@@ -169,7 +326,7 @@ pub async fn run_tui(
     spawn_terminal_event_reader(tx.clone());
 
     // Resolve agent definitions + skills from registry before launching.
-    let mut resolved_configs: Vec<(String, SandboxConfig)> = Vec::new();
+    let mut resolved_configs: Vec<(String, AgentSandboxConfig)> = Vec::new();
     for (key, mut config) in sandbox_configs {
         match (&app.registry, config.agent.as_ref()) {
             (Some(registry), Some(agent_name)) => {
@@ -232,10 +389,42 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
         match event {
             AppEvent::Terminal(crossterm_event) => {
                 match crossterm_event {
-                    CrosstermEvent::Key(key) => {
-                        // Clear mouse selection on any keypress.
-                        app.mouse_selection = None;
-                        handle_key_event(&mut app, key, &tx).await;
+                    CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                        // Only handle Press events — on Windows, crossterm fires
+                        // both Press and Release for each keystroke.
+
+                        // Ctrl+C with active selection → copy to clipboard
+                        // instead of forwarding/clearing.
+                        if key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                            && app.mouse_selection.as_ref().is_some_and(|s| !s.dragging && s.start != s.end)
+                        {
+                            if let Some(sel) = app.mouse_selection.as_ref() {
+                                let (start, end) = sel.normalized();
+                                if let Some(panel) = app.panels.get(sel.panel_idx) {
+                                    if let Some(ref term) = panel.terminal {
+                                        let text = term.screen().contents_between(
+                                            start.0, start.1, end.0, end.1,
+                                        );
+                                        if !text.is_empty() {
+                                            let _ = copy_to_clipboard(&text);
+                                            app.set_status_message(format!(
+                                                "Copied {} chars to clipboard.",
+                                                text.len()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            app.mouse_selection = None;
+                        } else {
+                            // Clear mouse selection on any other keypress.
+                            app.mouse_selection = None;
+                            handle_key_event(&mut app, key, &tx).await;
+                        }
+                    }
+                    CrosstermEvent::Key(_) => {
+                        // Ignore Release / Repeat events.
                     }
                     CrosstermEvent::Mouse(mouse) => {
                         handle_mouse_event(&mut app, mouse);
@@ -248,7 +437,14 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         // render_panel() detects the delta and propagates
                         // to vt100 parser + SSH PTY.
                     }
-                    CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => {}
+                    CrosstermEvent::FocusGained => {
+                        // Re-apply console mode fix on focus gain — Windows
+                        // Terminal may reset input flags when the window
+                        // loses and regains focus.
+                        #[cfg(target_os = "windows")]
+                        fix_windows_console_mode();
+                    }
+                    CrosstermEvent::FocusLost => {}
                 }
             }
             AppEvent::SandboxCreating { panel_idx, message } => {
@@ -260,15 +456,13 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                 // Get SSH info before storing sandbox
                 let ssh_info = {
                     let sb = sandbox.lock().await;
-                    let port = sb.ssh_port();
-                    let key = sb.ssh_key_path();
-                    port.zip(key)
+                    sb.ssh_port().zip(sb.ssh_key_path())
                 };
 
                 if let Some(panel) = app.panels.get_mut(panel_idx) {
-                    panel.sandbox = Some(sandbox);
+                    panel.sandbox = Some(sandbox.clone());
                     panel.sandbox_id_short = short_id.clone();
-                    panel.loading_message = Some("Connecting via SSH...".into());
+                    panel.loading_message = Some("Connecting...".into());
                     // Only set project_mount from sandbox if the panel doesn't
                     // already have one (resumed sessions set it up front).
                     if project_mount.is_some() {
@@ -280,9 +474,34 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         panel.ssh_key_path = Some(key.clone());
                     }
                 }
-                // Initiate SSH connection if SSH info is available
-                if let Some((ssh_port, key_path)) = ssh_info {
-                    // Pre-calculate panel dimensions for accurate PTY allocation.
+
+                let is_auto_mode = app.panels.get(panel_idx)
+                    .map(|p| p.auto_mode)
+                    .unwrap_or(false);
+
+                if is_auto_mode {
+                    // Auto-mode: use gateway exec (same as `nanosb exec`).
+                    // No SSH needed — runs command via HvSocket/HTTP gateway.
+                    if let Some(panel) = app.panels.get(panel_idx) {
+                        let agent_name = panel.agent_name.clone();
+                        let env = panel.env.clone();
+                        let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
+                        let permissions = panel.permissions;
+                        let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
+                        let is_resumed = panel.is_resumed;
+                        let model = panel.model.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            spawn_gateway_exec(
+                                sandbox, &agent_name, &env,
+                                workdir.as_deref(), permissions,
+                                prompt.as_deref(), is_resumed,
+                                model.as_deref(), panel_idx, tx,
+                            ).await;
+                        });
+                    }
+                } else if let Some((ssh_port, key_path)) = ssh_info {
+                    // Interactive mode: SSH with PTY for terminal access.
                     let (pty_cols, pty_rows) = {
                         let term_size = ratatui::crossterm::terminal::size()
                             .unwrap_or((160, 40));
@@ -300,30 +519,45 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         let env = panel.env.clone();
                         let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                         let permissions = panel.permissions;
-                        let auto_mode = panel.auto_mode;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
                         let model = panel.model.clone();
+                        let ssh_host = "127.0.0.1".to_string();
                         let tx = tx.clone();
                         tokio::spawn(async move {
-                            // Small delay for sshd to be fully ready
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            match super::terminal::connect_ssh(
-                                ssh_port, key_path, pty_cols, pty_rows,
-                                &agent_name, &env, workdir.as_deref(),
-                                permissions, auto_mode, prompt.as_deref(),
-                                is_resumed, model.as_deref(), panel_idx, tx.clone(),
-                            ).await {
-                                Ok(handle) => {
-                                    let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(AppEvent::SshDisconnected {
-                                        panel_idx,
-                                        error: Some(format!("SSH connect failed: {}", e)),
-                                    });
+                            // Retry SSH connection — on Windows the HvSocket SSH
+                            // proxy chain takes time to be ready after VM boot.
+                            let max_attempts = 10;
+                            let mut last_err = String::new();
+                            for attempt in 1..=max_attempts {
+                                let delay = if attempt == 1 { 500 } else { 1000 };
+                                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                                match super::terminal::connect_ssh(
+                                    ssh_host.clone(), ssh_port, key_path.clone(),
+                                    pty_cols, pty_rows,
+                                    &agent_name, &env, workdir.as_deref(),
+                                    permissions, false, prompt.as_deref(),
+                                    is_resumed, model.as_deref(), panel_idx, tx.clone(),
+                                ).await {
+                                    Ok(handle) => {
+                                        let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        last_err = e.to_string();
+                                        if attempt < max_attempts {
+                                            tracing::debug!(
+                                                "SSH connect attempt {}/{} failed: {}, retrying...",
+                                                attempt, max_attempts, last_err
+                                            );
+                                        }
+                                    }
                                 }
                             }
+                            let _ = tx.send(AppEvent::SshDisconnected {
+                                panel_idx,
+                                error: Some(format!("SSH connect failed after {} attempts: {}", max_attempts, last_err)),
+                            });
                         });
                     }
                 }
@@ -380,10 +614,12 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                             if !super::terminal::is_auth_url(&url) {
                                 continue;
                             }
-                            // OAuth URLs always have query parameters (?client_id=...).
-                            // Truncated URLs from partial screen renders won't have
-                            // reached the '?' yet — skip them.
-                            if !url.contains('?') {
+                            // OAuth authorize URLs always have query parameters
+                            // (?client_id=...).  Truncated URLs from partial screen
+                            // renders won't have reached the '?' yet — skip them.
+                            // Exception: device-code flow URLs (e.g. github.com/login/device,
+                            // cursor.com/loginlink) are complete without query params.
+                            if !url.contains('?') && !super::terminal::is_device_code_url(&url) {
                                 continue;
                             }
                             let key = super::terminal::url_dedup_key(&url);
@@ -433,9 +669,9 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                             if hs.status != "completed" && hs.status != "error" {
                                 if let Some(ref err) = error {
                                     hs.agent_text.push_str(&format!("\n[process] {}\n", err));
-                                    hs.status = "error".to_string();
+                                    hs.finish("error");
                                 } else {
-                                    hs.status = "completed".to_string();
+                                    hs.finish("completed");
                                 }
                             }
                         }
@@ -510,18 +746,19 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                             "{}:127.0.0.1:{}",
                                             port, port
                                         );
+                                        let ssh_dest = "root@127.0.0.1".to_string();
                                         if let Ok(child) =
                                             std::process::Command::new("ssh")
                                                 .args([
                                                     "-L", &fwd,
                                                     "-p", &ssh_port.to_string(),
                                                     "-i",
-                                                    &key_path.to_string_lossy(),
+                                                    &key_path.to_string_lossy().as_ref(),
                                                     "-o", "StrictHostKeyChecking=no",
-                                                    "-o", "UserKnownHostsFile=/dev/null",
+                                                    "-o", if cfg!(unix) { "UserKnownHostsFile=/dev/null" } else { "UserKnownHostsFile=NUL" },
                                                     "-o", "LogLevel=ERROR",
                                                     "-N",
-                                                    "root@127.0.0.1",
+                                                    &ssh_dest,
                                                 ])
                                                 .stdin(std::process::Stdio::null())
                                                 .stdout(std::process::Stdio::null())
@@ -581,9 +818,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                 let _ = execute!(terminal.backend_mut(), SetCursorStyle::DefaultUserShape, DisableMouseCapture, LeaveAlternateScreen);
 
                 // Restore stderr so the tool can use it
-                if saved_stderr >= 0 {
-                    unsafe { libc::dup2(saved_stderr, libc::STDERR_FILENO); }
-                }
+                stderr_redirect::restore(saved_stderr);
 
                 // Build tool-specific arguments
                 let path_str = path.to_string_lossy().to_string();
@@ -598,17 +833,13 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                 let _ = cmd.status();
 
                 // Redirect stderr back to /dev/null
-                let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
-                if dev_null >= 0 {
-                    unsafe {
-                        libc::dup2(dev_null, libc::STDERR_FILENO);
-                        libc::close(dev_null);
-                    }
-                }
+                stderr_redirect::redirect_to_null();
 
                 // Resume TUI: enter alternate screen, enable raw mode
                 let _ = enable_raw_mode();
                 let _ = execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, SetCursorStyle::SteadyBar);
+                #[cfg(target_os = "windows")]
+                fix_windows_console_mode();
                 terminal.clear()?;
             }
             AppEvent::UploadStarted { panel_idx, filename } => {
@@ -655,12 +886,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
     terminal.show_cursor()?;
 
     // Restore stderr so cleanup log messages are visible.
-    if saved_stderr >= 0 {
-        unsafe {
-            libc::dup2(saved_stderr, libc::STDERR_FILENO);
-            libc::close(saved_stderr);
-        }
-    }
+    stderr_redirect::restore_and_close(saved_stderr);
 
     // Determine whether to suspend (preserve session) or fully teardown.
     // Suspend when: project is mounted AND /quit (not /destroy).
@@ -684,7 +910,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
 
         // Save session state for later resume.
         if let Some(ref project_path) = app.project_path {
-            let sandbox_yml_content = nanosandbox::config::file::find_sandbox_file(project_path)
+            let sandbox_yml_content = sandbox::find_sandbox_file(project_path)
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .unwrap_or_default();
 
@@ -706,7 +932,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
         // Delete session file if /destroy was used.
         if app.destroy_on_quit {
             if let Some(ref project_path) = app.project_path {
-                let _ = nanosandbox::session::Session::delete(project_path, true);
+                let _ = sandbox::session::Session::delete(project_path, true);
                 eprintln!("Session destroyed.");
             }
         }
@@ -749,11 +975,145 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
         eprintln!("All sandboxes stopped.");
     }
 
+    // Windows safety net: even with spawn_blocking on the HvSocket SSE reader,
+    // a blocking-pool thread parked in recv() cannot be cancelled. The tokio
+    // runtime drop will skip it (because blocking-pool threads are detached),
+    // but belt-and-suspenders — explicitly exit so the process never lingers
+    // after /quit or /destroy.
+    #[cfg(target_os = "windows")]
+    {
+        std::process::exit(0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
     Ok(())
 }
 
+/// Run an agent command via the gateway exec endpoint (no SSH).
+///
+/// Used for auto-mode: sends the agent command to the guest gateway over
+/// HvSocket (Windows) or TCP (Linux/macOS) and streams NDJSON output back
+/// to the TUI as `TerminalData` events for the headless parser.
+async fn spawn_gateway_exec(
+    sandbox: Arc<Mutex<Sandbox>>,
+    agent_name: &str,
+    env: &HashMap<String, String>,
+    workdir: Option<&str>,
+    permissions: sandbox::Permissions,
+    prompt: Option<&str>,
+    is_resumed: bool,
+    model: Option<&str>,
+    panel_idx: usize,
+    tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    let agent_cmd = super::terminal::agent_cli_command(
+        agent_name, permissions, true, is_resumed, model,
+    );
+    let cmd = match agent_cmd {
+        Some(c) => c,
+        None => {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: Some("No agent command for gateway exec".to_string()),
+            });
+            return;
+        }
+    };
+
+    // Build environment map — panel env + agent-specific vars.
+    let mut exec_env = env.clone();
+    exec_env.extend(super::terminal::agent_env_vars(
+        agent_name, permissions, true, model, prompt,
+    ));
+
+    // Wrap in `script -qfc` for PTY allocation (forces line-buffered output
+    // from Node.js/Rust CLIs that default to full buffering without a TTY).
+    let escaped_cmd = cmd.replace('"', "\\\"");
+    let shell_cmd = format!("script -qfc \"{}\" /dev/null", escaped_cmd);
+    tracing::info!(
+        "[spawn_gateway_exec] agent={} auto=true resumed={} cmd={:?}",
+        agent_name, is_resumed, cmd,
+    );
+    tracing::info!("[spawn_gateway_exec] shell_cmd={:?}", shell_cmd);
+
+    let exec_opts = sandbox::ExecOptions {
+        workdir: workdir.map(|s| s.to_string()),
+        env: exec_env,
+        user: None,
+        timeout_secs: Some(86400), // 24h for long-running agent tasks
+    };
+
+    // Transition panel to Headless mode with a no-op handle.
+    let handle = super::terminal::SshTerminalHandle::noop();
+    let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
+
+    // Extract what we need from the sandbox while holding the lock briefly,
+    // then release it. exec_stream_with_options does blocking I/O on Windows
+    // (HvSocket) so we must not hold the Mutex during execution.
+    let exec_result = {
+        let sb = sandbox.lock().await;
+        // Verify sandbox is running
+        if sb.status() != sandbox::SandboxStatus::Running {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: Some("Sandbox not ready for exec".to_string()),
+            });
+            return;
+        }
+        // Use exec_stream_with_options — on Windows this calls blocking
+        // HvSocket I/O, but we're inside tokio::spawn so it runs on a
+        // worker thread. The on_output callback sends TerminalData events.
+        let tx_data = tx.clone();
+        let chunk_counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let chunk_counter_cb = chunk_counter.clone();
+        sb.exec_stream_with_options(
+            "sh",
+            &["-c", &shell_cmd],
+            exec_opts,
+            move |chunk| {
+                // Gateway SSE events don't include trailing newlines, but the
+                // headless NDJSON parser splits on \n. Append newline to each
+                // chunk (same as `nanosb exec` in main.rs).
+                let n = chunk_counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n == 1 || n % 20 == 0 {
+                    let preview: String = chunk.data.chars().take(200).collect();
+                    tracing::info!(
+                        "[spawn_gateway_exec] chunk #{} (stream={:?}): {}",
+                        n, chunk.stream, preview
+                    );
+                }
+                let mut data = chunk.data.into_bytes();
+                data.push(b'\n');
+                let _ = tx_data.send(AppEvent::TerminalData {
+                    panel_idx,
+                    data,
+                });
+            },
+        ).await
+    };
+
+    match exec_result {
+        Ok(exit_code) => {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: if exit_code != 0 {
+                    Some(format!("Agent exited with code {}", exit_code))
+                } else {
+                    None
+                },
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(AppEvent::SshDisconnected {
+                panel_idx,
+                error: Some(format!("Gateway exec failed: {}", e)),
+            });
+        }
+    }
+}
+
 /// Print validation results as a checklist.
-fn print_validation_results(validation: &ValidationResult) {
+fn print_validation_results(validation: &sandbox::validation::ValidationResult) {
     for err in &validation.errors {
         println!("  [x] {}: {}", err.check, err.message);
         if let Some(ref hint) = err.fix_hint {
@@ -783,6 +1143,16 @@ fn print_validation_results(validation: &ValidationResult) {
             let failed = validation.errors.iter().any(|e| e.check == *name);
             let warned = validation.warnings.iter().any(|w| w.contains(name));
             if !failed && !warned {
+                println!("  [v] {}", name);
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let checks = ["Host Compute Service", "krun.dll", "libkrunfw.dll"];
+        for name in &checks {
+            let failed = validation.errors.iter().any(|e| e.check == *name);
+            if !failed {
                 println!("  [v] {}", name);
             }
         }
@@ -1068,7 +1438,7 @@ async fn handle_key_event(
                     // and arrives as CrosstermEvent::Paste, handled separately.
                     KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.modifiers.contains(KeyModifiers::SUPER) => {
-                        if let Some((panel_idx, ssh_port, key_path)) = panel_ssh_info(app) {
+                        if let Some((panel_idx, ssh_host, ssh_port, key_path)) = panel_ssh_info(app) {
                             // Clone the write channel so the async task can forward
                             // Ctrl+V to the terminal if no clipboard image is found.
                             let write_tx = app.panels.get(app.focused_panel)
@@ -1083,15 +1453,33 @@ async fn handle_key_event(
                                 match result {
                                     Ok(Ok((png_bytes, filename))) => {
                                         super::upload::spawn_bytes_upload(
-                                            ssh_port, key_path, png_bytes, filename,
+                                            ssh_host, ssh_port, key_path, png_bytes, filename,
                                             panel_idx, tx,
                                         );
                                     }
                                     Ok(Err(_)) | Err(_) => {
-                                        // No image in clipboard — forward Ctrl+V
-                                        // as a regular keystroke to the terminal.
-                                        if let Some(wtx) = write_tx {
-                                            let _ = wtx.send(vec![0x16]); // Ctrl+V = 0x16
+                                        // No image in clipboard — try reading text
+                                        // from clipboard and pasting it (bracketed).
+                                        // On macOS Cmd+V arrives as CrosstermEvent::Paste
+                                        // with the text; on Windows Ctrl+V arrives as a
+                                        // key event so we read the clipboard ourselves.
+                                        let pasted = tokio::task::spawn_blocking(|| {
+                                            arboard::Clipboard::new()
+                                                .and_then(|mut cb| cb.get_text())
+                                                .ok()
+                                        }).await.ok().flatten();
+                                        if let Some(Some(text)) = Some(pasted) {
+                                            if let Some(ref wtx) = write_tx {
+                                                if !text.is_empty() {
+                                                    let mut buf = Vec::with_capacity(text.len() + 12);
+                                                    buf.extend_from_slice(b"\x1b[200~");
+                                                    buf.extend_from_slice(text.as_bytes());
+                                                    buf.extend_from_slice(b"\x1b[201~");
+                                                    let _ = wtx.send(buf);
+                                                }
+                                            }
+                                        } else if let Some(wtx) = write_tx {
+                                            let _ = wtx.send(vec![0x16]); // fallback: Ctrl+V
                                         }
                                     }
                                 }
@@ -1548,8 +1936,8 @@ async fn handle_command(
         Command::McpToggle => {
             app.show_mcp_sidebar = !app.show_mcp_sidebar;
         }
-        Command::AddAgent { agent, image, project, branch, name, auto_mode, prompt, model } => {
-            add_agent(app, &agent, image.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), tx);
+        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model } => {
+            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), tx);
         }
         Command::Env { assignment } => {
             handle_env(app, assignment);
@@ -1594,9 +1982,7 @@ async fn handle_command(
 
                 let ssh_info = if let Some(ref sb_arc) = panel.sandbox {
                     let sb = sb_arc.lock().await;
-                    let port = sb.ssh_port();
-                    let key = sb.ssh_key_path();
-                    port.zip(key)
+                    sb.ssh_port().zip(sb.ssh_key_path())
                 } else {
                     None
                 };
@@ -1610,10 +1996,13 @@ async fn handle_command(
                     let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                     let is_resumed = panel.is_resumed;
                     let model = panel.model.clone();
+                    // Use 127.0.0.1 on all platforms — on Windows, portproxy
+                    // rules route localhost to the guest IP via HCN NAT.
+                    let ssh_host = "127.0.0.1".to_string();
                     let tx = tx.clone();
                     tokio::spawn(async move {
                         match super::terminal::connect_ssh(
-                            ssh_port, key_path, pty_cols, pty_rows,
+                            ssh_host, ssh_port, key_path, pty_cols, pty_rows,
                             &agent_name, &env, workdir.as_deref(),
                             permissions, auto_mode, prompt.as_deref(),
                             is_resumed, model.as_deref(), panel_idx, tx.clone(),
@@ -1826,21 +2215,24 @@ async fn handle_command(
         Command::Branches => {
             let project_dir = app.project_path.as_ref();
             if let Some(dir) = project_dir {
-                let output = std::process::Command::new("git")
-                    .args(["branch", "--list", "nanosb/*"])
-                    .current_dir(dir)
-                    .output();
-                let msg = match output {
-                    Ok(out) => {
-                        let branches = String::from_utf8_lossy(&out.stdout);
-                        if branches.trim().is_empty() {
-                            "No nanosb branches found.".to_string()
-                        } else {
-                            format!("Nanosb branches:\n{}", branches)
+                let dir = dir.clone();
+                let msg = tokio::task::spawn_blocking(move || {
+                    let output = std::process::Command::new("git")
+                        .args(["branch", "--list", "nanosb/*"])
+                        .current_dir(&dir)
+                        .output();
+                    match output {
+                        Ok(out) => {
+                            let branches = String::from_utf8_lossy(&out.stdout);
+                            if branches.trim().is_empty() {
+                                "No nanosb branches found.".to_string()
+                            } else {
+                                format!("Nanosb branches:\n{}", branches)
+                            }
                         }
+                        Err(e) => format!("Failed to list branches: {}", e),
                     }
-                    Err(e) => format!("Failed to list branches: {}", e),
-                };
+                }).await.unwrap_or_else(|e| format!("Task failed: {}", e));
                 let chat_msg = ChatMessage {
                     role: MessageRole::System,
                     content: msg,
@@ -1936,12 +2328,16 @@ async fn handle_command(
                             if let Some(ref wt_base) = pm.worktree_base {
                                 if let Some((source, branch)) = pm.created_branches.first() {
                                     let refspec = format!("{}:{}", branch, branch);
-                                    let ok = std::process::Command::new("git")
-                                        .args(["fetch", &wt_base.to_string_lossy(), &refspec, "--force"])
-                                        .current_dir(source)
-                                        .output()
-                                        .map(|o| o.status.success())
-                                        .unwrap_or(false);
+                                    let wt = wt_base.clone();
+                                    let src = source.clone();
+                                    let ok = tokio::task::spawn_blocking(move || {
+                                        std::process::Command::new("git")
+                                            .args(["fetch", &wt.to_string_lossy(), &refspec, "--force"])
+                                            .current_dir(&src)
+                                            .output()
+                                            .map(|o| o.status.success())
+                                            .unwrap_or(false)
+                                    }).await.unwrap_or(false);
                                     let msg = if ok {
                                         format!("Synced to branch '{}'.", branch)
                                     } else {
@@ -1984,7 +2380,7 @@ async fn handle_command(
 
             // Handle custom command template
             if let Some(ref cmd_template) = app.settings.tools.custom_command {
-                if editor_pref == "custom" || (editor_pref == "auto" && nanosandbox::settings::resolve_tool("auto").is_none()) {
+                if editor_pref == "custom" || (editor_pref == "auto" && sandbox::settings::resolve_tool("auto").is_none()) {
                     let cmd = cmd_template.replace("{path}", &clone_path.to_string_lossy());
                     let parts: Vec<&str> = cmd.split_whitespace().collect();
                     if let Some((bin, args)) = parts.split_first() {
@@ -2000,7 +2396,7 @@ async fn handle_command(
                 }
             }
 
-            let resolved = nanosandbox::settings::resolve_tool(editor_pref);
+            let resolved = sandbox::settings::resolve_tool(editor_pref);
 
             match resolved {
                 Some((binary, true)) => {
@@ -2025,7 +2421,7 @@ async fn handle_command(
                     // On macOS, try `open -a <AppName>` for known GUI apps
                     // whose shell command isn't on PATH.
                     #[cfg(target_os = "macos")]
-                    if let Some(app_name) = nanosandbox::settings::macos_app_name(editor_pref) {
+                    if let Some(app_name) = sandbox::settings::macos_app_name(editor_pref) {
                         let ok = std::process::Command::new("open")
                             .args(["-a", app_name])
                             .arg(&clone_path)
@@ -2038,6 +2434,31 @@ async fn handle_command(
                         if ok {
                             app.set_status_message(format!("Opened in {}.", app_name));
                             return;
+                        }
+                    }
+
+                    // On Windows, try common install paths for GUI editors
+                    // when the binary isn't on PATH.
+                    #[cfg(target_os = "windows")]
+                    {
+                        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+                        let programfiles = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+                        let candidates: Vec<(&str, String)> = vec![
+                            ("vscode", format!(r"{}\Microsoft VS Code\Code.exe", programfiles)),
+                            ("vscode", format!(r"{}\Programs\Microsoft VS Code\Code.exe", localappdata)),
+                            ("cursor", format!(r"{}\Programs\Cursor\Cursor.exe", localappdata)),
+                        ];
+                        for (name, exe_path) in &candidates {
+                            if (editor_pref == *name || editor_pref == "auto") && std::path::Path::new(exe_path).exists() {
+                                let _ = std::process::Command::new(exe_path)
+                                    .arg(&clone_path)
+                                    .stdin(std::process::Stdio::null())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                                app.set_status_message(format!("Opened in {}.", name));
+                                return;
+                            }
                         }
                     }
 
@@ -2212,55 +2633,27 @@ fn handle_copy(app: &mut App) {
 }
 
 /// Write text to the system clipboard using platform-specific commands.
+/// Copy text to system clipboard without blocking the async event loop.
+///
+/// Uses `arboard` (cross-platform Rust clipboard library) instead of
+/// spawning external processes like `clip.exe` / `pbcopy` / `xclip`.
+/// The old process-based approach called `.wait()` synchronously on the
+/// main event loop, freezing the entire TUI for 100-500ms on Windows.
 fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
-    use std::io::Write;
-    use std::process::{Command as ProcessCommand, Stdio};
-
-    #[cfg(target_os = "macos")]
-    let mut child = ProcessCommand::new("pbcopy")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("pbcopy: {}", e))?;
-
-    #[cfg(target_os = "linux")]
-    let mut child = ProcessCommand::new("xclip")
-        .args(["-selection", "clipboard"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("xclip: {}", e))?;
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    return Err("Clipboard not supported on this platform".to_string());
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        child
-            .stdin
-            .as_mut()
-            .ok_or("Failed to open stdin")?
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("write: {}", e))?;
-
-        let status = child.wait().map_err(|e| format!("wait: {}", e))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("exited with {}", status))
-        }
-    }
+    arboard::Clipboard::new()
+        .map_err(|e| format!("clipboard: {}", e))?
+        .set_text(text.to_string())
+        .map_err(|e| format!("clipboard set: {}", e))
 }
 
 /// Get the SSH port and key path from the focused panel, if available.
-fn panel_ssh_info(app: &App) -> Option<(usize, u16, std::path::PathBuf)> {
+fn panel_ssh_info(app: &App) -> Option<(usize, String, u16, std::path::PathBuf)> {
     let idx = app.focused_panel;
     let panel = app.panels.get(idx)?;
     let port = panel.ssh_host_port?;
     let key = panel.ssh_key_path.clone()?;
-    Some((idx, port, key))
+    let host = "127.0.0.1".to_string();
+    Some((idx, host, port, key))
 }
 
 /// Resolve a user-supplied path: strip quotes, expand `~`, resolve relative paths.
@@ -2292,7 +2685,7 @@ fn resolve_upload_path(raw: &str) -> std::path::PathBuf {
 
 /// Handle the `/upload <path>` command.
 fn handle_upload(app: &mut App, path: &str, tx: &mpsc::UnboundedSender<AppEvent>) {
-    let (panel_idx, ssh_port, key_path) = match panel_ssh_info(app) {
+    let (panel_idx, ssh_host, ssh_port, key_path) = match panel_ssh_info(app) {
         Some(info) => info,
         None => {
             app.set_system_message(ChatMessage {
@@ -2325,12 +2718,12 @@ fn handle_upload(app: &mut App, path: &str, tx: &mpsc::UnboundedSender<AppEvent>
         .unwrap_or_else(|| "unknown".to_string());
     app.set_status_message(format!("Uploading {}...", filename));
 
-    super::upload::spawn_file_upload(ssh_port, key_path, host_path, panel_idx, tx.clone());
+    super::upload::spawn_file_upload(ssh_host, ssh_port, key_path, host_path, panel_idx, tx.clone());
 }
 
 /// Handle the `/paste-image` command.
 fn handle_paste_image(app: &mut App, tx: &mpsc::UnboundedSender<AppEvent>) {
-    let (panel_idx, ssh_port, key_path) = match panel_ssh_info(app) {
+    let (panel_idx, ssh_host, ssh_port, key_path) = match panel_ssh_info(app) {
         Some(info) => info,
         None => {
             app.set_system_message(ChatMessage {
@@ -2351,7 +2744,7 @@ fn handle_paste_image(app: &mut App, tx: &mpsc::UnboundedSender<AppEvent>) {
         match result {
             Ok(Ok((png_bytes, filename))) => {
                 super::upload::spawn_bytes_upload(
-                    ssh_port, key_path, png_bytes, filename, panel_idx, tx,
+                    ssh_host, ssh_port, key_path, png_bytes, filename, panel_idx, tx,
                 );
             }
             Ok(Err(e)) => {
@@ -2390,7 +2783,7 @@ fn handle_paste_event(
     // In Terminal mode: if the paste is empty (image-only clipboard via Cmd+V),
     // check the clipboard for an image to upload.
     if text.is_empty() {
-        if let Some((panel_idx, ssh_port, key_path)) = panel_ssh_info(app) {
+        if let Some((panel_idx, ssh_host, ssh_port, key_path)) = panel_ssh_info(app) {
             let tx = tx.clone();
             tokio::spawn(async move {
                 let result = tokio::task::spawn_blocking(
@@ -2400,7 +2793,7 @@ fn handle_paste_event(
                 match result {
                     Ok(Ok((png_bytes, filename))) => {
                         super::upload::spawn_bytes_upload(
-                            ssh_port, key_path, png_bytes, filename,
+                            ssh_host, ssh_port, key_path, png_bytes, filename,
                             panel_idx, tx,
                         );
                     }
@@ -2422,11 +2815,19 @@ fn handle_paste_event(
         return;
     }
 
-    // Forward pasted text as-is to the terminal (covers drag-and-drop paths too).
+    // Forward pasted text to the terminal wrapped in bracketed-paste escape
+    // sequences (\x1b[200~ ... \x1b[201~).  Shells that support bracketed
+    // paste (bash 4.4+, zsh, fish) buffer the entire paste and process it
+    // in one shot instead of interpreting each character individually, which
+    // dramatically speeds up large pastes.
     if let Some(panel) = app.panels.get(app.focused_panel) {
         if panel.mode == PanelMode::Terminal {
             if let Some(ref handle) = panel.terminal_handle {
-                let _ = handle.write_tx.send(text.into_bytes());
+                let mut buf = Vec::with_capacity(text.len() + 12);
+                buf.extend_from_slice(b"\x1b[200~");
+                buf.extend_from_slice(text.as_bytes());
+                buf.extend_from_slice(b"\x1b[201~");
+                let _ = handle.write_tx.send(buf);
             }
         }
     }
@@ -2599,17 +3000,33 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             continue;
         }
 
-        // Try to parse as JSON
+        // Try to parse as JSON. Lines that aren't JSON (shell errors,
+        // stderr, escape-only chunks) are still streaming output the user
+        // wants to see — surface them inline with an [exec] tag so nothing
+        // is silently dropped.
         let json: serde_json::Value = match serde_json::from_str(clean) {
             Ok(v) => v,
-            Err(_) => continue, // Not JSON — shell prompt, etc.
+            Err(_) => {
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[exec] ");
+                state.agent_text.push_str(clean);
+                state.agent_text.push('\n');
+                if state.status == "starting" {
+                    state.status = "running".to_string();
+                    state.started_at = std::time::Instant::now();
+                }
+                continue;
+            }
         };
 
-        state.raw_lines.push(clean.to_string());
-
         // Transition from "starting" once we receive any valid JSON.
+        // Also reset the elapsed timer here so it measures agent execution
+        // time, not VM boot + agent CLI init time (which can be ~30s).
         if state.status == "starting" {
             state.status = "running".to_string();
+            state.started_at = std::time::Instant::now();
         }
 
         let event_type = json
@@ -2617,51 +3034,123 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             .and_then(|t| t.as_str())
             .unwrap_or("");
 
+        // Trace every parsed event so we can diagnose missing-output bugs.
+        // Truncated to keep logs readable for long content blocks.
+        tracing::info!(
+            "[parse_headless] event_type={:?} raw_len={} agent_text_len={}",
+            event_type, clean.len(), state.agent_text.len()
+        );
+
         match event_type {
             // =================================================================
-            // Claude Code: -p --output-format stream-json
+            // Claude Code: -p --output-format stream-json (full SSE schema)
             // =================================================================
 
-            // Token-level streaming delta (requires --include-partial-messages)
+            // Granular SSE events from --include-partial-messages.
+            // The Anthropic Messages stream nests its event family under .event.type:
+            //   message_start, content_block_start, content_block_delta,
+            //   content_block_stop, message_delta, message_stop, ping
             "stream_event" => {
-                if let Some(delta_text) = json
-                    .pointer("/event/delta/text")
+                let inner_type = json
+                    .pointer("/event/type")
                     .and_then(|v| v.as_str())
-                {
-                    state.agent_text.push_str(delta_text);
-                    state.status = "thinking".to_string();
-                }
-                // Tool use block start
-                if let Some(name) = json
-                    .pointer("/event/content_block/name")
-                    .and_then(|v| v.as_str())
-                {
-                    state.tool_calls.push(super::app::HeadlessToolCall {
-                        tool_name: name.to_string(),
-                        input_summary: String::new(),
-                        output_preview: String::new(),
-                        status: "running".to_string(),
-                    });
-                    state.status = "tool_use".to_string();
-                }
-            }
-            // Complete assistant turn (text + tool_use blocks in content array)
-            "assistant" => {
-                if let Some(content) = json.get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                {
-                    for block in content {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            state.agent_text.push_str(text);
+                    .unwrap_or("");
+                match inner_type {
+                    "message_start" => {
+                        if let Some(model) = json
+                            .pointer("/event/message/model")
+                            .and_then(|v| v.as_str())
+                        {
+                            state.status = format!("running ({})", model);
+                        }
+                    }
+                    "content_block_start" => {
+                        let block_type = json
+                            .pointer("/event/content_block/type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match block_type {
+                            "tool_use" => {
+                                let name = json
+                                    .pointer("/event/content_block/name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("tool");
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: name.to_string(),
+                                    input_summary: String::new(),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                                state.status = "tool_use".to_string();
+                            }
+                            "thinking" => {
+                                state.status = "thinking".to_string();
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_delta" => {
+                        let delta_type = json
+                            .pointer("/event/delta/type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match delta_type {
+                            "text_delta" => {
+                                if let Some(text) = json
+                                    .pointer("/event/delta/text")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    state.agent_text.push_str(text);
+                                    state.status = "thinking".to_string();
+                                }
+                            }
+                            "thinking_delta" => {
+                                if let Some(text) = json
+                                    .pointer("/event/delta/thinking")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    state.agent_text.push_str(text);
+                                    state.status = "thinking".to_string();
+                                }
+                            }
+                            "input_json_delta" => {
+                                if let Some(partial) = json
+                                    .pointer("/event/delta/partial_json")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if let Some(last) = state.tool_calls.last_mut() {
+                                        let mut combined = last.input_summary.clone();
+                                        combined.push_str(partial);
+                                        last.input_summary = truncate_str(&combined, 80);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_stop" => {
+                        if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
                             state.agent_text.push('\n');
                         }
-                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                            let input = block.get("input").map(|v| v.to_string()).unwrap_or_default();
+                    }
+                    // Lifecycle markers — no payload to render.
+                    "message_delta" | "message_stop" | "ping" => {}
+                    // Legacy / un-nested form — preserve prior shallow extraction.
+                    _ => {
+                        if let Some(text) = json
+                            .pointer("/event/delta/text")
+                            .and_then(|v| v.as_str())
+                        {
+                            state.agent_text.push_str(text);
+                            state.status = "thinking".to_string();
+                        }
+                        if let Some(name) = json
+                            .pointer("/event/content_block/name")
+                            .and_then(|v| v.as_str())
+                        {
                             state.tool_calls.push(super::app::HeadlessToolCall {
                                 tool_name: name.to_string(),
-                                input_summary: truncate_str(&input, 80),
+                                input_summary: String::new(),
                                 output_preview: String::new(),
                                 status: "running".to_string(),
                             });
@@ -2670,29 +3159,108 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                     }
                 }
             }
-            // Claude final result
-            "result" => {
-                if let Some(text) = json.get("result").and_then(|r| r.as_str()) {
-                    state.agent_text.push_str(text);
+            // Complete assistant turn — content[] holds text, thinking, and tool_use blocks.
+            "assistant" => {
+                if let Some(content) = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    for block in content {
+                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match block_type {
+                            "text" => {
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    state.agent_text.push_str(text);
+                                    state.agent_text.push('\n');
+                                }
+                            }
+                            "thinking" => {
+                                if let Some(text) = block.get("thinking").and_then(|t| t.as_str()) {
+                                    state.agent_text.push_str(text);
+                                    state.agent_text.push('\n');
+                                }
+                            }
+                            "tool_use" => {
+                                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                                let input = block.get("input").map(|v| v.to_string()).unwrap_or_default();
+                                let summary = truncate_str(&input, 200);
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[tool:{}] {}\n", name, summary));
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: name.to_string(),
+                                    input_summary: truncate_str(&input, 80),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                                state.status = "tool_use".to_string();
+                            }
+                            _ => {
+                                // Unknown content block — best-effort text extraction.
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    state.agent_text.push_str(text);
+                                    state.agent_text.push('\n');
+                                }
+                            }
+                        }
+                    }
                 }
-                state.status = "completed".to_string();
+            }
+            // Claude final result. May indicate API failure via is_error/api_error_status
+            // even when subtype="success" (Claude Code emits a synthetic result on auth
+            // or quota errors, e.g. "Credit balance is too low" with HTTP 400).
+            "result" => {
+                let is_error = json.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let api_status = json.get("api_error_status").and_then(|v| v.as_i64());
+                let result_text = json.get("result").and_then(|r| r.as_str()).unwrap_or("");
+
+                if is_error || api_status.is_some() {
+                    let header = match api_status {
+                        Some(code) => format!("[error] API {}: ", code),
+                        None => "[error] ".to_string(),
+                    };
+                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                        state.agent_text.push('\n');
+                    }
+                    state.agent_text.push_str(&header);
+                    state.agent_text.push_str(result_text);
+                    state.agent_text.push('\n');
+                    tracing::info!("[parse_headless] result is_error=true api={:?} text={:?}", api_status, result_text);
+                    state.finish("error");
+                } else {
+                    if !result_text.is_empty() {
+                        state.agent_text.push_str(result_text);
+                    }
+                    tracing::info!("[parse_headless] result success len={}", result_text.len());
+                    state.finish("completed");
+                }
             }
 
             // =================================================================
             // Codex: exec --json (NDJSON streaming)
             // =================================================================
 
-            // Lifecycle events (no content to extract)
-            "thread.started" | "turn.started" => {}
+            // Lifecycle events with no content payload.
+            // Surface them as visible markers so the user sees activity.
+            "thread.started" | "turn.started" => {
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[");
+                state.agent_text.push_str(event_type);
+                state.agent_text.push_str("]\n");
+            }
+            // End-of-turn — for one-shot `exec --json`, this signals run completion.
             "turn.completed" => {
-                // Mark last tool as done if still running
                 if let Some(last) = state.tool_calls.last_mut() {
                     if last.status == "running" {
                         last.status = "done".to_string();
                     }
                 }
+                state.finish("completed");
             }
-            // Item events — the main content carriers
+            // Item events — the main content carriers.
             "item.started" | "item.updated" | "item.completed" => {
                 if let Some(item) = json.get("item") {
                     let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -2711,6 +3279,10 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                             if event_type == "item.started" {
                                 let cmd = item.get("command")
                                     .and_then(|v| v.as_str()).unwrap_or("command");
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("$ {}\n", cmd));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: "command".to_string(),
                                     input_summary: truncate_str(cmd, 80),
@@ -2720,11 +3292,26 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 state.status = "tool_use".to_string();
                             }
                             if event_type == "item.completed" {
+                                let exit_code = item.get("exit_code")
+                                    .and_then(|v| v.as_i64()).unwrap_or(0);
+                                let output = item.get("aggregated_output")
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                if !output.is_empty() {
+                                    state.agent_text.push_str(&truncate_str(output, 800));
+                                    if !state.agent_text.ends_with('\n') {
+                                        state.agent_text.push('\n');
+                                    }
+                                }
+                                if exit_code != 0 {
+                                    state.agent_text.push_str(&format!("[exit {}]\n", exit_code));
+                                }
                                 if let Some(last) = state.tool_calls.last_mut() {
-                                    last.status = "done".to_string();
-                                    if let Some(output) = item.get("aggregated_output")
-                                        .and_then(|v| v.as_str())
-                                    {
+                                    last.status = if exit_code == 0 {
+                                        "done".to_string()
+                                    } else {
+                                        "error".to_string()
+                                    };
+                                    if !output.is_empty() {
                                         last.output_preview = truncate_str(output, 120);
                                     }
                                 }
@@ -2734,6 +3321,10 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                             if event_type == "item.started" {
                                 let path = item.get("path")
                                     .and_then(|v| v.as_str()).unwrap_or("file");
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[file] {}\n", path));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: "file_change".to_string(),
                                     input_summary: truncate_str(path, 80),
@@ -2743,8 +3334,20 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 state.status = "tool_use".to_string();
                             }
                             if event_type == "item.completed" {
+                                let summary = item.get("diff")
+                                    .or_else(|| item.get("summary"))
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                if !summary.is_empty() {
+                                    state.agent_text.push_str(&truncate_str(summary, 400));
+                                    if !state.agent_text.ends_with('\n') {
+                                        state.agent_text.push('\n');
+                                    }
+                                }
                                 if let Some(last) = state.tool_calls.last_mut() {
                                     last.status = "done".to_string();
+                                    if !summary.is_empty() {
+                                        last.output_preview = truncate_str(summary, 120);
+                                    }
                                 }
                             }
                         }
@@ -2756,9 +3359,43 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 let input = item.get("arguments")
                                     .or_else(|| item.get("query"))
                                     .map(|v| v.to_string()).unwrap_or_default();
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[{}] {}\n", name, truncate_str(&input, 200)));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: name.to_string(),
                                     input_summary: truncate_str(&input, 80),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                                state.status = "tool_use".to_string();
+                            }
+                            if event_type == "item.completed" {
+                                let output = item.get("result")
+                                    .or_else(|| item.get("output"))
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                if !output.is_empty() {
+                                    state.agent_text.push_str(&format!("[result] {}\n", truncate_str(output, 400)));
+                                }
+                                if let Some(last) = state.tool_calls.last_mut() {
+                                    last.status = "done".to_string();
+                                    if !output.is_empty() {
+                                        last.output_preview = truncate_str(output, 120);
+                                    }
+                                }
+                            }
+                        }
+                        "todo_list" | "patch_apply" | "plan_update" => {
+                            // Codex extension item types — surface as a tool entry.
+                            if event_type == "item.started" {
+                                let summary = item.get("summary")
+                                    .or_else(|| item.get("path"))
+                                    .or_else(|| item.get("title"))
+                                    .and_then(|v| v.as_str()).unwrap_or("");
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: item_type.to_string(),
+                                    input_summary: truncate_str(summary, 80),
                                     output_preview: String::new(),
                                     status: "running".to_string(),
                                 });
@@ -2770,7 +3407,24 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 }
                             }
                         }
-                        _ => {}
+                        _ => {
+                            // Unknown subtype — render the raw type name so users see it.
+                            if event_type == "item.started" && !item_type.is_empty() {
+                                state.tool_calls.push(super::app::HeadlessToolCall {
+                                    tool_name: item_type.to_string(),
+                                    input_summary: String::new(),
+                                    output_preview: String::new(),
+                                    status: "running".to_string(),
+                                });
+                            }
+                            if event_type == "item.completed" {
+                                if let Some(last) = state.tool_calls.last_mut() {
+                                    if last.status == "running" {
+                                        last.status = "done".to_string();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2779,7 +3433,7 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             // Goose: run --output-format stream-json
             // =================================================================
 
-            // Message event — assistant text and tool requests
+            // Message event — assistant text, tool requests, and tool responses.
             "message" => {
                 if let Some(content) = json.get("message")
                     .and_then(|m| m.get("content"))
@@ -2800,6 +3454,10 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                     .and_then(|v| v.as_str()).unwrap_or("tool");
                                 let args = block.pointer("/tool_call/arguments")
                                     .map(|v| v.to_string()).unwrap_or_default();
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("[tool:{}] {}\n", name, truncate_str(&args, 200)));
                                 state.tool_calls.push(super::app::HeadlessToolCall {
                                     tool_name: name.to_string(),
                                     input_summary: truncate_str(&args, 80),
@@ -2809,54 +3467,151 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                                 state.status = "tool_use".to_string();
                             }
                             "tool_response" => {
-                                // Mark matching tool call as done
+                                let is_error = block.get("is_error")
+                                    .and_then(|v| v.as_bool()).unwrap_or(false);
                                 if let Some(last) = state.tool_calls.last_mut() {
-                                    if last.status == "running" {
-                                        last.status = "done".to_string();
+                                    last.status = if is_error {
+                                        "error".to_string()
+                                    } else {
+                                        "done".to_string()
+                                    };
+                                    // Goose response payloads can live in tool_result[],
+                                    // content[], or a flat output string.
+                                    let mut output = String::new();
+                                    if let Some(arr) = block.pointer("/tool_result")
+                                        .and_then(|v| v.as_array())
+                                    {
+                                        for c in arr {
+                                            if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                                output.push_str(t);
+                                            }
+                                        }
+                                    } else if let Some(arr) = block.get("content")
+                                        .and_then(|v| v.as_array())
+                                    {
+                                        for c in arr {
+                                            if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                                output.push_str(t);
+                                            }
+                                        }
+                                    } else if let Some(s) = block.get("output")
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        output.push_str(s);
+                                    } else if let Some(s) = block.get("content")
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        output.push_str(s);
+                                    }
+                                    if !output.is_empty() {
+                                        last.output_preview = truncate_str(&output, 120);
                                     }
                                 }
+                                // Surface response inline regardless of tool_calls state.
+                                let mut output = String::new();
+                                if let Some(arr) = block.pointer("/tool_result")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for c in arr {
+                                        if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                            output.push_str(t);
+                                        }
+                                    }
+                                } else if let Some(arr) = block.get("content")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for c in arr {
+                                        if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                            output.push_str(t);
+                                        }
+                                    }
+                                } else if let Some(s) = block.get("output")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    output.push_str(s);
+                                } else if let Some(s) = block.get("content")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    output.push_str(s);
+                                }
+                                let tag = if is_error { "[result:error]" } else { "[result]" };
+                                let display = if output.is_empty() { "(empty)" } else { output.as_str() };
+                                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                    state.agent_text.push('\n');
+                                }
+                                state.agent_text.push_str(&format!("{} {}\n", tag, truncate_str(display, 400)));
+                            }
+                            "image" => {
+                                state.agent_text.push_str("[image]\n");
                             }
                             _ => {}
                         }
                     }
                 }
             }
-            // Notification — extension log/progress messages
+            // Notification — extension log / progress messages with severity.
             "notification" => {
-                if let Some(msg) = json.pointer("/log/message").and_then(|v| v.as_str()) {
-                    let ext = json.get("extension_id")
-                        .and_then(|v| v.as_str()).unwrap_or("ext");
+                let msg = json.pointer("/log/message")
+                    .or_else(|| json.pointer("/progress/message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let level = json.pointer("/log/level")
+                    .and_then(|v| v.as_str()).unwrap_or("info");
+                let ext = json.get("extension_id")
+                    .and_then(|v| v.as_str()).unwrap_or("ext");
+                if !msg.is_empty() {
+                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                        state.agent_text.push('\n');
+                    }
+                    state.agent_text.push_str(&format!("[{}:{}] {}\n", ext, level, truncate_str(msg, 200)));
                     state.tool_calls.push(super::app::HeadlessToolCall {
                         tool_name: ext.to_string(),
                         input_summary: truncate_str(msg, 80),
                         output_preview: String::new(),
-                        status: "done".to_string(),
+                        status: if level == "error" || level == "warn" {
+                            "error".to_string()
+                        } else {
+                            "done".to_string()
+                        },
                     });
                 }
             }
-            // Goose completion
+            // Goose completion / cancellation.
             "complete" => {
-                state.status = "completed".to_string();
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[done]\n");
+                state.finish("completed");
+            }
+            "cancelled" => {
+                state.agent_text.push_str("[cancelled]\n");
+                state.finish("error");
             }
 
             // =================================================================
             // Cursor: -p --output-format stream-json
             // =================================================================
 
-            // Thinking deltas — token-level streaming of reasoning.
-            // Accumulate without newlines; only add a newline on "completed".
+            // Thinking — token-level reasoning stream.
             "thinking" => {
                 let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-                if subtype == "delta" {
-                    if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
-                        state.agent_text.push_str(text);
+                match subtype {
+                    "started" => {
+                        state.status = "thinking".to_string();
                     }
-                    state.status = "thinking".to_string();
-                } else if subtype == "completed" {
-                    // Add a newline after the full thinking block.
-                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
-                        state.agent_text.push('\n');
+                    "delta" => {
+                        if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+                            state.agent_text.push_str(text);
+                        }
+                        state.status = "thinking".to_string();
                     }
+                    "completed" => {
+                        if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                            state.agent_text.push('\n');
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -2864,26 +3619,28 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             // e.g. {"tool_call": {"shellToolCall": {"args": {"command": "ls"}}}}
             "tool_call" => {
                 let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                let tc_obj = json.get("tool_call").and_then(|v| v.as_object()).cloned();
                 if subtype == "started" {
-                    // Extract tool name from the first key of the tool_call object.
-                    let tc_obj = json.get("tool_call").and_then(|v| v.as_object());
-                    let (name, input) = if let Some(obj) = tc_obj {
+                    let (name, input) = if let Some(ref obj) = tc_obj {
                         let key = obj.keys().next().map(|k| k.as_str()).unwrap_or("tool");
-                        // Friendly name: strip "ToolCall" suffix.
                         let friendly = key.strip_suffix("ToolCall").unwrap_or(key);
-                        // Extract primary arg: command, path, query, or pattern.
                         let args = obj.values().next()
                             .and_then(|v| v.get("args"))
                             .and_then(|a| a.as_object());
                         let input = args.and_then(|a| {
                             a.get("command").or_else(|| a.get("path"))
                                 .or_else(|| a.get("query")).or_else(|| a.get("pattern"))
+                                .or_else(|| a.get("url")).or_else(|| a.get("file_path"))
                                 .and_then(|v| v.as_str())
                         }).unwrap_or("");
                         (friendly.to_string(), input.to_string())
                     } else {
                         ("tool".to_string(), String::new())
                     };
+                    if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                        state.agent_text.push('\n');
+                    }
+                    state.agent_text.push_str(&format!("[tool:{}] {}\n", name, truncate_str(&input, 200)));
                     state.tool_calls.push(super::app::HeadlessToolCall {
                         tool_name: name,
                         input_summary: truncate_str(&input, 80),
@@ -2892,13 +3649,51 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
                     });
                     state.status = "tool_use".to_string();
                 } else if subtype == "completed" {
+                    let mut found_output: Option<(String, bool)> = None;
+                    if let Some(ref obj) = tc_obj {
+                        if let Some((_, val)) = obj.iter().next() {
+                            let candidates = [
+                                ("/result/success/output", false),
+                                ("/result/success/content", false),
+                                ("/result/success/text", false),
+                                ("/result/success/result", false),
+                                ("/result/success/message", false),
+                                ("/result/error/output", true),
+                                ("/result/error/message", true),
+                            ];
+                            for (path, is_err) in candidates.iter() {
+                                if let Some(out) = val.pointer(path).and_then(|v| v.as_str()) {
+                                    found_output = Some((out.to_string(), *is_err));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some((ref out, is_err)) = found_output {
+                        let tag = if is_err { "[result:error]" } else { "[result]" };
+                        if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                            state.agent_text.push('\n');
+                        }
+                        state.agent_text.push_str(&format!("{} {}\n", tag, truncate_str(out, 400)));
+                    }
                     if let Some(last) = state.tool_calls.last_mut() {
                         last.status = "done".to_string();
-                        // Extract output preview for shell commands.
-                        if let Some(output) = json.pointer("/tool_call/shellToolCall/result/success/output")
+                        if let Some((out, is_err)) = found_output {
+                            last.output_preview = truncate_str(&out, 120);
+                            if is_err {
+                                last.status = "error".to_string();
+                            }
+                        }
+                    }
+                } else if subtype == "failed" || subtype == "error" {
+                    if let Some(last) = state.tool_calls.last_mut() {
+                        last.status = "error".to_string();
+                        let err = json.pointer("/error/message")
+                            .or_else(|| json.get("error"))
                             .and_then(|v| v.as_str())
-                        {
-                            last.output_preview = truncate_str(output, 120);
+                            .unwrap_or("");
+                        if !err.is_empty() {
+                            last.output_preview = truncate_str(err, 120);
                         }
                     }
                 }
@@ -2908,41 +3703,135 @@ fn parse_headless_data(state: &mut super::app::HeadlessState, data: &[u8]) {
             // Lifecycle and system events
             // =================================================================
 
-            // System init — extract model info for display
+            // System init — extract model info for display and surface inline.
             "system" => {
-                if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
+                let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                let model = json.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                let cwd = json.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+                if !model.is_empty() {
                     state.status = format!("running ({})", model);
                 }
+                let mut header = String::from("[system");
+                if !subtype.is_empty() {
+                    header.push(':');
+                    header.push_str(subtype);
+                }
+                header.push(']');
+                if !model.is_empty() {
+                    header.push_str(" model=");
+                    header.push_str(model);
+                }
+                if !cwd.is_empty() {
+                    header.push_str(" cwd=");
+                    header.push_str(cwd);
+                }
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str(&header);
+                state.agent_text.push('\n');
             }
 
-            // Tool result events (Claude `user` with tool_result)
+            // Tool result events (Claude `user` with tool_result blocks).
+            // The result content can be a string, an array of {type,text} blocks,
+            // or absent entirely (legacy form — just acknowledge tool done).
             "user" => {
-                // Mark the last tool call as done when we get its result
-                if let Some(last) = state.tool_calls.last_mut() {
+                let content = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array());
+                if let Some(blocks) = content {
+                    for block in blocks {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                            let is_error = block.get("is_error")
+                                .and_then(|v| v.as_bool()).unwrap_or(false);
+                            let mut output = String::new();
+                            if let Some(s) = block.get("content").and_then(|v| v.as_str()) {
+                                output.push_str(s);
+                            } else if let Some(arr) = block.get("content").and_then(|v| v.as_array()) {
+                                for c in arr {
+                                    if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                        output.push_str(t);
+                                    }
+                                }
+                            }
+                            // Surface the tool result inline in the panel.
+                            let tag = if is_error { "[result:error]" } else { "[result]" };
+                            let display = if output.is_empty() { "(empty)" } else { output.as_str() };
+                            if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                                state.agent_text.push('\n');
+                            }
+                            state.agent_text.push_str(&format!("{} {}\n", tag, truncate_str(display, 400)));
+                            if let Some(last) = state.tool_calls.last_mut() {
+                                last.status = if is_error {
+                                    "error".to_string()
+                                } else {
+                                    "done".to_string()
+                                };
+                                if !output.is_empty() {
+                                    last.output_preview = truncate_str(&output, 120);
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(last) = state.tool_calls.last_mut() {
                     if last.status == "running" {
                         last.status = "done".to_string();
                     }
                 }
             }
 
-            // Errors — show as text so the user sees them
+            // Errors — surface as visible text so the user sees them.
             "error" | "turn.failed" => {
-                let msg = json.get("error")
-                    .and_then(|e| e.get("message").or(Some(e)))
+                let msg = json.pointer("/error/message")
                     .and_then(|v| v.as_str())
+                    .or_else(|| json.get("error").and_then(|v| v.as_str()))
                     .or_else(|| json.get("message").and_then(|v| v.as_str()))
                     .unwrap_or("unknown error");
-                state.agent_text.push_str(&format!("[error] {}\n", msg));
-                state.status = "error".to_string();
+                let code = json.pointer("/error/code")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| json.pointer("/error/type").and_then(|v| v.as_str()));
+                let header = match code {
+                    Some(c) => format!("[error {}] ", c),
+                    None => "[error] ".to_string(),
+                };
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str(&header);
+                state.agent_text.push_str(msg);
+                state.agent_text.push('\n');
+                state.finish("error");
             }
 
-            // Silent lifecycle events
-            "model_change" => {}
+            // Model change — surface inline, others are too chatty to render.
+            "model_change" => {
+                let model = json.get("model")
+                    .or_else(|| json.get("to"))
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                if !state.agent_text.is_empty() && !state.agent_text.ends_with('\n') {
+                    state.agent_text.push('\n');
+                }
+                state.agent_text.push_str("[model_change] ");
+                state.agent_text.push_str(model);
+                state.agent_text.push('\n');
+                if !model.is_empty() {
+                    state.status = format!("running ({})", model);
+                }
+            }
+
+            // Truly silent lifecycle events — no payload, very chatty.
+            "ping" | "keepalive" | "heartbeat"
+            | "session.created" | "session.updated"
+            | "usage" | "rate_limit" => {}
 
             _ => {
-                // Unknown event — try to extract text but don't add newlines
-                // (could be streaming deltas from an unknown agent).
-                if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+                // Unknown event — try several common text-bearing fields.
+                let extracted = json.get("text").and_then(|v| v.as_str())
+                    .or_else(|| json.pointer("/delta/text").and_then(|v| v.as_str()))
+                    .or_else(|| json.pointer("/data/text").and_then(|v| v.as_str()))
+                    .or_else(|| json.get("content").and_then(|v| v.as_str()))
+                    .or_else(|| json.get("output").and_then(|v| v.as_str()));
+                if let Some(text) = extracted {
                     state.agent_text.push_str(text);
                 }
             }
@@ -3020,6 +3909,7 @@ fn add_agent(
     app: &mut App,
     agent: &str,
     image: Option<&str>,
+    tag: Option<&str>,
     project: Option<&str>,
     branch: Option<&str>,
     name: Option<&str>,
@@ -3028,17 +3918,23 @@ fn add_agent(
     model: Option<&str>,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    let image_name = match image {
-        Some(img) => nanosandbox::config::normalize_image(img),
-        None => nanosandbox::config::normalize_image(agent),
+    // Build image reference. --tag overrides the default "latest" tag
+    // for bare agent names (e.g., `/add claude --tag rc11` → `claude:rc11`).
+    let image_ref = match image {
+        Some(img) => img.to_string(),
+        None => match tag {
+            Some(t) => format!("{}:{}", agent, t),
+            None => agent.to_string(),
+        },
     };
+    let image_name = sandbox::normalize_image(&image_ref);
 
     let mut panel = AgentPanel::new(agent);
 
     // Headless mode setup.
     panel.auto_mode = auto_mode;
     if auto_mode {
-        panel.permissions = nanosandbox::Permissions::AllowAll;
+        panel.permissions = sandbox::Permissions::AllowAll;
         let task = prompt.unwrap_or("(no prompt)");
         panel.headless_state = Some(super::app::HeadlessState::new(task));
     }
@@ -3064,22 +3960,18 @@ fn add_agent(
 
     // Build sandbox config.
     // Agent VMs need enough memory for the agent CLI + runtime overhead.
+    // Claude/Codex (Node.js) working set is ~1.5-2GB; 1024 OOM-killed it.
     let project_path = project
         .map(std::path::PathBuf::from)
         .or_else(|| app.project_path.clone());
 
     let mut builder = SandboxConfig::builder()
         .image(&image_name)
-        .memory_mb(1024);
+        .memory_mb(2048);
 
-    // Set agent type from agent name.
-    if let Ok(agent_type) = agent.parse::<nanosandbox::AgentType>() {
-        builder = builder.agent_type(agent_type);
-    }
-
-    // Set model if provided.
-    if let Some(m) = model {
-        builder = builder.model(m);
+    // Set agent type on panel (not on SandboxConfig builder).
+    if let Ok(agent_type) = agent.parse::<sandbox::AgentType>() {
+        panel.agent_type = Some(agent_type);
     }
 
     if let Some(n) = name {
@@ -3170,11 +4062,11 @@ fn add_agent(
     });
 }
 
-/// Add an agent panel from a resolved SandboxConfig (from sandbox.yml).
+/// Add an agent panel from a resolved AgentSandboxConfig (from sandbox.yml).
 fn add_agent_from_config(
     app: &mut App,
     key: &str,
-    mut config: SandboxConfig,
+    mut config: AgentSandboxConfig,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
     let display_name = config.sandbox.name.clone();
@@ -3214,7 +4106,7 @@ fn add_agent_from_config(
     // inject it into the config so the sandbox mounts it.
     if config.sandbox.project.is_none() {
         if let Some(ref project_path) = app.project_path {
-            config.sandbox.project = Some(nanosandbox::ProjectConfig {
+            config.sandbox.project = Some(sandbox::ProjectConfig {
                 path: project_path.clone(),
                 branch: None,
                 mount_point: "/workspace".to_string(),
@@ -3228,7 +4120,7 @@ fn add_agent_from_config(
         }
     }
 
-    // Store the config for session persistence.
+    // Store the runtime config for session persistence.
     panel.original_config = Some(config.clone());
 
     app.panels.push(panel);
@@ -3303,14 +4195,14 @@ fn add_agent_from_config(
 /// with its resume command variant so it can pick up the previous conversation.
 fn resume_session(
     app: &mut App,
-    session: &nanosandbox::session::Session,
+    session: &sandbox::session::Session,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
     for sp in &session.panels {
         let mut config = sp.config.clone();
 
         // Normalize the image in case the session was saved with a bare name.
-        config.sandbox.image = nanosandbox::config::normalize_image(&config.sandbox.image);
+        config.sandbox.image = sandbox::normalize_image(&config.sandbox.image);
 
         // Re-populate env vars from host environment (secrets are not stored in session).
         for key in &sp.env_keys {
@@ -3328,7 +4220,7 @@ fn resume_session(
         panel.auto_mode = sp.auto_mode;
         panel.permissions = sp.permissions;
         if sp.auto_mode {
-            let task = config.prompt.as_deref().unwrap_or("(no prompt)");
+            let task = sp.prompt.as_deref().unwrap_or("(no prompt)");
             panel.headless_state = Some(super::app::HeadlessState::new(task));
         }
         panel.visible = sp.visible;
@@ -3369,18 +4261,18 @@ fn resume_session(
         if let Some(ref clone_path) = sp.clone_path {
             if clone_path.exists() {
                 // Add VirtioFS mount for existing clone directly.
-                config.sandbox.mounts.push(nanosandbox::Mount::virtiofs(clone_path, "/workspace"));
+                config.sandbox.mounts.push(sandbox::Mount::virtiofs(clone_path, "/workspace"));
                 // Do NOT set config.sandbox.project — this skips setup_project_mount().
                 config.sandbox.project = None;
 
                 // Create a ProjectMount on the panel to handle suspend/teardown.
-                if let Ok(mut pm) = nanosandbox::project::ProjectMount::detect(&panel_project_path) {
+                if let Ok(mut pm) = sandbox::ProjectMount::detect(&panel_project_path) {
                     let _ = pm.resume(clone_path, sp.branches.clone());
                     panel.project_mount = Some(pm);
                 }
             } else {
                 // Clone dir is gone — create a fresh clone from the branch.
-                config.sandbox.project = Some(nanosandbox::ProjectConfig {
+                config.sandbox.project = Some(sandbox::ProjectConfig {
                     path: panel_project_path,
                     branch: sp
                         .branches
@@ -3564,6 +4456,181 @@ async fn handle_mcp_list(app: &mut App) {
     }
 }
 
+/// Handle `/mcp add <name> <command> [args]`.
+#[allow(dead_code)]
+async fn handle_mcp_add(app: &mut App, name: &str, command: &str, args: &[String]) {
+    let panel = match app.focused_panel_mut() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let sandbox = match panel.sandbox.as_ref() {
+        Some(sb) => Arc::clone(sb),
+        None => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: "No sandbox attached to this panel.".to_string(),
+            });
+            return;
+        }
+    };
+
+    let config = McpServerConfig {
+        command: command.to_string(),
+        args: args.to_vec(),
+        env: HashMap::new(),
+        enabled: true,
+    };
+
+    let body = serde_json::json!({ "name": name, "config": config }).to_string();
+    let sb = sandbox.lock().await;
+    match sb.gateway_http_post("/api/v1/mcp/servers", &body) {
+        Ok((status, _)) if status < 400 => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("MCP server '{}' added.", name),
+            });
+        }
+        Ok((status, resp)) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to add MCP server '{}' ({}): {}", name, status, resp),
+            });
+        }
+        Err(e) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to add MCP server '{}': {}", name, e),
+            });
+        }
+    }
+}
+
+/// Handle `/mcp remove <name>`.
+async fn handle_mcp_remove(app: &mut App, name: &str) {
+    let panel = match app.focused_panel_mut() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let sandbox = match panel.sandbox.as_ref() {
+        Some(sb) => Arc::clone(sb),
+        None => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: "No sandbox attached to this panel.".to_string(),
+            });
+            return;
+        }
+    };
+
+    let path = format!("/api/v1/mcp/servers/{}", name);
+    let sb = sandbox.lock().await;
+    match sb.gateway_http_delete(&path) {
+        Ok((status, _)) if status < 400 => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("MCP server '{}' removed.", name),
+            });
+        }
+        Ok((status, resp)) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to remove MCP server '{}' ({}): {}", name, status, resp),
+            });
+        }
+        Err(e) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to remove MCP server '{}': {}", name, e),
+            });
+        }
+    }
+}
+
+/// Handle `/mcp enable <name>`.
+async fn handle_mcp_enable(app: &mut App, name: &str) {
+    let panel = match app.focused_panel_mut() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let sandbox = match panel.sandbox.as_ref() {
+        Some(sb) => Arc::clone(sb),
+        None => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: "No sandbox attached to this panel.".to_string(),
+            });
+            return;
+        }
+    };
+
+    let path = format!("/api/v1/mcp/servers/{}/enable", name);
+    let sb = sandbox.lock().await;
+    match sb.gateway_http_post(&path, "{}") {
+        Ok((status, _)) if status < 400 => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("MCP server '{}' enabled.", name),
+            });
+        }
+        Ok((status, resp)) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to enable MCP server '{}' ({}): {}", name, status, resp),
+            });
+        }
+        Err(e) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to enable MCP server '{}': {}", name, e),
+            });
+        }
+    }
+}
+
+/// Handle `/mcp disable <name>`.
+async fn handle_mcp_disable(app: &mut App, name: &str) {
+    let panel = match app.focused_panel_mut() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let sandbox = match panel.sandbox.as_ref() {
+        Some(sb) => Arc::clone(sb),
+        None => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: "No sandbox attached to this panel.".to_string(),
+            });
+            return;
+        }
+    };
+
+    let path = format!("/api/v1/mcp/servers/{}/disable", name);
+    let sb = sandbox.lock().await;
+    match sb.gateway_http_post(&path, "{}") {
+        Ok((status, _)) if status < 400 => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("MCP server '{}' disabled.", name),
+            });
+        }
+        Ok((status, resp)) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to disable MCP server '{}' ({}): {}", name, status, resp),
+            });
+        }
+        Err(e) => {
+            panel.chat_history.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("Failed to disable MCP server '{}': {}", name, e),
+            });
+        }
+    }
+}
 
 // ========== Agents Registry Loader ==========
 
@@ -3582,8 +4649,8 @@ fn build_session_from_app(
     app: &super::app::App,
     project_path: &std::path::Path,
     sandbox_config_content: &str,
-) -> nanosandbox::session::Session {
-    use nanosandbox::session::{Session, SessionPanel, config_hash, SESSION_VERSION};
+) -> sandbox::session::Session {
+    use sandbox::session::{Session, SessionPanel, config_hash, SESSION_VERSION};
     use chrono::Utc;
 
     let panels: Vec<SessionPanel> = app
@@ -3637,7 +4704,7 @@ fn build_session_from_app(
 /// Merge registry resolution (full agent or skills-only) into sandbox config for bootstrap.
 fn merge_resolved_agent_into_config(
     config: &mut SandboxConfig,
-    mut resolved: nanosandbox::ResolvedAgentConfig,
+    mut resolved: sandbox::ResolvedAgentConfig,
 ) {
     // Merge: sandbox.yml MCPs override registry MCPs
     for (name, mcp) in &config.mcp_servers {
@@ -3651,8 +4718,8 @@ fn merge_resolved_agent_into_config(
     config.resolved_agent = Some(resolved);
 }
 
-fn load_agents_registry() -> Option<nanosandbox::AgentsRegistryClient> {
-    use nanosandbox::AgentsRegistryClient;
+fn load_agents_registry() -> Option<sandbox::AgentsRegistryClient> {
+    use sandbox::AgentsRegistryClient;
 
     // 1. Env var override
     if let Ok(path) = std::env::var("NANOSB_REGISTRY_PATH") {

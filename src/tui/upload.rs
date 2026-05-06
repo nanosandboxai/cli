@@ -102,6 +102,7 @@ impl russh::client::Handler for UploadSshHandler {
 ///
 /// Returns the number of bytes written.
 pub async fn ssh_upload(
+    ssh_host: &str,
     ssh_port: u16,
     key_path: &Path,
     local_data: &[u8],
@@ -121,7 +122,7 @@ pub async fn ssh_upload(
     // Connect.
     let config = Arc::new(russh::client::Config::default());
     let mut session =
-        russh::client::connect(config, format!("127.0.0.1:{}", ssh_port), UploadSshHandler)
+        russh::client::connect(config, format!("{}:{}", ssh_host, ssh_port), UploadSshHandler)
             .await
             .map_err(|e| format!("SSH connect: {}", e))?;
 
@@ -204,6 +205,7 @@ pub async fn ssh_upload(
 /// Reads the file from disk, validates size, and uploads via SFTP.
 /// Sends `UploadComplete` or `UploadFailed` events back to the TUI.
 pub fn spawn_file_upload(
+    ssh_host: String,
     ssh_port: u16,
     key_path: PathBuf,
     host_path: PathBuf,
@@ -247,7 +249,7 @@ pub fn spawn_file_upload(
             filename: filename.clone(),
         });
 
-        match ssh_upload(ssh_port, &key_path, &data, &remote_path).await {
+        match ssh_upload(&ssh_host, ssh_port, &key_path, &data, &remote_path).await {
             Ok(size) => {
                 let _ = tx.send(AppEvent::UploadComplete {
                     panel_idx,
@@ -268,6 +270,7 @@ pub fn spawn_file_upload(
 
 /// Spawn an async upload task for raw bytes (e.g. clipboard image).
 pub fn spawn_bytes_upload(
+    ssh_host: String,
     ssh_port: u16,
     key_path: PathBuf,
     data: Vec<u8>,
@@ -296,7 +299,7 @@ pub fn spawn_bytes_upload(
             filename: filename.clone(),
         });
 
-        match ssh_upload(ssh_port, &key_path, &data, &remote_path).await {
+        match ssh_upload(&ssh_host, ssh_port, &key_path, &data, &remote_path).await {
             Ok(size) => {
                 let _ = tx.send(AppEvent::UploadComplete {
                     panel_idx,

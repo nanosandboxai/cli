@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use nanosandbox::AgentsRegistryClient;
-use nanosandbox::ImageManager;
-use nanosandbox::Sandbox;
+use sandbox::AgentsRegistryClient;
+use sandbox::ImageManager;
+use sandbox::Sandbox;
 
 use ratatui::layout::Rect;
 
@@ -172,8 +172,6 @@ pub struct HeadlessState {
     pub agent_text: String,
     /// Tool call log entries.
     pub tool_calls: Vec<HeadlessToolCall>,
-    /// Raw NDJSON lines accumulated (for fallback display).
-    pub raw_lines: Vec<String>,
     /// Partial line buffer for incomplete NDJSON lines spanning SSH chunks.
     pub line_buffer: String,
     /// Scroll offset for the output area.
@@ -182,6 +180,8 @@ pub struct HeadlessState {
     pub auto_scroll: bool,
     /// Start time for elapsed display.
     pub started_at: std::time::Instant,
+    /// Set when the task finishes (completed/error). Freezes the elapsed timer.
+    pub completed_at: Option<std::time::Instant>,
 }
 
 impl HeadlessState {
@@ -191,11 +191,27 @@ impl HeadlessState {
             status: "starting".to_string(),
             agent_text: String::new(),
             tool_calls: Vec::new(),
-            raw_lines: Vec::new(),
             line_buffer: String::new(),
             scroll_offset: 0,
             auto_scroll: true,
             started_at: std::time::Instant::now(),
+            completed_at: None,
+        }
+    }
+
+    /// Elapsed time since task start. Freezes at completion.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.completed_at
+            .unwrap_or_else(std::time::Instant::now)
+            .duration_since(self.started_at)
+    }
+
+    /// Mark the task as finished with the given status ("completed" or "error").
+    /// Freezes the elapsed timer on the first call; idempotent afterwards.
+    pub fn finish(&mut self, status: &str) {
+        self.status = status.to_string();
+        if self.completed_at.is_none() {
+            self.completed_at = Some(std::time::Instant::now());
         }
     }
 }
@@ -288,7 +304,7 @@ pub struct AgentPanel {
     /// Key: dedup key, Value: (full URL, timestamp of last growth).
     pub pending_urls: HashMap<String, (String, std::time::Instant)>,
     /// Active project mount for this panel's sandbox.
-    pub project_mount: Option<nanosandbox::project::ProjectMount>,
+    pub project_mount: Option<sandbox::ProjectMount>,
     /// Last known HEAD SHA in the clone (for commit auto-sync detection).
     pub last_known_head: Option<String>,
     /// Initial HEAD SHA of the clone at creation (base for committed files diff).
@@ -317,15 +333,15 @@ pub struct AgentPanel {
     /// Whether auto/headless mode is enabled for this panel's agent.
     pub auto_mode: bool,
     /// Agent permission level.
-    pub permissions: nanosandbox::Permissions,
+    pub permissions: sandbox::Permissions,
     /// Agent type (source of truth for CLI command + config format).
-    pub agent_type: Option<nanosandbox::AgentType>,
+    pub agent_type: Option<sandbox::AgentType>,
     /// Model identifier for CLI flag generation (e.g., "claude-sonnet-4-5-20250929").
     pub model: Option<String>,
     /// Headless mode state (NDJSON parsing and structured output).
     pub headless_state: Option<HeadlessState>,
-    /// Original SandboxConfig used to create this panel (for session persistence).
-    pub original_config: Option<nanosandbox::SandboxConfig>,
+    /// Original AgentSandboxConfig used to create this panel (for session persistence).
+    pub original_config: Option<sandbox::AgentSandboxConfig>,
     /// Whether this panel was resumed from a previous session (agent uses resume command).
     pub is_resumed: bool,
     /// Whether the user sent at least one keystroke to this agent's terminal.
@@ -368,7 +384,7 @@ impl AgentPanel {
             reconnecting: false,
             visible: true,
             auto_mode: false,
-            permissions: nanosandbox::Permissions::Default,
+            permissions: sandbox::Permissions::Default,
             agent_type: None,
             model: None,
             headless_state: None,
@@ -425,7 +441,7 @@ pub struct App {
     /// Tick counter for throttling sidebar refresh.
     pub sidebar_tick_counter: u8,
     /// Persistent user settings (loaded from ~/.nanosandbox/config.toml).
-    pub settings: nanosandbox::settings::UserSettings,
+    pub settings: sandbox::settings::UserSettings,
     /// Temporary status message shown on the status bar (message, remaining ticks).
     pub status_message: Option<(String, u8)>,
     /// Auto-dismiss countdown for system message popup (remaining ticks, None = manual dismiss).
@@ -462,7 +478,7 @@ impl Default for App {
 impl App {
     /// Create a new application with default state.
     pub fn new() -> Self {
-        let settings = nanosandbox::settings::UserSettings::load();
+        let settings = sandbox::settings::UserSettings::load();
         let (theme, theme_name) = super::theme::Theme::resolve(&settings.ui.theme);
         Self {
             panels: Vec::new(),

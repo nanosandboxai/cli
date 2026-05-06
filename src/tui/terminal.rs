@@ -141,6 +141,7 @@ pub struct SshTerminalHandle {
     pub resize_tx: mpsc::UnboundedSender<(u16, u16)>,
 }
 
+
 /// Minimal russh client handler.
 ///
 /// Accepts all server keys since we only connect to localhost sandboxes
@@ -170,6 +171,7 @@ impl russh::client::Handler for SshHandler {
 /// Returns an `SshTerminalHandle` for the caller to send keystrokes and resize events.
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_ssh(
+    ssh_host: String,
     ssh_port: u16,
     key_path: PathBuf,
     cols: u16,
@@ -177,7 +179,7 @@ pub async fn connect_ssh(
     agent_name: &str,
     env: &HashMap<String, String>,
     workdir: Option<&str>,
-    permissions: nanosandbox::Permissions,
+    permissions: sandbox::Permissions,
     auto_mode: bool,
     prompt: Option<&str>,
     is_resumed: bool,
@@ -198,7 +200,7 @@ pub async fn connect_ssh(
     let config = std::sync::Arc::new(config);
     let sh = SshHandler;
     let mut session =
-        russh::client::connect(config, format!("127.0.0.1:{}", ssh_port), sh).await?;
+        russh::client::connect(config, format!("{}:{}", ssh_host, ssh_port), sh).await?;
 
     // Authenticate
     let auth_result = session
@@ -217,30 +219,9 @@ pub async fn connect_ssh(
     for (key, val) in env {
         env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
-    let effective_perms = permissions.effective(auto_mode);
-
-    // Goose permissions via GOOSE_MODE env var.
-    if agent_name == "goose" {
-        let goose_mode = match effective_perms {
-            nanosandbox::Permissions::AllowAll => "auto",
-            nanosandbox::Permissions::AcceptEdits => "smart_approve",
-            nanosandbox::Permissions::Default => "smart_approve",
-        };
-        env_parts.push(format!("export GOOSE_MODE='{}'", goose_mode));
-        // Goose uses env var for model selection instead of CLI flag.
-        if let Some(m) = model {
-            env_parts.push(format!("export GOOSE_DEFAULT_MODEL='{}'", m));
-        }
-    }
-
-    // Set prompt env var for headless agents.
-    if auto_mode {
-        if let Some(p) = prompt {
-            env_parts.push(format!(
-                "export NANOSB_PROMPT='{}'",
-                p.replace('\'', "'\\''")
-            ));
-        }
+    // Agent-specific env vars (Goose mode, prompt, etc.)
+    for (key, val) in agent_env_vars(agent_name, permissions, auto_mode, model, prompt) {
+        env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
 
     let agent_cmd = agent_cli_command(agent_name, permissions, auto_mode, is_resumed, model);
@@ -307,12 +288,20 @@ pub async fn connect_ssh(
             }
 
             let _ = writer.write_all(init_commands.as_bytes()).await;
+            let _ = writer.flush().await;
 
             // Then enter the write loop: forward keystrokes + handle resize
             loop {
                 tokio::select! {
                     Some(data) = write_rx.recv() => {
                         if writer.write_all(&data).await.is_err() {
+                            break;
+                        }
+                        // Flush immediately — without this, small writes (single
+                        // keystrokes) can get stuck in russh's internal buffer
+                        // and the remote shell never sees them, causing the
+                        // session to appear frozen.
+                        if writer.flush().await.is_err() {
                             break;
                         }
                     }
@@ -381,6 +370,52 @@ pub async fn connect_ssh(
     })
 }
 
+impl SshTerminalHandle {
+    /// Create a no-op handle for headless gateway exec (no SSH session).
+    pub fn noop() -> Self {
+        let (write_tx, _) = mpsc::unbounded_channel();
+        let (resize_tx, _) = mpsc::unbounded_channel();
+        Self { write_tx, resize_tx }
+    }
+}
+
+/// Build agent-specific environment variables (e.g. Goose mode, prompt).
+///
+/// Returns a map of extra env vars that both the SSH and gateway exec paths
+/// need to set for the agent to work correctly.
+pub(super) fn agent_env_vars(
+    agent_name: &str,
+    permissions: sandbox::Permissions,
+    auto_mode: bool,
+    model: Option<&str>,
+    prompt: Option<&str>,
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    let effective = permissions.effective(auto_mode);
+
+    // Goose permissions via GOOSE_MODE env var.
+    if agent_name == "goose" {
+        let goose_mode = match effective {
+            sandbox::Permissions::AllowAll => "auto",
+            sandbox::Permissions::AcceptEdits => "smart_approve",
+            sandbox::Permissions::Default => "smart_approve",
+        };
+        vars.insert("GOOSE_MODE".to_string(), goose_mode.to_string());
+        if let Some(m) = model {
+            vars.insert("GOOSE_DEFAULT_MODEL".to_string(), m.to_string());
+        }
+    }
+
+    // Prompt env var for headless agents.
+    if auto_mode {
+        if let Some(p) = prompt {
+            vars.insert("NANOSB_PROMPT".to_string(), p.to_string());
+        }
+    }
+
+    vars
+}
+
 /// Map agent name to the CLI command to auto-launch after SSH connection.
 ///
 /// When `auto_mode` is true (headless), the agent is launched in non-interactive
@@ -392,14 +427,14 @@ pub async fn connect_ssh(
 ///
 /// When `is_resumed` is true, uses the agent's session resume command so it
 /// picks up previous conversation context from `/workspace/.nanosb-state/`.
-fn agent_cli_command(
+pub(super) fn agent_cli_command(
     agent_name: &str,
-    permissions: nanosandbox::Permissions,
+    permissions: sandbox::Permissions,
     auto_mode: bool,
     is_resumed: bool,
     model: Option<&str>,
 ) -> Option<String> {
-    use nanosandbox::Permissions;
+    use sandbox::Permissions;
     let effective = permissions.effective(auto_mode);
 
     match agent_name {
@@ -778,13 +813,21 @@ pub fn extract_urls_from_screen(screen: &vt100::Screen) -> Vec<String> {
 /// Only URLs matching these domains are auto-opened in the host browser.
 /// This prevents random URLs printed by agents from spawning browser tabs.
 const AUTH_DOMAINS: &[&str] = &[
-    "auth.openai.com",          // OpenAI Codex CLI
-    "claude.ai",                // Claude Code CLI
+    // Claude Code
+    "claude.ai",                // Claude Code CLI (OAuth authorize)
     "auth.anthropic.com",       // Claude Code (token refresh)
     "console.anthropic.com",    // Claude Code (console auth)
-    "authenticator.cursor.sh",  // Cursor IDE
-    "cursor.sh",                // Cursor IDE (device flow)
-    "www.cursor.com",           // Cursor IDE (alt)
+    // OpenAI Codex CLI
+    "auth.openai.com",          // Codex CLI (OAuth authorize)
+    "login.live.com",           // Codex CLI (Microsoft SSO)
+    "login.microsoftonline.com",// Codex CLI (Azure AD SSO)
+    // Cursor
+    "authenticator.cursor.sh",  // Cursor IDE (authenticator)
+    "cursor.sh",                // Cursor IDE (legacy domain)
+    "cursor.com",               // Cursor IDE (device flow sign-in)
+    "www.cursor.com",           // Cursor IDE (www redirect)
+    // GitHub (SSO provider for multiple agents)
+    "github.com",               // GitHub device flow (Codex, Copilot)
 ];
 
 /// Check whether a URL is a known OAuth authentication URL.
@@ -806,6 +849,36 @@ pub fn is_auth_url(url: &str) -> bool {
     AUTH_DOMAINS.iter().any(|d| host.eq_ignore_ascii_case(d))
 }
 
+/// Device-code flow path segments.
+///
+/// Device-code flows (GitHub, Cursor) print a URL without query parameters
+/// and display the user code separately.  These URLs are complete as-is and
+/// should not be rejected by the `?`-query-param filter.
+const DEVICE_CODE_PATHS: &[&str] = &[
+    "/login/device",    // GitHub device flow
+    "/loginlink",       // Cursor device flow
+    "/device",          // Generic device code
+];
+
+/// Check whether a URL is a device-code flow URL (no query params needed).
+pub fn is_device_code_url(url: &str) -> bool {
+    let after_scheme = match url.strip_prefix("https://") {
+        Some(s) => s,
+        None => return false,
+    };
+    // Extract path (everything after the host, before ? or #).
+    let after_host = match after_scheme.find('/') {
+        Some(pos) => &after_scheme[pos..],
+        None => return false,
+    };
+    let path = after_host
+        .split(|c: char| c == '?' || c == '#')
+        .next()
+        .unwrap_or(after_host);
+    DEVICE_CODE_PATHS
+        .iter()
+        .any(|p| path.eq_ignore_ascii_case(p) || path.starts_with(&format!("{}/", p)))
+}
 
 /// Extract the `redirect_uri` localhost port from an OAuth URL.
 ///
@@ -893,16 +966,36 @@ pub fn url_dedup_key(url: &str) -> String {
 /// Open a URL in the host machine's default browser.
 pub fn open_url_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(not(target_os = "macos"))]
-    let cmd = "xdg-open";
-
-    let _ = std::process::Command::new(cmd)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    {
+        let _ = std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Use rundll32 to open URLs — avoids cmd.exe shell interpretation that
+        // breaks OAuth URLs containing '&' (command separator) and '%' (env var
+        // expansion).  The URL is passed as a single process argument, so all
+        // special characters are preserved.
+        let _ = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
 
 #[cfg(test)]
@@ -970,7 +1063,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_default_perms() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         assert_eq!(
             agent_cli_command("claude", Permissions::Default, false, false, None),
             Some("claude".to_string()),
@@ -992,7 +1085,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_allow_all_interactive() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::AllowAll, false, false, None).unwrap();
         assert!(cmd.contains("--dangerously-skip-permissions"));
         assert!(cmd.contains("--mcp-config"));
@@ -1010,7 +1103,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_accept_edits() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::AcceptEdits, false, false, None).unwrap();
         assert!(cmd.contains("--permission-mode"));
         assert!(cmd.contains("acceptEdits"));
@@ -1026,7 +1119,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_headless() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         // Headless mode should use -p/exec + stream-json + AllowAll
         let cmd = agent_cli_command("claude", Permissions::Default, true, false, None).unwrap();
         assert!(cmd.contains("-p"));
@@ -1053,7 +1146,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_resumed_interactive() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         assert_eq!(
             agent_cli_command("claude", Permissions::Default, false, true, None),
             Some("claude -c".to_string()),
@@ -1072,7 +1165,7 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_resumed_allow_all() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::AllowAll, false, true, None).unwrap();
         assert!(cmd.contains("-c"));
         assert!(cmd.contains("--dangerously-skip-permissions"));
@@ -1088,21 +1181,21 @@ mod tests {
 
     #[test]
     fn test_agent_cli_command_with_model_claude() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::Default, false, false, Some("claude-sonnet-4-5-20250929")).unwrap();
         assert!(cmd.contains("--model claude-sonnet-4-5-20250929"));
     }
 
     #[test]
     fn test_agent_cli_command_with_model_codex() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("codex", Permissions::Default, false, false, Some("o4-mini")).unwrap();
         assert!(cmd.contains("--model o4-mini"));
     }
 
     #[test]
     fn test_agent_cli_command_with_model_cursor() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("cursor", Permissions::Default, false, false, Some("sonnet-4.6")).unwrap();
         assert!(cmd.contains("--model sonnet-4.6"));
     }
@@ -1110,14 +1203,14 @@ mod tests {
     #[test]
     fn test_agent_cli_command_goose_no_model_flag() {
         // Goose uses env var, not CLI flag — model should NOT appear in the command string.
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("goose", Permissions::Default, false, false, Some("claude-sonnet-4-5-20250929")).unwrap();
         assert!(!cmd.contains("--model"));
     }
 
     #[test]
     fn test_agent_cli_command_model_in_headless() {
-        use nanosandbox::Permissions;
+        use sandbox::Permissions;
         let cmd = agent_cli_command("claude", Permissions::Default, true, false, Some("claude-opus-4-20250514")).unwrap();
         assert!(cmd.contains("--model claude-opus-4-20250514"));
         assert!(cmd.contains("-p"));
@@ -1376,5 +1469,30 @@ mod tests {
                 domain
             );
         }
+    }
+
+    #[test]
+    fn test_is_auth_url_cursor_com() {
+        assert!(is_auth_url("https://cursor.com/loginlink?user_code=ABCD-1234"));
+        assert!(is_auth_url("https://www.cursor.com/auth?client_id=123"));
+        assert!(is_auth_url("https://authenticator.cursor.sh/authorize?code=abc"));
+        assert!(is_auth_url("https://cursor.sh/device?code=xyz"));
+        // Non-cursor domain should not match.
+        assert!(!is_auth_url("https://evil-cursor.com/login"));
+    }
+
+    #[test]
+    fn test_is_device_code_url() {
+        assert!(is_device_code_url("https://github.com/login/device"));
+        assert!(is_device_code_url("https://cursor.com/loginlink"));
+        assert!(is_device_code_url("https://example.com/device"));
+        assert!(is_device_code_url("https://example.com/login/device/"));
+        // URLs with query params still match.
+        assert!(is_device_code_url("https://cursor.com/loginlink?user_code=ABCD"));
+        // Non-device paths should not match.
+        assert!(!is_device_code_url("https://cursor.com/settings"));
+        assert!(!is_device_code_url("https://cursor.com/"));
+        // HTTP not supported.
+        assert!(!is_device_code_url("http://cursor.com/loginlink"));
     }
 }

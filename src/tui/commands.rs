@@ -23,6 +23,8 @@ pub enum Command {
         agent: String,
         /// Optional custom container image.
         image: Option<String>,
+        /// Optional image tag (e.g., "rc11", "v1.0"). Defaults to "latest".
+        tag: Option<String>,
         /// Optional project path to mount.
         project: Option<String>,
         /// Optional branch name for the project clone.
@@ -246,9 +248,10 @@ fn parse_add(parts: &[&str]) -> ParseResult {
         Some(a) => *a,
         None => {
             return ParseResult::Err(format!(
-                "Usage: /add <agent> [--model <model>] [--auto-mode -p <prompt>] [--image <image>] [--project <path>] [--branch <name>] [--name <name>]\n\
+                "Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--image <image>] [--project <path>] [--branch <name>] [--name <name>]\n\
                  Supported agents: {}\n\
                  Example: /add claude\n\
+                 With tag: /add claude --tag rc11\n\
                  With model: /add claude --model claude-sonnet-4-5-20250929\n\
                  Headless: /add claude --auto-mode -p \"list files\"",
                 SUPPORTED_AGENTS.join(", "),
@@ -257,6 +260,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
     };
 
     let mut image = None;
+    let mut tag = None;
     let mut project = None;
     let mut branch = None;
     let mut name = None;
@@ -328,6 +332,16 @@ fn parse_add(parts: &[&str]) -> ParseResult {
                     ),
                 }
             }
+            "--tag" => {
+                match parts.get(i + 1) {
+                    Some(v) => { tag = Some(v.to_string()); i += 2; }
+                    None => return ParseResult::Err(
+                        "--tag requires a value\n\
+                         Usage: /add <agent> --tag <version>\n\
+                         Example: /add claude --tag rc11".to_string(),
+                    ),
+                }
+            }
             "--model" => {
                 match parts.get(i + 1) {
                     Some(v) => { model = Some(v.to_string()); i += 2; }
@@ -361,7 +375,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
             other => {
                 return ParseResult::Err(format!(
                     "Unknown option: {}\n\
-                     Usage: /add <agent> [--model <model>] [--auto-mode -p <prompt>] [--image <image>] [--project <path>] [--branch <name>] [--name <name>]",
+                     Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--image <image>] [--project <path>] [--branch <name>] [--name <name>]",
                     other,
                 ));
             }
@@ -390,6 +404,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
     ParseResult::Ok(Command::AddAgent {
         agent: agent.to_string(),
         image,
+        tag,
         project,
         branch,
         name,
@@ -700,6 +715,7 @@ mod tests {
             Some(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,
@@ -717,6 +733,7 @@ mod tests {
             Some(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: Some("my-registry/claude:v2".to_string()),
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,
@@ -812,6 +829,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "myagent".to_string(),
                 image: Some("foo/bar:latest".to_string()),
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,
@@ -996,6 +1014,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
+                tag: None,
                 project: Some("/tmp".to_string()),
                 branch: None,
                 name: None,
@@ -1013,6 +1032,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
+                tag: None,
                 project: Some("/tmp".to_string()),
                 branch: Some("feat/auth".to_string()),
                 name: None,
@@ -1049,6 +1069,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,
@@ -1067,6 +1088,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,
@@ -1095,6 +1117,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "codex".to_string(),
                 image: None,
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,
@@ -1320,6 +1343,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,
@@ -1348,6 +1372,7 @@ mod tests {
             ParseResult::Ok(Command::AddAgent {
                 agent: "claude".to_string(),
                 image: None,
+                tag: None,
                 project: None,
                 branch: None,
                 name: None,

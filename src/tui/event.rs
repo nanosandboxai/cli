@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ratatui::crossterm::event::{self, Event as CrosstermEvent};
 use tokio::sync::{mpsc, Mutex};
 
-use nanosandbox::Sandbox;
+use sandbox::Sandbox;
 
 /// Events that the TUI application can handle.
 pub enum AppEvent {
@@ -29,7 +29,7 @@ pub enum AppEvent {
         /// Short sandbox identifier for display.
         short_id: String,
         /// Project mount transferred from the sandbox (if any).
-        project_mount: Option<nanosandbox::project::ProjectMount>,
+        project_mount: Option<sandbox::ProjectMount>,
     },
     /// Sandbox creation or startup failed.
     SandboxFailed {
@@ -98,7 +98,19 @@ pub fn spawn_terminal_event_reader(tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         loop {
             // Blocking read wrapped in spawn_blocking to avoid blocking the async runtime.
-            let evt = tokio::task::spawn_blocking(event::read).await;
+            //
+            // On Windows, crossterm's event::read() does a save→modify→read→restore
+            // cycle on the console input mode. The "restore" undoes our custom flags
+            // (ENABLE_MOUSE_INPUT, ~QUICK_EDIT, ~PROCESSED_INPUT) every time. We
+            // re-apply them inside the spawn_blocking closure, right after read()
+            // returns, so the corrected mode is what crossterm saves on the NEXT call.
+            let evt = tokio::task::spawn_blocking(|| {
+                let result = event::read();
+                #[cfg(target_os = "windows")]
+                super::run::fix_windows_console_mode();
+                result
+            })
+            .await;
 
             match evt {
                 Ok(Ok(crossterm_event)) => {

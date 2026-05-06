@@ -1092,8 +1092,8 @@ fn render_headless_panel(
         }
     };
 
-    // Compute elapsed time.
-    let elapsed = state.started_at.elapsed();
+    // Compute elapsed time. Freezes when the task finishes.
+    let elapsed = state.elapsed();
     let mins = elapsed.as_secs() / 60;
     let secs = elapsed.as_secs() % 60;
     let elapsed_str = format!("{mins}:{secs:02}");
@@ -1206,9 +1206,6 @@ fn render_headless_panel(
 
     let text = if !state.agent_text.is_empty() {
         state.agent_text.clone()
-    } else if !state.raw_lines.is_empty() {
-        // Events received but no text yet — agent is initializing
-        "Agent initializing...".to_string()
     } else {
         "Waiting for agent output...".to_string()
     };
