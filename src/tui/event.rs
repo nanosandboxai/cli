@@ -32,9 +32,6 @@ pub enum AppEvent {
         project_mount: Option<sandbox::ProjectMount>,
         /// Whether secrets were successfully injected into this sandbox.
         secrets_active: bool,
-        /// Decrypted secret key-value pairs from the encrypted pipeline.
-        /// Injected as process env vars at agent launch — never written to disk or shell history.
-        secrets_env: std::collections::HashMap<String, String>,
     },
     /// Sandbox creation or startup failed.
     SandboxFailed {

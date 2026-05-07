@@ -348,12 +348,7 @@ pub struct AgentPanel {
     /// Used to decide whether resume flags (--continue) are appropriate on next session load.
     pub had_interaction: bool,
     /// Whether secrets were injected into this sandbox via the encrypted pipeline.
-    /// When true, secret-like env vars (API keys, tokens) are filtered from the SSH env.
     pub secrets_active: bool,
-    /// Secret key-value pairs from the encrypted pipeline, injected as process env at launch.
-    /// These never touch disk or shell — only set via process env at spawn time.
-    #[allow(dead_code)]
-    pub secrets_env: HashMap<String, String>,
     /// Overlay notification shown on top of the terminal (message, is_error, remaining ticks).
     /// Replaces previous notification; auto-dismissed after countdown reaches 0.
     pub notification: Option<(String, bool, u8)>,
@@ -399,7 +394,6 @@ impl AgentPanel {
             is_resumed: false,
             had_interaction: false,
             secrets_active: false,
-            secrets_env: HashMap::new(),
             notification: None,
         }
     }
