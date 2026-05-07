@@ -1380,6 +1380,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "chrono",
+ "rand 0.8.5",
+ "runtime",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3457,10 +3475,8 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "anyhow",
  "async-trait",
- "base64 0.22.1",
  "chrono",
  "dirs",
  "docker_credential",
@@ -3471,7 +3487,6 @@ dependencies = [
  "log",
  "oci-distribution",
  "openssl",
- "rand 0.8.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3480,7 +3495,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -3639,14 +3653,12 @@ dependencies = [
 name = "sandbox"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "anyhow",
- "base64 0.22.1",
  "chrono",
  "dirs",
+ "gateway",
  "git2",
  "glob",
- "rand 0.8.5",
  "runtime",
  "serde",
  "serde_json",
@@ -3658,7 +3670,6 @@ dependencies = [
  "tracing",
  "unicode-width 0.2.0",
  "uuid",
- "x25519-dalek",
 ]
 
 [[package]]

@@ -1075,30 +1075,34 @@ async fn spawn_gateway_exec(
         let tx_data = tx.clone();
         let chunk_counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let chunk_counter_cb = chunk_counter.clone();
-        sb.exec_stream_with_options(
-            "sh",
-            &["-c", &shell_cmd],
-            exec_opts,
-            move |chunk| {
-                // Gateway SSE events don't include trailing newlines, but the
-                // headless NDJSON parser splits on \n. Append newline to each
-                // chunk (same as `nanosb exec` in main.rs).
-                let n = chunk_counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if n == 1 || n % 20 == 0 {
-                    let preview: String = chunk.data.chars().take(200).collect();
-                    tracing::info!(
-                        "[spawn_gateway_exec] chunk #{} (stream={:?}): {}",
-                        n, chunk.stream, preview
-                    );
-                }
-                let mut data = chunk.data.into_bytes();
-                data.push(b'\n');
-                let _ = tx_data.send(AppEvent::TerminalData {
-                    panel_idx,
-                    data,
-                });
-            },
-        ).await
+        let gw_result = match sb.gateway() {
+            Ok(gw) => gw.exec_stream_with_options(
+                "sh",
+                &["-c", &shell_cmd],
+                exec_opts,
+                move |chunk| {
+                    // Gateway SSE events don't include trailing newlines, but the
+                    // headless NDJSON parser splits on \n. Append newline to each
+                    // chunk (same as `nanosb exec` in main.rs).
+                    let n = chunk_counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n == 1 || n % 20 == 0 {
+                        let preview: String = chunk.data.chars().take(200).collect();
+                        tracing::info!(
+                            "[spawn_gateway_exec] chunk #{} (stream={:?}): {}",
+                            n, chunk.stream, preview
+                        );
+                    }
+                    let mut data = chunk.data.into_bytes();
+                    data.push(b'\n');
+                    let _ = tx_data.send(AppEvent::TerminalData {
+                        panel_idx,
+                        data,
+                    });
+                },
+            ).await,
+            Err(e) => Err(e),
+        };
+        gw_result
     };
 
     match exec_result {
@@ -4664,7 +4668,8 @@ async fn handle_mcp_add(app: &mut App, name: &str, command: &str, args: &[String
 
     let body = serde_json::json!({ "name": name, "config": config }).to_string();
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post("/api/v1/mcp/servers", &body) {
+    let result = sb.gateway().and_then(|gw| gw.http_post("/api/v1/mcp/servers", &body));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -4706,7 +4711,8 @@ async fn handle_mcp_remove(app: &mut App, name: &str) {
 
     let path = format!("/api/v1/mcp/servers/{}", name);
     let sb = sandbox.lock().await;
-    match sb.gateway_http_delete(&path) {
+    let result = sb.gateway().and_then(|gw| gw.http_delete(&path));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -4748,7 +4754,8 @@ async fn handle_mcp_enable(app: &mut App, name: &str) {
 
     let path = format!("/api/v1/mcp/servers/{}/enable", name);
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post(&path, "{}") {
+    let result = sb.gateway().and_then(|gw| gw.http_post(&path, "{}"));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -4790,7 +4797,8 @@ async fn handle_mcp_disable(app: &mut App, name: &str) {
 
     let path = format!("/api/v1/mcp/servers/{}/disable", name);
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post(&path, "{}") {
+    let result = sb.gateway().and_then(|gw| gw.http_post(&path, "{}"));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -5328,7 +5336,7 @@ fn send_encrypted_env(
     secrets_config: Option<&sandbox::SecretSource>,
     config_dir: &std::path::Path,
     clone_path: &Option<std::path::PathBuf>,
-) -> anyhow::Result<runtime::SecretManifest> {
+) -> anyhow::Result<sandbox::SecretManifest> {
     let mut payload = sandbox::secrets::payload::SecretPayload::new();
 
     // 1. If secrets: config exists, collect from SOPS file and host env keys
@@ -5356,22 +5364,23 @@ fn send_encrypted_env(
     }
 
     // 2. Add ALL config.env vars to the payload
-    let runtime_sb = &mut ***sandbox;
-    for (k, v) in &runtime_sb.config().env {
+    for (k, v) in &(***sandbox).config().env {
         if !payload.secrets.contains_key(k) {
             payload.add_secret(k.clone(), v.clone());
         }
     }
 
     if payload.secrets.is_empty() && payload.intercepted_files.is_empty() {
-        return Ok(runtime::SecretManifest {
+        return Ok(sandbox::SecretManifest {
             secrets: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
         });
     }
 
-    // 3. Encrypt using the RUNTIME's crypto (same crate as decrypt — no version mismatch)
-    let pubkey_b64 = runtime_sb.secrets_pubkey()
+    // 3. Encrypt using the gateway's crypto (same crate as decrypt — no version mismatch)
+    let pubkey_b64 = (**sandbox).gateway()
+        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+        .secrets_pubkey()
         .ok_or_else(|| anyhow::anyhow!("Gateway secrets pubkey not available"))?;
 
     let pubkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
@@ -5383,20 +5392,22 @@ fn send_encrypted_env(
     let plaintext = payload.to_json_bytes()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let encrypted = runtime::encrypt_payload(&plaintext, &pubkey_bytes)
+    let encrypted = sandbox::encrypt_payload(&plaintext, &pubkey_bytes)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let encrypted_json = serde_json::to_string(&encrypted)?;
 
-    // 4. Send encrypted payload → runtime decrypts → stores in secrets_store + POSTs to gateway
-    let manifest = runtime_sb.send_secrets(&encrypted_json)
+    // 4. Send encrypted payload → gateway decrypts → stores in secrets_store
+    let manifest = (**sandbox).gateway_mut()
+        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+        .send_secrets(&encrypted_json)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     Ok(manifest)
 }
 
 /// Generate secrets access instructions for agent config files.
-fn secrets_bootstrap_content(manifest: &runtime::SecretManifest) -> String {
+fn secrets_bootstrap_content(manifest: &sandbox::SecretManifest) -> String {
     let mut lines = Vec::new();
     lines.push("## Secrets Access".to_string());
     lines.push(String::new());
@@ -5443,23 +5454,29 @@ async fn write_secrets_bootstrap(
     };
 
     // Read existing content (if any) and prepend
-    let existing = sandbox
-        .exec_with_options("cat", &[file_path], Default::default())
-        .await
-        .map(|r| r.stdout)
-        .unwrap_or_default();
+    let existing = match (**sandbox).gateway() {
+        Ok(gw) => gw.exec_with_options("cat", &[file_path], Default::default())
+            .await
+            .map(|r| r.stdout)
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
 
     let new_content = format!("{}\n\n{}", content, existing);
     let escaped = new_content.replace('\'', "'\\''");
 
-    sandbox
-        .exec_with_options(
-            "sh",
-            &["-c", &format!("mkdir -p $(dirname '{}') && printf '%s' '{}' > '{}'", file_path, escaped, file_path)],
-            Default::default(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", file_path, e))?;
+    let write_cmd = format!(
+        "mkdir -p $(dirname '{}') && printf '%s' '{}' > '{}'",
+        file_path, escaped, file_path
+    );
+    match (**sandbox).gateway() {
+        Ok(gw) => {
+            gw.exec_with_options("sh", &["-c", &write_cmd], Default::default())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", file_path, e))?;
+        }
+        Err(e) => return Err(anyhow::anyhow!("Gateway not available: {}", e)),
+    }
 
     tracing::info!("Wrote secrets bootstrap to {}", file_path);
     Ok(())

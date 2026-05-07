@@ -802,7 +802,9 @@ mod cli {
                 let result = {
                     let mut guard = shared.lock().await;
                     let sb = guard.as_mut().expect("sandbox exists");
-                    sb.exec(cmd, &args).await?
+                    sb.gateway()
+                        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+                        .exec(cmd, &args).await?
                 };
 
                 match format {
@@ -838,23 +840,25 @@ mod cli {
                 let exit_code = {
                     let mut guard = shared.lock().await;
                     let sb = guard.as_mut().expect("sandbox exists");
-                    sb.exec_stream(cmd, &args, |chunk| {
-                        match chunk.stream {
-                            Stream::Stdout => {
-                                let data = format!("{}\n", chunk.data);
-                                let stdout = std::io::stdout();
-                                let mut handle = stdout.lock();
-                                write_all_retry(&mut handle, data.as_bytes());
+                    sb.gateway()
+                        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+                        .exec_stream(cmd, &args, |chunk| {
+                            match chunk.stream {
+                                Stream::Stdout => {
+                                    let data = format!("{}\n", chunk.data);
+                                    let stdout = std::io::stdout();
+                                    let mut handle = stdout.lock();
+                                    write_all_retry(&mut handle, data.as_bytes());
+                                }
+                                Stream::Stderr => {
+                                    let data = format!("{}\n", chunk.data);
+                                    let stderr = std::io::stderr();
+                                    let mut handle = stderr.lock();
+                                    write_all_retry(&mut handle, data.as_bytes());
+                                }
                             }
-                            Stream::Stderr => {
-                                let data = format!("{}\n", chunk.data);
-                                let stderr = std::io::stderr();
-                                let mut handle = stderr.lock();
-                                write_all_retry(&mut handle, data.as_bytes());
-                            }
-                        }
-                    })
-                    .await?
+                        })
+                        .await?
                 };
 
                 // Clean up sandbox
