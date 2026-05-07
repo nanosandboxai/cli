@@ -454,7 +454,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                     panel.loading_message = Some(message);
                 }
             }
-            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount, secrets_active } => {
+            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount, secrets_active, secrets_env } => {
                 // Get SSH info before storing sandbox
                 let ssh_info = {
                     let sb = sandbox.lock().await;
@@ -476,6 +476,8 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         panel.ssh_key_path = Some(key.clone());
                     }
                     panel.secrets_active = secrets_active;
+                    // Store decrypted secret values for injection at agent launch.
+                    panel.secrets_env = secrets_env;
                 }
 
                 let is_auto_mode = app.panels.get(panel_idx)
@@ -487,13 +489,16 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                     // No SSH needed — runs command via HvSocket/HTTP gateway.
                     if let Some(panel) = app.panels.get(panel_idx) {
                         let agent_name = panel.agent_name.clone();
-                        let env = panel.env.clone();
+                        // Merge panel env with secrets_env — secrets take priority.
+                        // secrets_env values are injected via execve() process env,
+                        // never via shell export or .env files.
+                        let mut env = panel.env.clone();
+                        env.extend(panel.secrets_env.iter().map(|(k, v)| (k.clone(), v.clone())));
                         let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                         let permissions = panel.permissions;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
                         let model = panel.model.clone();
-                        let panel_secrets_active = panel.secrets_active;
                         let tx = tx.clone();
                         tokio::spawn(async move {
                             spawn_gateway_exec(
@@ -501,7 +506,6 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                 workdir.as_deref(), permissions,
                                 prompt.as_deref(), is_resumed,
                                 model.as_deref(), panel_idx, tx,
-                                panel_secrets_active,
                             ).await;
                         });
                     }
@@ -521,13 +525,16 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                     };
                     if let Some(panel) = app.panels.get(panel_idx) {
                         let agent_name = panel.agent_name.clone();
-                        let env = panel.env.clone();
+                        // Merge panel env with secrets_env — secrets take priority.
+                        // The SSH shell will receive these as export commands, but
+                        // their SOURCE is the encrypted pipeline (not .env files).
+                        let mut env = panel.env.clone();
+                        env.extend(panel.secrets_env.iter().map(|(k, v)| (k.clone(), v.clone())));
                         let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                         let permissions = panel.permissions;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
                         let model = panel.model.clone();
-                        let panel_secrets_active = panel.secrets_active;
                         let ssh_host = "127.0.0.1".to_string();
                         let tx = tx.clone();
                         tokio::spawn(async move {
@@ -544,7 +551,6 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                     &agent_name, &env, workdir.as_deref(),
                                     permissions, false, prompt.as_deref(),
                                     is_resumed, model.as_deref(), panel_idx, tx.clone(),
-                                    panel_secrets_active,
                                 ).await {
                                     Ok(handle) => {
                                         let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
@@ -1012,7 +1018,6 @@ async fn spawn_gateway_exec(
     model: Option<&str>,
     panel_idx: usize,
     tx: mpsc::UnboundedSender<AppEvent>,
-    secrets_active: bool,
 ) {
     let agent_cmd = super::terminal::agent_cli_command(
         agent_name, permissions, true, is_resumed, model,
@@ -1028,20 +1033,12 @@ async fn spawn_gateway_exec(
         }
     };
 
-    // Build environment map — panel env + agent-specific vars.
-    // When secrets were injected via the encrypted pipeline, skip secret-like
-    // env vars (API keys, tokens) so they are not also sent as plaintext.
-    let secret_suffixes = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIAL"];
+    // Build environment map — panel env (already merged with secrets_env by the
+    // SandboxReady handler) + agent-specific vars.
+    // Secrets arrive here as regular env vars; they were set on the process via
+    // execve() by the gateway, never via shell export or .env files.
     let mut exec_env: HashMap<String, String> = env
         .iter()
-        .filter(|(k, _)| {
-            if secrets_active {
-                let upper = k.to_uppercase();
-                !secret_suffixes.iter().any(|s| upper.ends_with(s))
-            } else {
-                true
-            }
-        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     exec_env.extend(super::terminal::agent_env_vars(
@@ -2011,14 +2008,15 @@ async fn handle_command(
 
                 if let Some((ssh_port, key_path)) = ssh_info {
                     let agent_name = panel.agent_name.clone();
-                    let env = panel.env.clone();
+                    // Merge panel env with secrets_env for reconnect — same as initial connect.
+                    let mut env = panel.env.clone();
+                    env.extend(panel.secrets_env.iter().map(|(k, v)| (k.clone(), v.clone())));
                     let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                     let permissions = panel.permissions;
                     let auto_mode = panel.auto_mode;
                     let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                     let is_resumed = panel.is_resumed;
                     let model = panel.model.clone();
-                    let panel_secrets_active = panel.secrets_active;
                     // Use 127.0.0.1 on all platforms — on Windows, portproxy
                     // rules route localhost to the guest IP via HCN NAT.
                     let ssh_host = "127.0.0.1".to_string();
@@ -2029,7 +2027,6 @@ async fn handle_command(
                             &agent_name, &env, workdir.as_deref(),
                             permissions, auto_mode, prompt.as_deref(),
                             is_resumed, model.as_deref(), panel_idx, tx.clone(),
-                            panel_secrets_active,
                         ).await {
                             Ok(handle) => {
                                 let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
@@ -4067,6 +4064,7 @@ fn add_agent(
                             short_id,
                             project_mount,
                             secrets_active: false,
+                            secrets_env: HashMap::new(),
                         });
                     }
                     Err(e) => {
@@ -4213,22 +4211,22 @@ fn add_agent_from_config(
                         let clone_path = sandbox
                             .project_mount()
                             .and_then(|pm| pm.worktree_base.clone());
-                        let secrets_active = if let Some(ref secrets_cfg) = secrets_cfg {
+                        let (secrets_active, secrets_env) = if let Some(ref secrets_cfg) = secrets_cfg {
                             match inject_secrets(&mut sandbox, secrets_cfg, &config_dir, &clone_path) {
-                                Ok(manifest) => {
+                                Ok((manifest, env_map)) => {
                                     if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
                                         let bootstrap = secrets_bootstrap_content(&manifest);
                                         let _ = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await;
                                     }
-                                    true
+                                    (true, env_map)
                                 }
                                 Err(e) => {
                                     tracing::error!("Secrets injection failed: {}", e);
-                                    false
+                                    (false, HashMap::new())
                                 }
                             }
                         } else {
-                            false
+                            (false, HashMap::new())
                         };
 
                         let project_mount = sandbox.take_project_mount();
@@ -4239,6 +4237,7 @@ fn add_agent_from_config(
                             short_id,
                             project_mount,
                             secrets_active,
+                            secrets_env,
                         });
                     }
                     Err(e) => {
@@ -4425,22 +4424,22 @@ fn resume_session(
                             let clone_path = sandbox
                                 .project_mount()
                                 .and_then(|pm| pm.worktree_base.clone());
-                            let secrets_active = if let Some(ref secrets_cfg) = secrets_cfg {
+                            let (secrets_active, secrets_env) = if let Some(ref secrets_cfg) = secrets_cfg {
                                 match inject_secrets(&mut sandbox, secrets_cfg, &config_dir, &clone_path) {
-                                    Ok(manifest) => {
+                                    Ok((manifest, env_map)) => {
                                         if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
                                             let bootstrap = secrets_bootstrap_content(&manifest);
                                             let _ = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await;
                                         }
-                                        true
+                                        (true, env_map)
                                     }
                                     Err(e) => {
                                         tracing::error!("Secrets injection failed: {}", e);
-                                        false
+                                        (false, HashMap::new())
                                     }
                                 }
                             } else {
-                                false
+                                (false, HashMap::new())
                             };
 
                             let project_mount = sandbox.take_project_mount();
@@ -4451,6 +4450,7 @@ fn resume_session(
                                 short_id,
                                 project_mount,
                                 secrets_active,
+                                secrets_env,
                             });
                         }
                         Err(e) => {
@@ -5249,12 +5249,16 @@ fn handle_agent_info(app: &mut App, name: &str) {
 }
 
 /// Collect, encrypt, and send secrets to the sandbox gateway.
+///
+/// Returns a tuple of (manifest, secrets_env) where secrets_env contains the
+/// plaintext key-value pairs for injection as process environment variables at
+/// agent launch time. These values are never written to disk or shell history.
 fn inject_secrets(
     sandbox: &mut sandbox::Sandbox,
     secrets_config: &sandbox::SecretSource,
     config_dir: &std::path::Path,
     clone_path: &Option<std::path::PathBuf>,
-) -> anyhow::Result<runtime::SecretManifest> {
+) -> anyhow::Result<(runtime::SecretManifest, HashMap<String, String>)> {
     // 1. Collect secrets from SOPS file and host env
     let mut payload = crate::collect_secrets(secrets_config, config_dir)?;
 
@@ -5275,11 +5279,15 @@ fn inject_secrets(
     }
 
     if payload.is_empty() {
-        return Ok(runtime::SecretManifest {
+        return Ok((runtime::SecretManifest {
             secrets: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
-        });
+        }, std::collections::HashMap::new()));
     }
+
+    // Clone the secret key-value pairs before encryption so they can be
+    // injected as process env vars at agent launch (never written to disk).
+    let secrets_env = payload.secrets.clone();
 
     // 3. Get gateway public key
     // Deref through AgentSandbox -> SandboxInner -> runtime::Sandbox (git dep)
@@ -5307,7 +5315,7 @@ fn inject_secrets(
     let manifest = runtime_sb.send_secrets(&encrypted_json)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    Ok(manifest)
+    Ok((manifest, secrets_env))
 }
 
 /// Generate secrets protocol instructions for agent config files.
