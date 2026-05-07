@@ -178,7 +178,6 @@ pub async fn connect_ssh(
     rows: u16,
     agent_name: &str,
     env: &HashMap<String, String>,
-    secrets_env: &HashMap<String, String>,
     workdir: Option<&str>,
     permissions: sandbox::Permissions,
     auto_mode: bool,
@@ -218,10 +217,6 @@ pub async fn connect_ssh(
         env_parts.push(format!("cd '{}'", dir));
     }
     for (key, val) in env {
-        env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
-    }
-    // Secrets from encrypted pipeline (delivered over encrypted SSH channel, VM is ephemeral)
-    for (key, val) in secrets_env {
         env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
     // Agent-specific env vars (Goose mode, prompt, etc.)
