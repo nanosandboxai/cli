@@ -1,7 +1,9 @@
 //! Main event loop for the TUI.
 
 use std::collections::HashMap;
+use base64::Engine;
 use std::io::{self, IsTerminal};
+use tracing::warn;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5130,6 +5132,68 @@ fn handle_agent_info(app: &mut App, name: &str) {
         role: MessageRole::System,
         content,
     });
+}
+
+/// Collect, encrypt, and send secrets to the sandbox gateway.
+fn inject_secrets(
+    sandbox: &mut sandbox::Sandbox,
+    secrets_config: &sandbox::SecretSource,
+    config_dir: &std::path::Path,
+    clone_path: &Option<std::path::PathBuf>,
+) -> anyhow::Result<runtime::SecretManifest> {
+    // 1. Collect secrets from SOPS file and host env
+    let mut payload = crate::collect_secrets(secrets_config, config_dir)?;
+
+    // 2. Intercept sensitive files from git repo clone
+    if let Some(ref clone) = clone_path {
+        if !secrets_config.intercept_patterns.is_empty() {
+            let result = sandbox::secrets::intercept::intercept_sensitive_files(
+                clone,
+                &secrets_config.intercept_patterns,
+            );
+            for (path, contents) in result.intercepted {
+                payload.add_intercepted_file(path, contents);
+            }
+            for (path, err) in &result.errors {
+                warn!("Failed to intercept {}: {}", path, err);
+            }
+        }
+    }
+
+    if payload.is_empty() {
+        return Ok(runtime::SecretManifest {
+            secrets: std::collections::HashMap::new(),
+            files: std::collections::HashMap::new(),
+        });
+    }
+
+    // 3. Get gateway public key
+    // Deref through AgentSandbox -> SandboxInner -> runtime::Sandbox (git dep)
+    // We avoid a type annotation here because runtime appears twice in the dep graph.
+    let runtime_sb = &mut ***sandbox;
+    let pubkey_b64 = runtime_sb.secrets_pubkey()
+        .ok_or_else(|| anyhow::anyhow!("Gateway secrets pubkey not available"))?;
+
+    let pubkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&pubkey_b64)
+        .map_err(|e| anyhow::anyhow!("Invalid gateway pubkey: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Gateway pubkey must be 32 bytes"))?;
+
+    // 4. Encrypt payload
+    let plaintext = payload.to_json_bytes()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let encrypted = sandbox::secrets::crypto::encrypt_payload(&plaintext, &pubkey_bytes)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let encrypted_json = serde_json::to_string(&encrypted)?;
+
+    // 5. Send to gateway
+    let manifest = runtime_sb.send_secrets(&encrypted_json)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    Ok(manifest)
 }
 
 #[cfg(test)]

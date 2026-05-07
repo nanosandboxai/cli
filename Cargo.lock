@@ -147,27 +147,12 @@ dependencies = [
 name = "arch"
 version = "0.1.0"
 dependencies = [
- "arch_gen 0.1.0",
+ "arch_gen",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
- "smbios 0.1.0",
- "utils 0.1.0",
- "vm-memory",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "arch"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "arch_gen 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "kvm-bindings",
- "kvm-ioctls",
- "libc",
- "smbios 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "utils 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "smbios",
+ "utils",
  "vm-memory",
  "vmm-sys-util",
 ]
@@ -175,11 +160,6 @@ dependencies = [
 [[package]]
 name = "arch_gen"
 version = "0.1.0"
-
-[[package]]
-name = "arch_gen"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
 
 [[package]]
 name = "argon2"
@@ -697,16 +677,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cpuid"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "kvm-bindings",
- "kvm-ioctls",
- "vmm-sys-util",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -793,6 +763,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array 0.14.7",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -947,11 +918,11 @@ dependencies = [
 name = "devices"
 version = "0.1.0"
 dependencies = [
- "arch 0.1.0",
+ "arch",
  "bitflags 1.3.2",
  "caps",
  "crossbeam-channel",
- "hvf 0.1.0",
+ "hvf",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
@@ -959,35 +930,9 @@ dependencies = [
  "log",
  "lru 0.16.3",
  "nix 0.30.1",
- "polly 0.0.1",
+ "polly",
  "rand 0.9.3",
- "utils 0.1.0",
- "virtio-bindings",
- "vm-fdt",
- "vm-memory",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "devices"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "arch 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "bitflags 1.3.2",
- "caps",
- "crossbeam-channel",
- "hvf 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "kvm-bindings",
- "kvm-ioctls",
- "libc",
- "libloading",
- "log",
- "lru 0.12.5",
- "nix 0.30.1",
- "polly 0.0.1 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "rand 0.9.3",
- "utils 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "utils",
  "virtio-bindings",
  "vm-fdt",
  "vm-memory",
@@ -1515,6 +1460,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1604,17 +1555,6 @@ dependencies = [
 [[package]]
 name = "hcs"
 version = "0.1.0"
-dependencies = [
- "flate2",
- "log",
- "serde_json",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "hcs"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
 dependencies = [
  "flate2",
  "log",
@@ -1725,18 +1665,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 name = "hvf"
 version = "0.1.0"
 dependencies = [
- "arch 0.1.0",
- "crossbeam-channel",
- "libloading",
- "log",
-]
-
-[[package]]
-name = "hvf"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "arch 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "arch",
  "crossbeam-channel",
  "libloading",
  "log",
@@ -2153,16 +2082,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
- "utils 0.1.0",
- "vm-memory",
-]
-
-[[package]]
-name = "kernel"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "utils 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "utils",
  "vm-memory",
 ]
 
@@ -2279,42 +2199,20 @@ name = "libkrun"
 version = "1.17.3"
 dependencies = [
  "crossbeam-channel",
- "devices 0.1.0",
+ "devices",
  "env_logger",
- "hvf 0.1.0",
+ "hvf",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
  "libloading",
  "log",
  "once_cell",
- "polly 0.0.1",
+ "polly",
  "rand 0.9.3",
- "utils 0.1.0",
+ "utils",
  "vm-memory",
- "vmm 0.1.0",
-]
-
-[[package]]
-name = "libkrun"
-version = "1.17.3"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "crossbeam-channel",
- "devices 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "env_logger",
- "hvf 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "kvm-bindings",
- "kvm-ioctls",
- "libc",
- "libloading",
- "log",
- "once_cell",
- "polly 0.0.1 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "rand 0.9.3",
- "utils 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "vm-memory",
- "vmm 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "vmm",
 ]
 
 [[package]]
@@ -2322,16 +2220,7 @@ name = "libkrun-sys"
 version = "0.1.0"
 dependencies = [
  "libc",
- "libkrun 1.17.3",
-]
-
-[[package]]
-name = "libkrun-sys"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "libc",
- "libkrun 1.17.3 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "libkrun",
 ]
 
 [[package]]
@@ -2492,6 +2381,7 @@ dependencies = [
  "arboard",
  "assert_cmd",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "colored",
@@ -2503,7 +2393,7 @@ dependencies = [
  "png 0.17.16",
  "predicates",
  "ratatui",
- "runtime 0.1.0",
+ "runtime",
  "russh",
  "sandbox",
  "serde",
@@ -3091,16 +2981,7 @@ name = "polly"
 version = "0.0.1"
 dependencies = [
  "libc",
- "utils 0.1.0",
-]
-
-[[package]]
-name = "polly"
-version = "0.0.1"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "libc",
- "utils 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "utils",
 ]
 
 [[package]]
@@ -3539,18 +3420,21 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "docker_credential",
  "env_logger",
  "flate2",
  "libc",
- "libkrun-sys 0.1.0",
+ "libkrun-sys",
  "log",
  "oci-distribution",
  "openssl",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3559,33 +3443,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "runtime"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dirs",
- "docker_credential",
- "env_logger",
- "flate2",
- "libc",
- "libkrun-sys 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "log",
- "oci-distribution",
- "openssl",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -3744,10 +3602,14 @@ dependencies = [
 name = "sandbox"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs",
- "runtime 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "glob",
+ "rand 0.8.5",
+ "runtime",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3758,6 +3620,7 @@ dependencies = [
  "tracing",
  "unicode-width 0.2.0",
  "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -4047,14 +3910,6 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "smbios"
 version = "0.1.0"
-dependencies = [
- "vm-memory",
-]
-
-[[package]]
-name = "smbios"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
 dependencies = [
  "vm-memory",
 ]
@@ -4777,21 +4632,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "utils"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "bitflags 1.3.2",
- "crossbeam-channel",
- "kvm-bindings",
- "libc",
- "log",
- "nix 0.30.1",
- "vmm-sys-util",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "uuid"
 version = "1.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4845,53 +4685,24 @@ dependencies = [
 name = "vmm"
 version = "0.1.0"
 dependencies = [
- "arch 0.1.0",
- "arch_gen 0.1.0",
+ "arch",
+ "arch_gen",
  "bzip2",
- "cpuid 0.1.0",
+ "cpuid",
  "crossbeam-channel",
- "devices 0.1.0",
+ "devices",
  "flate2",
- "hcs 0.1.0",
- "hvf 0.1.0",
- "kernel 0.1.0",
+ "hcs",
+ "hvf",
+ "kernel",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
  "linux-loader",
  "log",
  "nix 0.30.1",
- "polly 0.0.1",
- "utils 0.1.0",
- "vm-memory",
- "vmm-sys-util",
- "windows-sys 0.59.0",
- "zstd",
-]
-
-[[package]]
-name = "vmm"
-version = "0.1.0"
-source = "git+https://github.com/nanosandboxai/runtime.git?branch=main#6c1053fd3abecc57d90c306871ab8dfcd346d220"
-dependencies = [
- "arch 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "arch_gen 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "bzip2",
- "cpuid 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "crossbeam-channel",
- "devices 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "flate2",
- "hcs 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "hvf 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "kernel 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "kvm-bindings",
- "kvm-ioctls",
- "libc",
- "linux-loader",
- "log",
- "nix 0.30.1",
- "polly 0.0.1 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
- "utils 0.1.0 (git+https://github.com/nanosandboxai/runtime.git?branch=main)",
+ "polly",
+ "utils",
  "vm-memory",
  "vmm-sys-util",
  "windows-sys 0.59.0",
@@ -5518,6 +5329,18 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
+]
 
 [[package]]
 name = "xattr"
