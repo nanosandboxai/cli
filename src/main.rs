@@ -12,7 +12,7 @@ mod cli {
     use std::time::Duration;
     use tokio::sync::Mutex;
     use tabled::{Table, Tabled};
-    use tracing::{error, warn};
+    use tracing::{error, info, warn};
 
     /// Output format for commands
     #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -306,7 +306,7 @@ mod cli {
                     .ok()
                     .filter(|v| !v.is_empty())
                     .unwrap_or_else(|| default_level.to_string());
-                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
+                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl},sandbox={lvl}", lvl = file_level);
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
@@ -317,7 +317,7 @@ mod cli {
                 if cli.command.is_some() && cli.verbose {
                     let stderr_layer = fmt::layer()
                         .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug"));
+                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug"));
 
                     tracing_subscriber::registry()
                         .with(file_layer)
@@ -332,7 +332,7 @@ mod cli {
                 _log_guard = None;
                 if cli.command.is_some() && cli.verbose {
                     tracing_subscriber::fmt()
-                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug")
+                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug")
                         .init();
                 } else {
                     let _ = env_logger::Builder::from_env(
@@ -616,6 +616,45 @@ mod cli {
         }
 
         Ok(vars)
+    }
+
+    /// Collect secrets from the SecretSource configuration.
+    /// Returns a SecretPayload ready for encryption.
+    fn collect_secrets(
+        secrets_config: &sandbox::SecretSource,
+        config_dir: &std::path::Path,
+    ) -> anyhow::Result<sandbox::secrets::payload::SecretPayload> {
+        let mut payload = sandbox::secrets::payload::SecretPayload::new();
+
+        // 1. Load from SOPS-encrypted file if specified
+        if let Some(ref file) = secrets_config.file {
+            let file_path = std::path::Path::new(file);
+            match sandbox::secrets::sops::decrypt_sops_file(file_path, config_dir) {
+                Ok(secrets) => {
+                    for (key, value) in secrets {
+                        payload.add_secret(key, value);
+                    }
+                    info!("Loaded {} secrets from SOPS file: {}", payload.secrets.len(), file);
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to decrypt SOPS file '{}': {}", file, e));
+                }
+            }
+        }
+
+        // 2. Read explicit keys from host environment (without set_var!)
+        for key in &secrets_config.keys {
+            match std::env::var(key) {
+                Ok(value) => {
+                    payload.add_secret(key.clone(), value);
+                }
+                Err(_) => {
+                    warn!("Secret key '{}' not found in host environment", key);
+                }
+            }
+        }
+
+        Ok(payload)
     }
 
     /// Run a command in a new sandbox
