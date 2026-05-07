@@ -306,7 +306,7 @@ mod cli {
                     .ok()
                     .filter(|v| !v.is_empty())
                     .unwrap_or_else(|| default_level.to_string());
-                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
+                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl},sandbox={lvl}", lvl = file_level);
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
@@ -317,7 +317,7 @@ mod cli {
                 if cli.command.is_some() && cli.verbose {
                     let stderr_layer = fmt::layer()
                         .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug"));
+                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug"));
 
                     tracing_subscriber::registry()
                         .with(file_layer)
@@ -332,7 +332,7 @@ mod cli {
                 _log_guard = None;
                 if cli.command.is_some() && cli.verbose {
                     tracing_subscriber::fmt()
-                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug")
+                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug")
                         .init();
                 } else {
                     let _ = env_logger::Builder::from_env(
