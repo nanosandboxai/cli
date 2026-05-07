@@ -4101,7 +4101,17 @@ fn add_agent_from_config(
     for (api_key, _) in &required_api_keys(&agent_type) {
         if !panel.env.contains_key(*api_key) {
             if let Ok(val) = std::env::var(api_key) {
-                panel.env.insert(api_key.to_string(), val);
+                if config.secrets.is_some() {
+                    // Route through encrypted secrets pipeline
+                    if let Some(ref mut secrets) = config.secrets {
+                        if !secrets.keys.contains(&api_key.to_string()) {
+                            secrets.keys.push(api_key.to_string());
+                        }
+                    }
+                } else {
+                    // Legacy path: add to env
+                    panel.env.insert(api_key.to_string(), val);
+                }
             }
         }
     }
@@ -4241,7 +4251,17 @@ fn resume_session(
         for (api_key, _) in &required_api_keys(&agent_type) {
             if !panel.env.contains_key(*api_key) {
                 if let Ok(val) = std::env::var(api_key) {
-                    panel.env.insert(api_key.to_string(), val);
+                    if config.secrets.is_some() {
+                        // Route through encrypted secrets pipeline
+                        if let Some(ref mut secrets) = config.secrets {
+                            if !secrets.keys.contains(&api_key.to_string()) {
+                                secrets.keys.push(api_key.to_string());
+                            }
+                        }
+                    } else {
+                        // Legacy path: add to env
+                        panel.env.insert(api_key.to_string(), val);
+                    }
                 }
             }
         }
