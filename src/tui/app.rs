@@ -347,6 +347,9 @@ pub struct AgentPanel {
     /// Whether the user sent at least one keystroke to this agent's terminal.
     /// Used to decide whether resume flags (--continue) are appropriate on next session load.
     pub had_interaction: bool,
+    /// Whether secrets were injected into this sandbox via the encrypted pipeline.
+    /// When true, secret-like env vars (API keys, tokens) are filtered from the SSH env.
+    pub secrets_active: bool,
     /// Overlay notification shown on top of the terminal (message, is_error, remaining ticks).
     /// Replaces previous notification; auto-dismissed after countdown reaches 0.
     pub notification: Option<(String, bool, u8)>,
@@ -391,6 +394,7 @@ impl AgentPanel {
             original_config: None,
             is_resumed: false,
             had_interaction: false,
+            secrets_active: false,
             notification: None,
         }
     }
