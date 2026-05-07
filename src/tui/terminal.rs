@@ -210,18 +210,13 @@ pub async fn connect_ssh(
         anyhow::bail!("SSH public key authentication failed");
     }
 
-    // Build the initialization commands (cd + env vars + agent CLI launch)
+    // Build the initialization commands (cd + agent CLI launch).
+    // All env vars (secrets + config + agent-specific) are injected by the
+    // gateway's embedded SSH server via cmd.Env — no shell export needed.
     let mut env_parts: Vec<String> = Vec::new();
 
     if let Some(dir) = workdir {
         env_parts.push(format!("cd '{}'", dir));
-    }
-    for (key, val) in env {
-        env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
-    }
-    // Agent-specific env vars (Goose mode, prompt, etc.)
-    for (key, val) in agent_env_vars(agent_name, permissions, auto_mode, model, prompt) {
-        env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
 
     let agent_cmd = agent_cli_command(agent_name, permissions, auto_mode, is_resumed, model);
