@@ -186,6 +186,7 @@ pub async fn connect_ssh(
     model: Option<&str>,
     panel_idx: usize,
     tx: mpsc::UnboundedSender<AppEvent>,
+    secrets_active: bool,
 ) -> Result<SshTerminalHandle, anyhow::Error> {
     // Load the private key
     let key_data = tokio::fs::read_to_string(&key_path).await?;
@@ -216,7 +217,14 @@ pub async fn connect_ssh(
     if let Some(dir) = workdir {
         env_parts.push(format!("cd '{}'", dir));
     }
+    let secret_suffixes = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIAL"];
     for (key, val) in env {
+        let upper = key.to_uppercase();
+        let is_secret = secret_suffixes.iter().any(|s| upper.ends_with(s));
+        if is_secret && secrets_active {
+            // Skip — this secret was injected via the encrypted pipeline
+            continue;
+        }
         env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
     // Agent-specific env vars (Goose mode, prompt, etc.)

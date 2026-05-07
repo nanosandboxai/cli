@@ -540,6 +540,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                     &agent_name, &env, workdir.as_deref(),
                                     permissions, false, prompt.as_deref(),
                                     is_resumed, model.as_deref(), panel_idx, tx.clone(),
+                                    false,
                                 ).await {
                                     Ok(handle) => {
                                         let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
@@ -2008,6 +2009,7 @@ async fn handle_command(
                             &agent_name, &env, workdir.as_deref(),
                             permissions, auto_mode, prompt.as_deref(),
                             is_resumed, model.as_deref(), panel_idx, tx.clone(),
+                            false,
                         ).await {
                             Ok(handle) => {
                                 let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
