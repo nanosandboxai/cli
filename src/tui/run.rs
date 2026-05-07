@@ -5196,6 +5196,84 @@ fn inject_secrets(
     Ok(manifest)
 }
 
+/// Generate secrets protocol instructions for agent config files.
+#[allow(dead_code)]
+fn secrets_bootstrap_content(manifest: &runtime::SecretManifest) -> String {
+    let mut lines = Vec::new();
+    lines.push("## Secrets Access Protocol".to_string());
+    lines.push(String::new());
+    lines.push("All secrets and credentials in this workspace are managed by nanosb-secret.".to_string());
+    lines.push("Do NOT read .env files, environment variables, or any credential files directly.".to_string());
+    lines.push(String::new());
+    lines.push("Available commands:".to_string());
+    lines.push("- `nanosb-secret list` — list available secret key names".to_string());
+    lines.push("- `nanosb-secret read <KEY>` — read a secret value".to_string());
+    lines.push("- `nanosb-secret file <FILENAME>` — read an intercepted file's contents".to_string());
+    lines.push("- `nanosb-secret export <KEY> <PATH>` — write secret to a file for tools that need a file path".to_string());
+    lines.push(String::new());
+
+    if !manifest.secrets.is_empty() {
+        let mut keys: Vec<&String> = manifest.secrets.keys().collect();
+        keys.sort();
+        lines.push(format!(
+            "Available secret keys: {}",
+            keys.iter().map(|k| format!("`{}`", k)).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    if !manifest.files.is_empty() {
+        let mut files: Vec<&String> = manifest.files.keys().collect();
+        files.sort();
+        lines.push(format!(
+            "Intercepted files: {}",
+            files.iter().map(|f| format!("`{}`", f)).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    lines.push(String::new());
+    lines.push("IMPORTANT: Never hardcode secrets. Never echo secrets. Never write secrets to files.".to_string());
+    lines.push("Use `nanosb-secret read <KEY>` every time you need a value.".to_string());
+
+    lines.join("\n")
+}
+
+/// Write secrets protocol instructions to the appropriate agent config file inside the VM.
+#[allow(dead_code)]
+async fn write_secrets_bootstrap(
+    sandbox: &mut sandbox::Sandbox,
+    agent_type: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    let file_path = match agent_type {
+        "claude" => "/workspace/CLAUDE.md",
+        "codex" => "/workspace/.codexrc",
+        "goose" => "/workspace/.goose/instructions.md",
+        _ => return Ok(()), // Unknown agent, skip
+    };
+
+    // Read existing content (if any) and prepend
+    let existing = sandbox
+        .exec_with_options("cat", &[file_path], Default::default())
+        .await
+        .map(|r| r.stdout)
+        .unwrap_or_default();
+
+    let new_content = format!("{}\n\n{}", content, existing);
+    let escaped = new_content.replace('\'', "'\\''");
+
+    sandbox
+        .exec_with_options(
+            "sh",
+            &["-c", &format!("mkdir -p $(dirname '{}') && printf '%s' '{}' > '{}'", file_path, escaped, file_path)],
+            Default::default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", file_path, e))?;
+
+    tracing::info!("Wrote secrets bootstrap to {}", file_path);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
