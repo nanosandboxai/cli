@@ -4004,6 +4004,14 @@ fn add_agent(
     panel.original_config = Some(config.clone());
     panel.display_name = name.map(String::from);
 
+    // Capture panel env vars and agent-specific fields before panel is moved into app.panels.
+    let panel_env: HashMap<String, String> = panel.env.clone();
+    let agent_permissions = panel.permissions;
+    let agent_name_str = agent.to_string();
+    let agent_auto_mode = auto_mode;
+    let agent_model = model.map(String::from);
+    let agent_prompt = prompt.map(String::from);
+
     app.panels.push(panel);
     let panel_idx = app.panels.len() - 1;
     app.focused_panel = panel_idx;
@@ -4043,6 +4051,26 @@ fn add_agent(
                         if let Some(resolved) = &resolved_agent {
                             let _ = sandbox.bootstrap_agent(resolved).await;
                         }
+
+                        // Insert panel env vars (API keys, etc.) and agent-specific vars
+                        // into the runtime config.env so they're delivered via gateway POST.
+                        // Deref: AgentSandbox -> SandboxInner -> runtime::Sandbox
+                        for (key, val) in &panel_env {
+                            (**sandbox).config_mut().env.insert(key.clone(), val.clone());
+                        }
+                        for (key, val) in super::terminal::agent_env_vars(
+                            &agent_name_str,
+                            agent_permissions,
+                            agent_auto_mode,
+                            agent_model.as_deref(),
+                            agent_prompt.as_deref(),
+                        ) {
+                            (**sandbox).config_mut().env.insert(key, val);
+                        }
+                        if let Err(e) = (**sandbox).send_env_to_gateway() {
+                            tracing::warn!("Failed to send env to gateway: {}", e);
+                        }
+
                         // Take the project mount from the sandbox so we can
                         // store it on the panel for teardown on kill.
                         let project_mount = sandbox.take_project_mount();
@@ -4162,6 +4190,12 @@ fn add_agent_from_config(
     // Capture the agent type string for secrets bootstrap.
     let agent_type_str = agent_type.clone();
 
+    // Capture agent-specific fields before config is moved into the async block.
+    let agent_auto_mode = config.auto_mode;
+    let agent_permissions = config.permissions;
+    let agent_model = config.model.clone();
+    let agent_prompt = config.prompt.clone();
+
     let tx = tx.clone();
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
@@ -4195,6 +4229,19 @@ fn add_agent_from_config(
                             let _ = sandbox.bootstrap_agent(resolved).await;
                         }
 
+                        // Merge agent-specific env vars (GOOSE_MODE, NANOSB_PROMPT, etc.)
+                        // into the runtime config.env so they're included in the gateway POST.
+                        for (key, val) in super::terminal::agent_env_vars(
+                            &agent_type_str,
+                            agent_permissions,
+                            agent_auto_mode,
+                            agent_model.as_deref(),
+                            agent_prompt.as_deref(),
+                        ) {
+                            // Deref: AgentSandbox -> SandboxInner -> runtime::Sandbox
+                            (**sandbox).config_mut().env.insert(key, val);
+                        }
+
                         // Secrets injection (lifecycle — works for both auto and interactive)
                         let clone_path = sandbox
                             .project_mount()
@@ -4216,6 +4263,10 @@ fn add_agent_from_config(
                                 }
                             }
                         } else {
+                            // No secrets config — still send env vars to gateway for SSH delivery
+                            if let Err(e) = (**sandbox).send_env_to_gateway() {
+                                tracing::warn!("Failed to send env to gateway: {}", e);
+                            }
                             false
                         };
 
@@ -4375,6 +4426,12 @@ fn resume_session(
             .unwrap_or_else(|| session.project_path.clone());
         let agent_type_str = agent_type.clone();
 
+        // Capture agent-specific fields before config is moved into the async block.
+        let agent_auto_mode = sp.auto_mode;
+        let agent_permissions = sp.permissions;
+        let agent_model = sp.model.clone();
+        let agent_prompt = sp.prompt.clone();
+
         // Spawn sandbox creation in background.
         let tx = tx.clone();
         let image_manager = app.image_manager.clone();
@@ -4409,6 +4466,19 @@ fn resume_session(
                                 let _ = sandbox.bootstrap_agent(resolved).await;
                             }
 
+                            // Merge agent-specific env vars (GOOSE_MODE, NANOSB_PROMPT, etc.)
+                            // into the runtime config.env so they're included in the gateway POST.
+                            for (key, val) in super::terminal::agent_env_vars(
+                                &agent_type_str,
+                                agent_permissions,
+                                agent_auto_mode,
+                                agent_model.as_deref(),
+                                agent_prompt.as_deref(),
+                            ) {
+                                // Deref: AgentSandbox -> SandboxInner -> runtime::Sandbox
+                                (**sandbox).config_mut().env.insert(key, val);
+                            }
+
                             // Secrets injection (lifecycle — works for both auto and interactive)
                             let clone_path = sandbox
                                 .project_mount()
@@ -4430,6 +4500,10 @@ fn resume_session(
                                     }
                                 }
                             } else {
+                                // No secrets config — still send env vars to gateway for SSH delivery
+                                if let Err(e) = (**sandbox).send_env_to_gateway() {
+                                    tracing::warn!("Failed to send env to gateway: {}", e);
+                                }
                                 false
                             };
 
