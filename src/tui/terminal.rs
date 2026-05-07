@@ -220,6 +220,10 @@ pub async fn connect_ssh(
     for (key, val) in env {
         env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
     }
+    // Secrets from encrypted pipeline (delivered over encrypted SSH channel, VM is ephemeral)
+    for (key, val) in secrets_env {
+        env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
+    }
     // Agent-specific env vars (Goose mode, prompt, etc.)
     for (key, val) in agent_env_vars(agent_name, permissions, auto_mode, model, prompt) {
         env_parts.push(format!("export {}='{}'", key, val.replace('\'', "'\\''")));
@@ -228,14 +232,6 @@ pub async fn connect_ssh(
     let agent_cmd = agent_cli_command(agent_name, permissions, auto_mode, is_resumed, model);
 
     let channel = session.channel_open_session().await?;
-
-    // Inject secrets via SSH protocol env vars (no export, no files).
-    // sshd must have AcceptEnv configured (done during secrets injection).
-    for (key, val) in secrets_env {
-        if let Err(e) = channel.set_env(false, key.as_str(), val.as_str()).await {
-            tracing::warn!("Failed to set SSH env var '{}': {}", key, e);
-        }
-    }
 
     if auto_mode {
         // Headless: use channel.exec() to run a single compound command directly.
