@@ -156,7 +156,14 @@ function Install-NanosandboxCLI {
         } else {
             Write-Info "Installing WSL2..."
             try {
-                & $wslExe --install --no-launch 2>&1 | ForEach-Object { Write-Host "  $_" }
+                if (Test-Path $wslExe) {
+                    # wsl.exe exists but WSL2 kernel isn't ready — use it directly.
+                    & $wslExe --install --no-launch 2>&1 | ForEach-Object { Write-Host "  $_" }
+                } else {
+                    # wsl.exe doesn't exist yet — enable the Windows features first.
+                    dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart | Out-Null
+                    dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart | Out-Null
+                }
                 Write-Ok "WSL2 installed"
                 $rebootNeeded = $true
             } catch {
