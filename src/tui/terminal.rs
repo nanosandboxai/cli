@@ -178,6 +178,7 @@ pub async fn connect_ssh(
     rows: u16,
     agent_name: &str,
     env: &HashMap<String, String>,
+    secrets_env: &HashMap<String, String>,
     workdir: Option<&str>,
     permissions: sandbox::Permissions,
     auto_mode: bool,
@@ -227,6 +228,14 @@ pub async fn connect_ssh(
     let agent_cmd = agent_cli_command(agent_name, permissions, auto_mode, is_resumed, model);
 
     let channel = session.channel_open_session().await?;
+
+    // Inject secrets via SSH protocol env vars (no export, no files).
+    // sshd must have AcceptEnv configured (done during secrets injection).
+    for (key, val) in secrets_env {
+        if let Err(e) = channel.set_env(false, key.as_str(), val.as_str()).await {
+            tracing::warn!("Failed to set SSH env var '{}': {}", key, e);
+        }
+    }
 
     if auto_mode {
         // Headless: use channel.exec() to run a single compound command directly.

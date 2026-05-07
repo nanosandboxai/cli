@@ -32,6 +32,8 @@ pub enum AppEvent {
         project_mount: Option<sandbox::ProjectMount>,
         /// Whether secrets were successfully injected into this sandbox.
         secrets_active: bool,
+        /// Secret environment variables to inject via SSH channel.set_env().
+        secrets_env: std::collections::HashMap<String, String>,
     },
     /// Sandbox creation or startup failed.
     SandboxFailed {

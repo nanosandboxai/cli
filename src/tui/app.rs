@@ -349,6 +349,9 @@ pub struct AgentPanel {
     pub had_interaction: bool,
     /// Whether secrets were injected into this sandbox via the encrypted pipeline.
     pub secrets_active: bool,
+    /// Secret environment variables to inject via SSH channel.set_env().
+    /// Populated during sandbox creation from the secrets payload.
+    pub secrets_env: HashMap<String, String>,
     /// Overlay notification shown on top of the terminal (message, is_error, remaining ticks).
     /// Replaces previous notification; auto-dismissed after countdown reaches 0.
     pub notification: Option<(String, bool, u8)>,
@@ -394,6 +397,7 @@ impl AgentPanel {
             is_resumed: false,
             had_interaction: false,
             secrets_active: false,
+            secrets_env: HashMap::new(),
             notification: None,
         }
     }
