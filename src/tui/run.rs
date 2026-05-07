@@ -4067,7 +4067,13 @@ fn add_agent(
                         ) {
                             (**sandbox).config_mut().env.insert(key, val);
                         }
-                        if let Err(e) = (**sandbox).send_env_to_gateway() {
+                        // Encrypt and send ALL env vars to gateway
+                        let clone_path = sandbox
+                            .project_mount()
+                            .and_then(|pm| pm.worktree_base.clone());
+                        if let Err(e) = send_encrypted_env(
+                            &mut sandbox, None, std::path::Path::new("."), &clone_path,
+                        ) {
                             tracing::warn!("Failed to send env to gateway: {}", e);
                         }
 
@@ -4242,32 +4248,29 @@ fn add_agent_from_config(
                             (**sandbox).config_mut().env.insert(key, val);
                         }
 
-                        // Secrets injection (lifecycle — works for both auto and interactive)
+                        // Encrypt and send ALL env vars to gateway (always — not just when secrets: is configured)
                         let clone_path = sandbox
                             .project_mount()
                             .and_then(|pm| pm.worktree_base.clone());
-                        let secrets_active = if let Some(ref secrets_cfg) = secrets_cfg {
-                            match inject_secrets(&mut sandbox, secrets_cfg, &config_dir, &clone_path) {
-                                Ok(manifest) => {
-                                    if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
-                                        let bootstrap = secrets_bootstrap_content(&manifest);
-                                        if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
-                                            tracing::warn!("Failed to write secrets bootstrap: {}", e);
-                                        }
+                        let secrets_active = match send_encrypted_env(
+                            &mut sandbox,
+                            secrets_cfg.as_ref(),
+                            &config_dir,
+                            &clone_path,
+                        ) {
+                            Ok(manifest) => {
+                                if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
+                                    let bootstrap = secrets_bootstrap_content(&manifest);
+                                    if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
+                                        tracing::warn!("Failed to write secrets bootstrap: {}", e);
                                     }
-                                    true
                                 }
-                                Err(e) => {
-                                    tracing::error!("Secrets injection failed: {}", e);
-                                    false
-                                }
+                                true
                             }
-                        } else {
-                            // No secrets config — still send env vars to gateway for SSH delivery
-                            if let Err(e) = (**sandbox).send_env_to_gateway() {
-                                tracing::warn!("Failed to send env to gateway: {}", e);
+                            Err(e) => {
+                                tracing::error!("Failed to send env to gateway: {}", e);
+                                false
                             }
-                            false
                         };
 
                         let project_mount = sandbox.take_project_mount();
@@ -4479,32 +4482,29 @@ fn resume_session(
                                 (**sandbox).config_mut().env.insert(key, val);
                             }
 
-                            // Secrets injection (lifecycle — works for both auto and interactive)
+                            // Encrypt and send ALL env vars to gateway (always)
                             let clone_path = sandbox
                                 .project_mount()
                                 .and_then(|pm| pm.worktree_base.clone());
-                            let secrets_active = if let Some(ref secrets_cfg) = secrets_cfg {
-                                match inject_secrets(&mut sandbox, secrets_cfg, &config_dir, &clone_path) {
-                                    Ok(manifest) => {
-                                        if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
-                                            let bootstrap = secrets_bootstrap_content(&manifest);
-                                            if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
-                                                tracing::warn!("Failed to write secrets bootstrap: {}", e);
-                                            }
+                            let secrets_active = match send_encrypted_env(
+                                &mut sandbox,
+                                secrets_cfg.as_ref(),
+                                &config_dir,
+                                &clone_path,
+                            ) {
+                                Ok(manifest) => {
+                                    if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
+                                        let bootstrap = secrets_bootstrap_content(&manifest);
+                                        if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
+                                            tracing::warn!("Failed to write secrets bootstrap: {}", e);
                                         }
-                                        true
                                     }
-                                    Err(e) => {
-                                        tracing::error!("Secrets injection failed: {}", e);
-                                        false
-                                    }
+                                    true
                                 }
-                            } else {
-                                // No secrets config — still send env vars to gateway for SSH delivery
-                                if let Err(e) = (**sandbox).send_env_to_gateway() {
-                                    tracing::warn!("Failed to send env to gateway: {}", e);
+                                Err(e) => {
+                                    tracing::error!("Failed to send env to gateway: {}", e);
+                                    false
                                 }
-                                false
                             };
 
                             let project_mount = sandbox.take_project_mount();
@@ -5312,47 +5312,65 @@ fn handle_agent_info(app: &mut App, name: &str) {
     });
 }
 
-/// Collect, encrypt, and send secrets to the sandbox gateway.
+/// Encrypt and send ALL env vars to the gateway.
 ///
-/// Returns the manifest describing what was injected. The gateway holds the
-/// decrypted secrets in memory and merges them into every exec call and SSH
-/// session automatically.
-fn inject_secrets(
+/// This is called for EVERY sandbox after start(). All env vars (from .env,
+/// sandbox.yml env:, --env flags, auto-detected API keys, agent-specific vars)
+/// are encrypted and sent to the gateway's SSH env store + secrets_store.
+///
+/// If a secrets: config is present, also collects from SOPS files and intercepts
+/// credential files from the git repo.
+///
+/// The gateway injects these into every SSH session and exec call via cmd.Env —
+/// no shell export, no .env files inside the VM.
+fn send_encrypted_env(
     sandbox: &mut sandbox::Sandbox,
-    secrets_config: &sandbox::SecretSource,
+    secrets_config: Option<&sandbox::SecretSource>,
     config_dir: &std::path::Path,
     clone_path: &Option<std::path::PathBuf>,
 ) -> anyhow::Result<runtime::SecretManifest> {
-    // 1. Collect secrets from SOPS file and host env
-    let mut payload = crate::collect_secrets(secrets_config, config_dir)?;
+    let mut payload = sandbox::secrets::payload::SecretPayload::new();
 
-    // 2. Intercept sensitive files from git repo clone
-    if let Some(ref clone) = clone_path {
-        if !secrets_config.intercept_patterns.is_empty() {
-            let result = sandbox::secrets::intercept::intercept_sensitive_files(
-                clone,
-                &secrets_config.intercept_patterns,
-            );
-            for (path, contents) in result.intercepted {
-                payload.add_intercepted_file(path, contents);
-            }
-            for (path, err) in &result.errors {
-                warn!("Failed to intercept {}: {}", path, err);
+    // 1. If secrets: config exists, collect from SOPS file and host env keys
+    if let Some(secrets_cfg) = secrets_config {
+        let extra = crate::collect_secrets(secrets_cfg, config_dir)?;
+        for (k, v) in extra.secrets {
+            payload.add_secret(k, v);
+        }
+
+        // Intercept sensitive files from git repo clone
+        if let Some(ref clone) = clone_path {
+            if !secrets_cfg.intercept_patterns.is_empty() {
+                let result = sandbox::secrets::intercept::intercept_sensitive_files(
+                    clone,
+                    &secrets_cfg.intercept_patterns,
+                );
+                for (path, contents) in result.intercepted {
+                    payload.add_intercepted_file(path, contents);
+                }
+                for (path, err) in &result.errors {
+                    warn!("Failed to intercept {}: {}", path, err);
+                }
             }
         }
     }
 
-    if payload.is_empty() {
+    // 2. Add ALL config.env vars to the payload
+    let runtime_sb = &mut ***sandbox;
+    for (k, v) in &runtime_sb.config().env {
+        if !payload.secrets.contains_key(k) {
+            payload.add_secret(k.clone(), v.clone());
+        }
+    }
+
+    if payload.secrets.is_empty() && payload.intercepted_files.is_empty() {
         return Ok(runtime::SecretManifest {
             secrets: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
         });
     }
 
-    // 3. Get gateway public key
-    // Deref through AgentSandbox -> SandboxInner -> runtime::Sandbox (git dep)
-    // We avoid a type annotation here because runtime appears twice in the dep graph.
-    let runtime_sb = &mut ***sandbox;
+    // 3. Encrypt using the RUNTIME's crypto (same crate as decrypt — no version mismatch)
     let pubkey_b64 = runtime_sb.secrets_pubkey()
         .ok_or_else(|| anyhow::anyhow!("Gateway secrets pubkey not available"))?;
 
@@ -5362,16 +5380,15 @@ fn inject_secrets(
         .try_into()
         .map_err(|_| anyhow::anyhow!("Gateway pubkey must be 32 bytes"))?;
 
-    // 4. Encrypt payload
     let plaintext = payload.to_json_bytes()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let encrypted = sandbox::secrets::crypto::encrypt_payload(&plaintext, &pubkey_bytes)
+    let encrypted = runtime::encrypt_payload(&plaintext, &pubkey_bytes)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let encrypted_json = serde_json::to_string(&encrypted)?;
 
-    // 5. Send to gateway
+    // 4. Send encrypted payload → runtime decrypts → stores in secrets_store + POSTs to gateway
     let manifest = runtime_sb.send_secrets(&encrypted_json)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
