@@ -12,7 +12,7 @@ mod cli {
     use std::time::Duration;
     use tokio::sync::Mutex;
     use tabled::{Table, Tabled};
-    use tracing::{error, warn};
+    use tracing::{error, info, warn};
 
     /// Output format for commands
     #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -306,7 +306,7 @@ mod cli {
                     .ok()
                     .filter(|v| !v.is_empty())
                     .unwrap_or_else(|| default_level.to_string());
-                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl}", lvl = file_level);
+                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl},sandbox={lvl}", lvl = file_level);
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
@@ -317,7 +317,7 @@ mod cli {
                 if cli.command.is_some() && cli.verbose {
                     let stderr_layer = fmt::layer()
                         .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug"));
+                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug"));
 
                     tracing_subscriber::registry()
                         .with(file_layer)
@@ -332,7 +332,7 @@ mod cli {
                 _log_guard = None;
                 if cli.command.is_some() && cli.verbose {
                     tracing_subscriber::fmt()
-                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug")
+                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug")
                         .init();
                 } else {
                     let _ = env_logger::Builder::from_env(
@@ -381,10 +381,7 @@ mod cli {
                 // Auto-load .env from project directory (lowest priority).
                 // Check --project flag first, then CWD if it's a git repo.
                 let auto_env_dir = cli.project.as_ref().map(std::path::PathBuf::from)
-                    .or_else(|| {
-                        let cwd = std::env::current_dir().ok()?;
-                        if cwd.join(".git").exists() { Some(cwd) } else { None }
-                    });
+                    .or_else(|| std::env::current_dir().ok());
                 if let Some(ref dir) = auto_env_dir {
                     let env_path = dir.join(".env");
                     if env_path.exists() {
@@ -399,7 +396,7 @@ mod cli {
                         for (_, config) in sandbox_configs.iter_mut() {
                             for (k, v) in &project_env {
                                 // Only set if not already defined by sandbox.yml
-                                config.runtime.env.entry(k.clone()).or_insert_with(|| v.clone());
+                                config.sandbox.env.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                         }
                     }
@@ -431,7 +428,7 @@ mod cli {
                 let sandbox_configs = if let Some(ref name) = cli.sandbox {
                     let filtered: Vec<_> = sandbox_configs
                         .into_iter()
-                        .filter(|(key, config)| key == name || config.runtime.name == *name)
+                        .filter(|(key, config)| key == name || config.sandbox.name == *name)
                         .collect();
                     if filtered.is_empty() {
                         error!("Sandbox '{}' not found in config files", name);
@@ -445,17 +442,11 @@ mod cli {
                     sandbox_configs
                 };
 
-                // Project path for sandboxes without explicit project config.
+                // Always use CWD as project path so non-git directories get session
+                // persistence and project mounting (git is initialised in source on first use).
                 let project_path = cli.project
                     .map(std::path::PathBuf::from)
-                    .or_else(|| {
-                        let cwd = std::env::current_dir().ok()?;
-                        if cwd.join(".git").exists() {
-                            Some(cwd)
-                        } else {
-                            None
-                        }
-                    });
+                    .or_else(|| std::env::current_dir().ok());
 
                 nanosb_cli::tui::run::run_tui(project_path, sandbox_configs).await
             }
@@ -627,6 +618,45 @@ mod cli {
         Ok(vars)
     }
 
+    /// Collect secrets from the SecretSource configuration.
+    /// Returns a SecretPayload ready for encryption.
+    fn collect_secrets(
+        secrets_config: &sandbox::SecretSource,
+        config_dir: &std::path::Path,
+    ) -> anyhow::Result<sandbox::secrets::payload::SecretPayload> {
+        let mut payload = sandbox::secrets::payload::SecretPayload::new();
+
+        // 1. Load from SOPS-encrypted file if specified
+        if let Some(ref file) = secrets_config.file {
+            let file_path = std::path::Path::new(file);
+            match sandbox::secrets::sops::decrypt_sops_file(file_path, config_dir) {
+                Ok(secrets) => {
+                    for (key, value) in secrets {
+                        payload.add_secret(key, value);
+                    }
+                    info!("Loaded {} secrets from SOPS file: {}", payload.secrets.len(), file);
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to decrypt SOPS file '{}': {}", file, e));
+                }
+            }
+        }
+
+        // 2. Read explicit keys from host environment (without set_var!)
+        for key in &secrets_config.keys {
+            match std::env::var(key) {
+                Ok(value) => {
+                    payload.add_secret(key.clone(), value);
+                }
+                Err(_) => {
+                    warn!("Secret key '{}' not found in host environment", key);
+                }
+            }
+        }
+
+        Ok(payload)
+    }
+
     /// Run a command in a new sandbox
     ///
     /// By default, output is streamed in real-time (like `docker run`).
@@ -702,11 +732,11 @@ mod cli {
             builder = builder.env(key, value);
         }
 
-        for (host, guest) in ports {
-            builder = builder.port(*host, *guest);
-        }
+        let mut config = builder.build();
 
-        let config = builder.build();
+        for (host, guest) in ports {
+            config.sandbox.network.port_mappings.push(sandbox::PortMapping::tcp(*host, *guest));
+        }
 
         let pb = create_pull_progress();
         pb.set_message("Creating sandbox...");
@@ -772,7 +802,9 @@ mod cli {
                 let result = {
                     let mut guard = shared.lock().await;
                     let sb = guard.as_mut().expect("sandbox exists");
-                    sb.exec(cmd, &args).await?
+                    sb.gateway()
+                        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+                        .exec(cmd, &args).await?
                 };
 
                 match format {
@@ -808,23 +840,25 @@ mod cli {
                 let exit_code = {
                     let mut guard = shared.lock().await;
                     let sb = guard.as_mut().expect("sandbox exists");
-                    sb.exec_stream(cmd, &args, |chunk| {
-                        match chunk.stream {
-                            Stream::Stdout => {
-                                let data = format!("{}\n", chunk.data);
-                                let stdout = std::io::stdout();
-                                let mut handle = stdout.lock();
-                                write_all_retry(&mut handle, data.as_bytes());
+                    sb.gateway()
+                        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+                        .exec_stream(cmd, &args, |chunk| {
+                            match chunk.stream {
+                                Stream::Stdout => {
+                                    let data = format!("{}\n", chunk.data);
+                                    let stdout = std::io::stdout();
+                                    let mut handle = stdout.lock();
+                                    write_all_retry(&mut handle, data.as_bytes());
+                                }
+                                Stream::Stderr => {
+                                    let data = format!("{}\n", chunk.data);
+                                    let stderr = std::io::stderr();
+                                    let mut handle = stderr.lock();
+                                    write_all_retry(&mut handle, data.as_bytes());
+                                }
                             }
-                            Stream::Stderr => {
-                                let data = format!("{}\n", chunk.data);
-                                let stderr = std::io::stderr();
-                                let mut handle = stderr.lock();
-                                write_all_retry(&mut handle, data.as_bytes());
-                            }
-                        }
-                    })
-                    .await?
+                        })
+                        .await?
                 };
 
                 // Clean up sandbox
@@ -1058,7 +1092,8 @@ mod cli {
 
     /// Check runtime prerequisites and display status
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
-        use sandbox::runtime::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::validation::validate_runtime_prerequisites_detailed;
+
 
         let result = validate_runtime_prerequisites_detailed().await;
 
@@ -1080,7 +1115,7 @@ mod cli {
     }
 
     /// Print doctor results as colored checklist
-    fn print_doctor_results(result: &sandbox::runtime::runtime::ValidationResult) {
+    fn print_doctor_results(result: &sandbox::validation::ValidationResult) {
         println!();
         println!("Checking runtime prerequisites...");
         println!();
@@ -1255,7 +1290,7 @@ mod cli {
     }
 
     fn doctor_results_to_json(
-        result: &sandbox::runtime::runtime::ValidationResult,
+        result: &sandbox::validation::ValidationResult,
     ) -> serde_json::Value {
         serde_json::json!({
             "ok": result.is_ok(),
@@ -1443,7 +1478,8 @@ mod cli {
 
     /// Run preflight validation, showing doctor output on failure.
     async fn preflight_check() -> anyhow::Result<()> {
-        use sandbox::runtime::runtime::validate_runtime_prerequisites_detailed;
+        use sandbox::validation::validate_runtime_prerequisites_detailed;
+
 
         let result = validate_runtime_prerequisites_detailed().await;
         if !result.is_ok() {
@@ -1535,7 +1571,7 @@ fn main() -> anyhow::Result<()> {
     // — before any threads are created — the child runs in a clean,
     // single-threaded process where hv_vm_create() works correctly.
     if std::env::args().nth(1).as_deref() == Some("internal-boot-vm") {
-        sandbox::runtime::runtime::handle_boot_vm_subprocess();
+        sandbox::handle_boot_vm_subprocess();
         // ^ never returns
     }
 

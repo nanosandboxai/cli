@@ -1,7 +1,9 @@
 //! Main event loop for the TUI.
 
 use std::collections::HashMap;
+use base64::Engine;
 use std::io::{self, IsTerminal};
+use tracing::warn;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +25,10 @@ use tokio::sync::{mpsc, Mutex};
 use sandbox::{AgentSandboxConfig, McpServerConfig, SandboxConfig};
 use sandbox::Sandbox;
 
-use super::app::{AgentPanel, App, ChatMessage, InputFocus, MessageRole, MouseSelection, PanelMode, SidebarFilesTab, SubmitResult};
+use super::app::{
+    AgentPanel, App, ChatMessage, InputFocus, MessageRole, MouseSelection, PanelMode,
+    SidebarFilesTab, SubmitResult, SYSTEM_POPUP_TICKS_DEFAULT,
+};
 use super::commands::{self, Command};
 use super::event::{spawn_terminal_event_reader, AppEvent};
 use super::renderer;
@@ -212,7 +217,7 @@ pub async fn run_tui(
 
     // Validate runtime prerequisites before launching TUI.
     println!("\nChecking runtime prerequisites...\n");
-    let validation = sandbox::runtime::runtime::validate_runtime_prerequisites_detailed().await;
+    let validation = sandbox::validation::validate_runtime_prerequisites_detailed().await;
 
     print_validation_results(&validation);
 
@@ -239,7 +244,7 @@ pub async fn run_tui(
             let choice = sandbox::session::prompt_resume(&session, &issues);
             match choice {
                 sandbox::session::ResumeChoice::Resume => Some(session),
-                sandbox::session::ResumeChoice::Fresh | sandbox::session::ResumeChoice::Destroy => {
+                sandbox::session::ResumeChoice::ClearAndRestart | sandbox::session::ResumeChoice::Destroy => {
                     // Remove old project clones.
                     for panel in &session.panels {
                         if let Some(ref clone_path) = panel.clone_path {
@@ -325,25 +330,31 @@ pub async fn run_tui(
     // Resolve agent definitions + skills from registry before launching.
     let mut resolved_configs: Vec<(String, AgentSandboxConfig)> = Vec::new();
     for (key, mut config) in sandbox_configs {
-        if let (Some(ref registry), Some(ref agent_name)) = (&app.registry, &config.agent) {
-            match registry.resolve_full(agent_name, &config.skills) {
-                Ok(mut resolved) => {
-                    // Merge: sandbox.yml MCPs override registry MCPs
-                    for (name, mcp) in &config.mcp_servers {
-                        resolved.mcp_servers.insert(name.clone(), mcp.clone());
+        match (&app.registry, config.agent.as_ref()) {
+            (Some(registry), Some(agent_name)) => {
+                match registry.resolve_full(agent_name, &config.skills) {
+                    Ok(resolved) => merge_resolved_agent_into_config(&mut config, resolved),
+                    Err(e) => {
+                        eprintln!("Warning: failed to resolve agent '{}': {}", agent_name, e);
                     }
-                    // Replace config MCPs with merged set
-                    config.mcp_servers = resolved.mcp_servers.clone();
-                    // Propagate auto_mode, permissions, and agent_type from sandbox config
-                    resolved.auto_mode = config.auto_mode;
-                    resolved.permissions = config.permissions;
-                    resolved.agent_type = config.agent_type;
-                    config.resolved_agent = Some(resolved);
-                }
-                Err(e) => {
-                    eprintln!("Warning: failed to resolve agent '{}': {}", agent_name, e);
                 }
             }
+            (Some(registry), None) if !config.skills.is_empty() => {
+                match registry.resolve_skills_only(&config.skills) {
+                    Ok(resolved) => merge_resolved_agent_into_config(&mut config, resolved),
+                    Err(e) => {
+                        eprintln!("Warning: failed to resolve sandbox skills: {}", e);
+                    }
+                }
+            }
+            (None, None) if !config.skills.is_empty() => {
+                eprintln!(
+                    "Warning: sandbox lists skills but no agents registry was found. \
+Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-registry/ \
+(sibling ../agents-registry is also checked from the current directory)."
+                );
+            }
+            _ => {}
         }
         resolved_configs.push((key, config));
     }
@@ -443,7 +454,7 @@ pub async fn run_tui(
                     panel.loading_message = Some(message);
                 }
             }
-            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount } => {
+            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount, secrets_active } => {
                 // Get SSH info before storing sandbox
                 let ssh_info = {
                     let sb = sandbox.lock().await;
@@ -464,6 +475,7 @@ pub async fn run_tui(
                         panel.ssh_host_port = Some(port);
                         panel.ssh_key_path = Some(key.clone());
                     }
+                    panel.secrets_active = secrets_active;
                 }
 
                 let is_auto_mode = app.panels.get(panel_idx)
@@ -475,6 +487,7 @@ pub async fn run_tui(
                     // No SSH needed — runs command via HvSocket/HTTP gateway.
                     if let Some(panel) = app.panels.get(panel_idx) {
                         let agent_name = panel.agent_name.clone();
+                        // Gateway merges secrets automatically — just pass panel env.
                         let env = panel.env.clone();
                         let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                         let permissions = panel.permissions;
@@ -507,6 +520,7 @@ pub async fn run_tui(
                     };
                     if let Some(panel) = app.panels.get(panel_idx) {
                         let agent_name = panel.agent_name.clone();
+                        // Gateway merges secrets automatically — just pass panel env.
                         let env = panel.env.clone();
                         let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                         let permissions = panel.permissions;
@@ -1012,7 +1026,11 @@ async fn spawn_gateway_exec(
     };
 
     // Build environment map — panel env + agent-specific vars.
-    let mut exec_env = env.clone();
+    // Secrets are injected by the gateway automatically via exec_with_options.
+    let mut exec_env: HashMap<String, String> = env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     exec_env.extend(super::terminal::agent_env_vars(
         agent_name, permissions, true, model, prompt,
     ));
@@ -1057,30 +1075,34 @@ async fn spawn_gateway_exec(
         let tx_data = tx.clone();
         let chunk_counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let chunk_counter_cb = chunk_counter.clone();
-        sb.exec_stream_with_options(
-            "sh",
-            &["-c", &shell_cmd],
-            exec_opts,
-            move |chunk| {
-                // Gateway SSE events don't include trailing newlines, but the
-                // headless NDJSON parser splits on \n. Append newline to each
-                // chunk (same as `nanosb exec` in main.rs).
-                let n = chunk_counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if n == 1 || n % 20 == 0 {
-                    let preview: String = chunk.data.chars().take(200).collect();
-                    tracing::info!(
-                        "[spawn_gateway_exec] chunk #{} (stream={:?}): {}",
-                        n, chunk.stream, preview
-                    );
-                }
-                let mut data = chunk.data.into_bytes();
-                data.push(b'\n');
-                let _ = tx_data.send(AppEvent::TerminalData {
-                    panel_idx,
-                    data,
-                });
-            },
-        ).await
+        let gw_result = match sb.gateway() {
+            Ok(gw) => gw.exec_stream_with_options(
+                "sh",
+                &["-c", &shell_cmd],
+                exec_opts,
+                move |chunk| {
+                    // Gateway SSE events don't include trailing newlines, but the
+                    // headless NDJSON parser splits on \n. Append newline to each
+                    // chunk (same as `nanosb exec` in main.rs).
+                    let n = chunk_counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n == 1 || n % 20 == 0 {
+                        let preview: String = chunk.data.chars().take(200).collect();
+                        tracing::info!(
+                            "[spawn_gateway_exec] chunk #{} (stream={:?}): {}",
+                            n, chunk.stream, preview
+                        );
+                    }
+                    let mut data = chunk.data.into_bytes();
+                    data.push(b'\n');
+                    let _ = tx_data.send(AppEvent::TerminalData {
+                        panel_idx,
+                        data,
+                    });
+                },
+            ).await,
+            Err(e) => Err(e),
+        };
+        gw_result
     };
 
     match exec_result {
@@ -1104,7 +1126,7 @@ async fn spawn_gateway_exec(
 }
 
 /// Print validation results as a checklist.
-fn print_validation_results(validation: &sandbox::runtime::runtime::ValidationResult) {
+fn print_validation_results(validation: &sandbox::validation::ValidationResult) {
     for err in &validation.errors {
         println!("  [x] {}: {}", err.check, err.message);
         if let Some(ref hint) = err.fix_hint {
@@ -1216,6 +1238,32 @@ async fn handle_key_event(
     key: KeyEvent,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
+    // Pending reconnect confirmation: intercept y/n before anything else.
+    if app.pending_reconnect.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let panel_indices = app.pending_reconnect.take().unwrap();
+                app.system_messages.clear();
+                app.system_message_ticks = None;
+                for &idx in &panel_indices {
+                    // Trigger reconnect for each affected panel.
+                    let saved_focus = app.focused_panel;
+                    app.focused_panel = idx;
+                    Box::pin(handle_command(app, Command::Reconnect, tx)).await;
+                    app.focused_panel = saved_focus;
+                }
+                return;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.pending_reconnect = None;
+                app.system_messages.clear();
+                app.system_message_ticks = None;
+                return;
+            }
+            _ => return, // Swallow other keys while prompt is active
+        }
+    }
+
     // Loading mode: swallow all keystrokes except navigation.
     if app.input_focus == InputFocus::Panel {
         if let Some(panel) = app.panels.get(app.focused_panel) {
@@ -1633,13 +1681,12 @@ async fn handle_key_event(
                     handle_command(app, cmd, tx).await;
                 }
                 SubmitResult::CommandError(msg) => {
-                    // 4 ticks × 250ms = 1s auto-dismiss; ESC still dismisses immediately.
                     app.set_system_message_timed(
                         ChatMessage {
                             role: MessageRole::System,
                             content: msg,
                         },
-                        4,
+                        SYSTEM_POPUP_TICKS_DEFAULT,
                     );
                 }
                 SubmitResult::Message(_msg) => {
@@ -1771,7 +1818,7 @@ async fn handle_command(
             }
         }
         Command::Help => {
-            app.set_system_message(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: concat!(
                     "Available commands:\n",
@@ -1955,6 +2002,7 @@ async fn handle_command(
 
                 if let Some((ssh_port, key_path)) = ssh_info {
                     let agent_name = panel.agent_name.clone();
+                    // Gateway merges secrets automatically — just pass panel env.
                     let env = panel.env.clone();
                     let workdir = panel.project_mount.as_ref().map(|_| "/workspace".to_string());
                     let permissions = panel.permissions;
@@ -2034,15 +2082,139 @@ async fn handle_command(
                         .to_string(),
                 });
             } else {
-                match cmd {
-                    Command::McpList => handle_mcp_list(app).await,
-                    Command::McpAdd { name, command, args } => {
-                        handle_mcp_add(app, &name, &command, &args).await;
+                // Determine target panels from --all / --sandbox <name> / default (focused).
+                let target_ref = match &cmd {
+                    Command::McpAdd { target, .. } |
+                    Command::McpRemove { target, .. } |
+                    Command::McpEnable { target, .. } |
+                    Command::McpDisable { target, .. } => target.clone(),
+                    _ => None,
+                };
+                let (target_panels, scope): (Vec<(usize, _)>, String) = match target_ref.as_deref() {
+                    Some("all") => {
+                        let panels: Vec<_> = app.panels.iter().enumerate()
+                            .filter_map(|(i, p)| p.sandbox.as_ref().cloned().map(|sb| (i, sb)))
+                            .collect();
+                        let count = panels.len();
+                        (panels, format!("all {} sandboxes", count))
                     }
-                    Command::McpRemove { name } => handle_mcp_remove(app, &name).await,
-                    Command::McpEnable { name } => handle_mcp_enable(app, &name).await,
-                    Command::McpDisable { name } => handle_mcp_disable(app, &name).await,
+                    Some(name) => {
+                        match app.resolve_panel_target(Some(name)) {
+                            Some(idx) => {
+                                let label = app.panels[idx].display_name.clone()
+                                    .unwrap_or_else(|| app.panels[idx].agent_name.clone());
+                                match app.panels[idx].sandbox.as_ref().cloned() {
+                                    Some(sb) => (vec![(idx, sb)], label),
+                                    None => {
+                                        app.set_system_message(ChatMessage {
+                                            role: MessageRole::System,
+                                            content: format!("Sandbox '{}' has no running VM.", name),
+                                        });
+                                        return;
+                                    }
+                                }
+                            }
+                            None => {
+                                app.set_system_message(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("No sandbox matching '{}'.", name),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                    None => {
+                        match app.panels.get(app.focused_panel)
+                            .and_then(|p| p.sandbox.as_ref().cloned().map(|sb| (app.focused_panel, sb)))
+                        {
+                            Some(pair) => (vec![pair], "focused sandbox".to_string()),
+                            None => {
+                                app.set_system_message(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: "No sandbox attached to focused panel.".to_string(),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                let mut affected_panels = Vec::new();
+
+                match cmd {
+                    Command::McpList => { handle_mcp_list(app).await; },
+                    Command::McpAdd { name, command, args, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            let cfg = McpServerConfig {
+                                command: command.clone(),
+                                args: args.clone(),
+                                env: HashMap::new(),
+                                enabled: true,
+                            };
+                            if sb.add_mcp_server(&name, cfg).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' added to {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
+                    }
+                    Command::McpRemove { name, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            if sb.remove_mcp_server(&name).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' removed from {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
+                    }
+                    Command::McpEnable { name, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            if sb.enable_mcp_server(&name).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' enabled in {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
+                    }
+                    Command::McpDisable { name, .. } => {
+                        for (idx, sb_arc) in &target_panels {
+                            let sb = sb_arc.lock().await;
+                            if sb.disable_mcp_server(&name).await.is_ok() {
+                                affected_panels.push(*idx);
+                            }
+                        }
+                        if !affected_panels.is_empty() {
+                            app.set_system_message(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("MCP server '{}' disabled in {} ({}).", name, affected_panels.len(), scope),
+                            });
+                        }
+                    }
                     _ => unreachable!(),
+                };
+                // After MCP mutation, ask the user to confirm reload.
+                if !affected_panels.is_empty() {
+                    let count = affected_panels.len();
+                    app.pending_reconnect = Some(affected_panels);
+                    app.set_system_message_persistent(ChatMessage {
+                        role: MessageRole::System,
+                        content: format!("Reload {} agent session(s) to apply changes? (y/n)", count),
+                    });
                 }
             }
         }
@@ -3769,7 +3941,7 @@ fn add_agent(
             None => agent.to_string(),
         },
     };
-    let image_name = sandbox::config::normalize_image(&image_ref);
+    let image_name = sandbox::normalize_image(&image_ref);
 
     let mut panel = AgentPanel::new(agent);
 
@@ -3828,13 +4000,21 @@ fn add_agent(
 
     // Pass auto_sync setting to project config so sandbox creation
     // knows whether to use setup() or setup_deferred().
-    if let Some(ref mut proj) = config.project {
+    if let Some(ref mut proj) = config.sandbox.project {
         proj.auto_sync = app.settings.gitsync.auto_sync;
     }
 
     // Store the config for session persistence.
     panel.original_config = Some(config.clone());
     panel.display_name = name.map(String::from);
+
+    // Capture panel env vars and agent-specific fields before panel is moved into app.panels.
+    let panel_env: HashMap<String, String> = panel.env.clone();
+    let agent_permissions = panel.permissions;
+    let agent_name_str = agent.to_string();
+    let agent_auto_mode = auto_mode;
+    let agent_model = model.map(String::from);
+    let agent_prompt = prompt.map(String::from);
 
     app.panels.push(panel);
     let panel_idx = app.panels.len() - 1;
@@ -3846,6 +4026,7 @@ fn add_agent(
     let tx = tx.clone();
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
+        let resolved_agent = config.resolved_agent.clone();
         let _ = tx.send(AppEvent::SandboxCreating {
             panel_idx,
             message: "Pulling image...".into(),
@@ -3863,8 +4044,43 @@ fn add_agent(
                     message: "Booting microVM...".into(),
                 });
 
+                // Stagger VM starts to avoid concurrent gvproxy/VM-subprocess races.
+                // create() (image pull + rootfs) runs in parallel; start() is staggered.
+                if panel_idx > 0 {
+                    tokio::time::sleep(Duration::from_millis(panel_idx as u64 * 600)).await;
+                }
+
                 match sandbox.start().await {
                     Ok(()) => {
+                        if let Some(resolved) = &resolved_agent {
+                            let _ = sandbox.bootstrap_agent(resolved).await;
+                        }
+
+                        // Insert panel env vars (API keys, etc.) and agent-specific vars
+                        // into the runtime config.env so they're delivered via gateway POST.
+                        // Deref: AgentSandbox -> SandboxInner -> runtime::Sandbox
+                        for (key, val) in &panel_env {
+                            (**sandbox).config_mut().env.insert(key.clone(), val.clone());
+                        }
+                        for (key, val) in super::terminal::agent_env_vars(
+                            &agent_name_str,
+                            agent_permissions,
+                            agent_auto_mode,
+                            agent_model.as_deref(),
+                            agent_prompt.as_deref(),
+                        ) {
+                            (**sandbox).config_mut().env.insert(key, val);
+                        }
+                        // Encrypt and send ALL env vars to gateway
+                        let clone_path = sandbox
+                            .project_mount()
+                            .and_then(|pm| pm.worktree_base.clone());
+                        if let Err(e) = send_encrypted_env(
+                            &mut sandbox, None, std::path::Path::new("."), &clone_path,
+                        ) {
+                            tracing::warn!("Failed to send env to gateway: {}", e);
+                        }
+
                         // Take the project mount from the sandbox so we can
                         // store it on the panel for teardown on kill.
                         let project_mount = sandbox.take_project_mount();
@@ -3874,6 +4090,7 @@ fn add_agent(
                             sandbox: sb,
                             short_id,
                             project_mount,
+                            secrets_active: false,
                         });
                     }
                     Err(e) => {
@@ -3901,13 +4118,13 @@ fn add_agent_from_config(
     mut config: AgentSandboxConfig,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    let display_name = config.runtime.name.clone();
+    let display_name = config.sandbox.name.clone();
 
     // Detect the base agent type: explicit config.agent_type > image name > key.
     let agent_type = config
         .agent_type
         .map(|t| t.to_string())
-        .or_else(|| detect_agent_type_from_image(&config.runtime.image))
+        .or_else(|| detect_agent_type_from_image(&config.sandbox.image))
         .unwrap_or_else(|| key.to_string());
 
     let mut panel = AgentPanel::new(&agent_type);
@@ -3921,7 +4138,7 @@ fn add_agent_from_config(
     }
 
     // Copy env vars from config to panel.
-    for (k, v) in &config.runtime.env {
+    for (k, v) in &config.sandbox.env {
         panel.env.insert(k.clone(), v.clone());
     }
 
@@ -3929,16 +4146,26 @@ fn add_agent_from_config(
     for (api_key, _) in &required_api_keys(&agent_type) {
         if !panel.env.contains_key(*api_key) {
             if let Ok(val) = std::env::var(api_key) {
-                panel.env.insert(api_key.to_string(), val);
+                if config.secrets.is_some() {
+                    // Route through encrypted secrets pipeline
+                    if let Some(ref mut secrets) = config.secrets {
+                        if !secrets.keys.contains(&api_key.to_string()) {
+                            secrets.keys.push(api_key.to_string());
+                        }
+                    }
+                } else {
+                    // Legacy path: add to env
+                    panel.env.insert(api_key.to_string(), val);
+                }
             }
         }
     }
 
     // If config doesn't have a project but --project flag was set,
     // inject it into the config so the sandbox mounts it.
-    if config.runtime.project.is_none() {
+    if config.sandbox.project.is_none() {
         if let Some(ref project_path) = app.project_path {
-            config.runtime.project = Some(sandbox::ProjectConfig {
+            config.sandbox.project = Some(sandbox::ProjectConfig {
                 path: project_path.clone(),
                 branch: None,
                 mount_point: "/workspace".to_string(),
@@ -3947,13 +4174,13 @@ fn add_agent_from_config(
         }
     } else {
         // Config has a project — just set auto_sync from settings.
-        if let Some(ref mut proj) = config.runtime.project {
+        if let Some(ref mut proj) = config.sandbox.project {
             proj.auto_sync = app.settings.gitsync.auto_sync;
         }
     }
 
     // Store the runtime config for session persistence.
-    panel.original_config = Some(config.runtime.clone());
+    panel.original_config = Some(config.clone());
 
     app.panels.push(panel);
     let panel_idx = app.panels.len() - 1;
@@ -3961,18 +4188,37 @@ fn add_agent_from_config(
     app.show_welcome = false;
     app.focus_panel_input();
 
+    // Capture config_dir (directory containing sandbox.yml) before the async move.
+    // Use the project path from config, falling back to CWD.
+    let config_dir = config
+        .sandbox
+        .project
+        .as_ref()
+        .map(|p| p.path.clone())
+        .or_else(|| app.project_path.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // Capture the agent type string for secrets bootstrap.
+    let agent_type_str = agent_type.clone();
+
+    // Capture agent-specific fields before config is moved into the async block.
+    let agent_auto_mode = config.auto_mode;
+    let agent_permissions = config.permissions;
+    let agent_model = config.model.clone();
+    let agent_prompt = config.prompt.clone();
+
     let tx = tx.clone();
     let image_manager = app.image_manager.clone();
-    let runtime_config = config.runtime;
     tokio::spawn(async move {
+        let resolved_agent = config.resolved_agent.clone();
+        let secrets_cfg = config.secrets.clone();
         let _ = tx.send(AppEvent::SandboxCreating {
             panel_idx,
             message: "Pulling image...".into(),
         });
         let create_result = if let Some(im) = image_manager {
-            Sandbox::create_with_manager(runtime_config, im).await
+            Sandbox::create_with_manager(config, im).await
         } else {
-            Sandbox::create(runtime_config).await
+            Sandbox::create(config).await
         };
         match create_result {
             Ok(mut sandbox) => {
@@ -3982,8 +4228,55 @@ fn add_agent_from_config(
                     message: "Booting microVM...".into(),
                 });
 
+                // Stagger VM starts to avoid concurrent gvproxy/VM-subprocess races.
+                if panel_idx > 0 {
+                    tokio::time::sleep(Duration::from_millis(panel_idx as u64 * 600)).await;
+                }
+
                 match sandbox.start().await {
                     Ok(()) => {
+                        if let Some(resolved) = &resolved_agent {
+                            let _ = sandbox.bootstrap_agent(resolved).await;
+                        }
+
+                        // Merge agent-specific env vars (GOOSE_MODE, NANOSB_PROMPT, etc.)
+                        // into the runtime config.env so they're included in the gateway POST.
+                        for (key, val) in super::terminal::agent_env_vars(
+                            &agent_type_str,
+                            agent_permissions,
+                            agent_auto_mode,
+                            agent_model.as_deref(),
+                            agent_prompt.as_deref(),
+                        ) {
+                            // Deref: AgentSandbox -> SandboxInner -> runtime::Sandbox
+                            (**sandbox).config_mut().env.insert(key, val);
+                        }
+
+                        // Encrypt and send ALL env vars to gateway (always — not just when secrets: is configured)
+                        let clone_path = sandbox
+                            .project_mount()
+                            .and_then(|pm| pm.worktree_base.clone());
+                        let secrets_active = match send_encrypted_env(
+                            &mut sandbox,
+                            secrets_cfg.as_ref(),
+                            &config_dir,
+                            &clone_path,
+                        ) {
+                            Ok(manifest) => {
+                                if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
+                                    let bootstrap = secrets_bootstrap_content(&manifest);
+                                    if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
+                                        tracing::warn!("Failed to write secrets bootstrap: {}", e);
+                                    }
+                                }
+                                true
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to send env to gateway: {}", e);
+                                false
+                            }
+                        };
+
                         let project_mount = sandbox.take_project_mount();
                         let sb = Arc::new(Mutex::new(sandbox));
                         let _ = tx.send(AppEvent::SandboxReady {
@@ -3991,6 +4284,7 @@ fn add_agent_from_config(
                             sandbox: sb,
                             short_id,
                             project_mount,
+                            secrets_active,
                         });
                     }
                     Err(e) => {
@@ -4026,17 +4320,17 @@ fn resume_session(
         let mut config = sp.config.clone();
 
         // Normalize the image in case the session was saved with a bare name.
-        config.image = sandbox::config::normalize_image(&config.image);
+        config.sandbox.image = sandbox::normalize_image(&config.sandbox.image);
 
         // Re-populate env vars from host environment (secrets are not stored in session).
         for key in &sp.env_keys {
             if let Ok(val) = std::env::var(key) {
-                config.env.insert(key.clone(), val);
+                config.sandbox.env.insert(key.clone(), val);
             }
         }
 
         // Set up the agent panel.
-        let agent_type = detect_agent_type_from_image(&config.image)
+        let agent_type = detect_agent_type_from_image(&config.sandbox.image)
             .unwrap_or_else(|| sp.agent_name.clone());
 
         let mut panel = AgentPanel::new(&agent_type);
@@ -4053,7 +4347,7 @@ fn resume_session(
         panel.original_config = Some(config.clone());
 
         // Copy env vars from config to panel.
-        for (k, v) in &config.env {
+        for (k, v) in &config.sandbox.env {
             panel.env.insert(k.clone(), v.clone());
         }
 
@@ -4061,13 +4355,23 @@ fn resume_session(
         for (api_key, _) in &required_api_keys(&agent_type) {
             if !panel.env.contains_key(*api_key) {
                 if let Ok(val) = std::env::var(api_key) {
-                    panel.env.insert(api_key.to_string(), val);
+                    if config.secrets.is_some() {
+                        // Route through encrypted secrets pipeline
+                        if let Some(ref mut secrets) = config.secrets {
+                            if !secrets.keys.contains(&api_key.to_string()) {
+                                secrets.keys.push(api_key.to_string());
+                            }
+                        }
+                    } else {
+                        // Legacy path: add to env
+                        panel.env.insert(api_key.to_string(), val);
+                    }
                 }
             }
         }
 
         // If the project clone still exists, mount it directly instead of
-        // creating a new one. We set config.project = None so that
+        // creating a new one. We set config.sandbox.project = None so that
         // setup_project_mount() inside Sandbox::create() is skipped, and add
         // the VirtioFS mount for the existing clone ourselves.
         //
@@ -4076,6 +4380,7 @@ fn resume_session(
         // pointed to a different directory).
         let panel_project_path = sp
             .config
+            .sandbox
             .project
             .as_ref()
             .map(|p| p.path.clone())
@@ -4084,9 +4389,9 @@ fn resume_session(
         if let Some(ref clone_path) = sp.clone_path {
             if clone_path.exists() {
                 // Add VirtioFS mount for existing clone directly.
-                config.mounts.push(sandbox::Mount::virtiofs(clone_path, "/workspace"));
-                // Do NOT set config.project — this skips setup_project_mount().
-                config.project = None;
+                config.sandbox.mounts.push(sandbox::Mount::virtiofs(clone_path, "/workspace"));
+                // Do NOT set config.sandbox.project — this skips setup_project_mount().
+                config.sandbox.project = None;
 
                 // Create a ProjectMount on the panel to handle suspend/teardown.
                 if let Ok(mut pm) = sandbox::ProjectMount::detect(&panel_project_path) {
@@ -4095,7 +4400,7 @@ fn resume_session(
                 }
             } else {
                 // Clone dir is gone — create a fresh clone from the branch.
-                config.project = Some(sandbox::ProjectConfig {
+                config.sandbox.project = Some(sandbox::ProjectConfig {
                     path: panel_project_path,
                     branch: sp
                         .branches
@@ -4119,10 +4424,27 @@ fn resume_session(
         app.show_welcome = false;
         app.focus_panel_input();
 
+        // Capture config_dir and agent_type_str for secrets injection before async move.
+        let config_dir = config
+            .sandbox
+            .project
+            .as_ref()
+            .map(|p| p.path.clone())
+            .unwrap_or_else(|| session.project_path.clone());
+        let agent_type_str = agent_type.clone();
+
+        // Capture agent-specific fields before config is moved into the async block.
+        let agent_auto_mode = sp.auto_mode;
+        let agent_permissions = sp.permissions;
+        let agent_model = sp.model.clone();
+        let agent_prompt = sp.prompt.clone();
+
         // Spawn sandbox creation in background.
         let tx = tx.clone();
         let image_manager = app.image_manager.clone();
         tokio::spawn(async move {
+            let resolved_agent = config.resolved_agent.clone();
+            let secrets_cfg = config.secrets.clone();
             let _ = tx.send(AppEvent::SandboxCreating {
                 panel_idx,
                 message: "Pulling image...".into(),
@@ -4140,8 +4462,55 @@ fn resume_session(
                         message: "Booting microVM...".into(),
                     });
 
+                    // Stagger VM starts to avoid concurrent gvproxy/VM-subprocess races.
+                    if panel_idx > 0 {
+                        tokio::time::sleep(Duration::from_millis(panel_idx as u64 * 600)).await;
+                    }
+
                     match sandbox.start().await {
                         Ok(()) => {
+                            if let Some(resolved) = &resolved_agent {
+                                let _ = sandbox.bootstrap_agent(resolved).await;
+                            }
+
+                            // Merge agent-specific env vars (GOOSE_MODE, NANOSB_PROMPT, etc.)
+                            // into the runtime config.env so they're included in the gateway POST.
+                            for (key, val) in super::terminal::agent_env_vars(
+                                &agent_type_str,
+                                agent_permissions,
+                                agent_auto_mode,
+                                agent_model.as_deref(),
+                                agent_prompt.as_deref(),
+                            ) {
+                                // Deref: AgentSandbox -> SandboxInner -> runtime::Sandbox
+                                (**sandbox).config_mut().env.insert(key, val);
+                            }
+
+                            // Encrypt and send ALL env vars to gateway (always)
+                            let clone_path = sandbox
+                                .project_mount()
+                                .and_then(|pm| pm.worktree_base.clone());
+                            let secrets_active = match send_encrypted_env(
+                                &mut sandbox,
+                                secrets_cfg.as_ref(),
+                                &config_dir,
+                                &clone_path,
+                            ) {
+                                Ok(manifest) => {
+                                    if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
+                                        let bootstrap = secrets_bootstrap_content(&manifest);
+                                        if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
+                                            tracing::warn!("Failed to write secrets bootstrap: {}", e);
+                                        }
+                                    }
+                                    true
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to send env to gateway: {}", e);
+                                    false
+                                }
+                            };
+
                             let project_mount = sandbox.take_project_mount();
                             let sb = Arc::new(Mutex::new(sandbox));
                             let _ = tx.send(AppEvent::SandboxReady {
@@ -4149,6 +4518,7 @@ fn resume_session(
                                 sandbox: sb,
                                 short_id,
                                 project_mount,
+                                secrets_active,
                             });
                         }
                         Err(e) => {
@@ -4223,15 +4593,14 @@ fn handle_env(app: &mut App, assignment: Option<(String, String)>) {
 
 /// Handle `/mcp list` — list MCP servers in the focused panel's sandbox.
 async fn handle_mcp_list(app: &mut App) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .focused_panel_ref()
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: "No sandbox attached to this panel.".to_string(),
             });
@@ -4240,42 +4609,30 @@ async fn handle_mcp_list(app: &mut App) {
     };
 
     let sb = sandbox.lock().await;
-    match sb.gateway_http_get("/api/v1/mcp/servers") {
-        Ok((status, resp)) if status < 400 => {
-            let servers: HashMap<String, McpServerConfig> =
-                serde_json::from_str(&resp).unwrap_or_default();
-            if servers.is_empty() {
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "No MCP servers configured.".to_string(),
-                });
+    match sb.list_mcp_servers().await {
+        Ok(servers) => {
+            let content = if servers.is_empty() {
+                "No MCP servers configured.".to_string()
             } else {
-                let mut lines = Vec::new();
-                lines.push("MCP Servers:".to_string());
-                for (name, cfg) in &servers {
+                let mut lines = vec!["MCP Servers:".to_string()];
+                let mut sorted: Vec<_> = servers.iter().collect();
+                sorted.sort_by_key(|(n, _)| n.as_str());
+                for (name, cfg) in sorted {
                     let status = if cfg.enabled { "enabled" } else { "disabled" };
                     lines.push(format!(
-                        "  {} [{}] - {} {}",
-                        name,
-                        status,
-                        cfg.command,
-                        cfg.args.join(" "),
+                        "  {} [{}]  {} {}",
+                        name, status, cfg.command, cfg.args.join(" "),
                     ));
                 }
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: lines.join("\n"),
-                });
-            }
-        }
-        Ok((status, resp)) => {
-            panel.chat_history.push(ChatMessage {
+                lines.join("\n")
+            };
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
-                content: format!("Failed to list MCP servers ({}): {}", status, resp),
+                content,
             });
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
+            app.set_system_message_persistent(ChatMessage {
                 role: MessageRole::System,
                 content: format!("Failed to list MCP servers: {}", e),
             });
@@ -4284,6 +4641,7 @@ async fn handle_mcp_list(app: &mut App) {
 }
 
 /// Handle `/mcp add <name> <command> [args]`.
+#[allow(dead_code)]
 async fn handle_mcp_add(app: &mut App, name: &str, command: &str, args: &[String]) {
     let panel = match app.focused_panel_mut() {
         Some(p) => p,
@@ -4310,7 +4668,8 @@ async fn handle_mcp_add(app: &mut App, name: &str, command: &str, args: &[String
 
     let body = serde_json::json!({ "name": name, "config": config }).to_string();
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post("/api/v1/mcp/servers", &body) {
+    let result = sb.gateway().and_then(|gw| gw.http_post("/api/v1/mcp/servers", &body));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -4352,7 +4711,8 @@ async fn handle_mcp_remove(app: &mut App, name: &str) {
 
     let path = format!("/api/v1/mcp/servers/{}", name);
     let sb = sandbox.lock().await;
-    match sb.gateway_http_delete(&path) {
+    let result = sb.gateway().and_then(|gw| gw.http_delete(&path));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -4394,7 +4754,8 @@ async fn handle_mcp_enable(app: &mut App, name: &str) {
 
     let path = format!("/api/v1/mcp/servers/{}/enable", name);
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post(&path, "{}") {
+    let result = sb.gateway().and_then(|gw| gw.http_post(&path, "{}"));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -4436,7 +4797,8 @@ async fn handle_mcp_disable(app: &mut App, name: &str) {
 
     let path = format!("/api/v1/mcp/servers/{}/disable", name);
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post(&path, "{}") {
+    let result = sb.gateway().and_then(|gw| gw.http_post(&path, "{}"));
+    match result {
         Ok((status, _)) if status < 400 => {
             panel.chat_history.push(ChatMessage {
                 role: MessageRole::System,
@@ -4527,6 +4889,23 @@ fn build_session_from_app(
     }
 }
 
+/// Merge registry resolution (full agent or skills-only) into sandbox config for bootstrap.
+fn merge_resolved_agent_into_config(
+    config: &mut SandboxConfig,
+    mut resolved: sandbox::ResolvedAgentConfig,
+) {
+    // Merge: sandbox.yml MCPs override registry MCPs
+    for (name, mcp) in &config.mcp_servers {
+        resolved.mcp_servers.insert(name.clone(), mcp.clone());
+    }
+    config.mcp_servers = resolved.mcp_servers.clone();
+    resolved.auto_mode = config.auto_mode;
+    resolved.permissions = config.permissions;
+    resolved.agent_type = config.agent_type;
+    resolved.claude_settings = config.claude_settings.clone();
+    config.resolved_agent = Some(resolved);
+}
+
 fn load_agents_registry() -> Option<sandbox::AgentsRegistryClient> {
     use sandbox::AgentsRegistryClient;
 
@@ -4566,38 +4945,40 @@ fn load_agents_registry() -> Option<sandbox::AgentsRegistryClient> {
 
 // ========== Skills Handlers ==========
 
+fn push_skills_feedback(app: &mut App, content: String, persistent: bool) {
+    let msg = ChatMessage { role: MessageRole::System, content };
+    if persistent {
+        app.set_system_message_persistent(msg);
+    } else {
+        app.set_system_message(msg);
+    }
+}
+
 /// Handle `/skills list` — list skills installed in the gateway.
 async fn handle_skills_list(app: &mut App) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .panels
+        .get(app.focused_panel)
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
+            push_skills_feedback(app, "No sandbox attached to this panel.".to_string(), true);
             return;
         }
     };
 
     let sb = sandbox.lock().await;
-    match sb.gateway_http_get("/api/v1/skills") {
-        Ok((status, resp)) if status < 400 => {
-            let skills: HashMap<String, sandbox::SkillDef> =
-                serde_json::from_str(&resp).unwrap_or_default();
-            if skills.is_empty() {
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "No skills configured. Use /skills add <name> to add from the registry.".to_string(),
-                });
+    match sb.list_skills().await {
+        Ok(skills) => {
+            let content = if skills.is_empty() {
+                "No skills configured. Use /skills add <name> to add from the registry.".to_string()
             } else {
-                let mut lines = Vec::new();
-                lines.push("Skills:".to_string());
-                for (name, skill) in &skills {
+                let mut lines = vec!["Skills:".to_string()];
+                let mut sorted: Vec<_> = skills.iter().collect();
+                sorted.sort_by_key(|(n, _)| n.as_str());
+                for (name, skill) in sorted {
                     let desc = if skill.description.is_empty() {
                         String::new()
                     } else {
@@ -4605,147 +4986,124 @@ async fn handle_skills_list(app: &mut App) {
                     };
                     lines.push(format!("  {}{}", name, desc));
                 }
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: lines.join("\n"),
-                });
-            }
-        }
-        Ok((status, resp)) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to list skills ({}): {}", status, resp),
-            });
+                lines.join("\n")
+            };
+            push_skills_feedback(app, content, true);
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to list skills: {}", e),
-            });
+            push_skills_feedback(app, format!("Failed to list skills: {}", e), true);
         }
     }
 }
 
 /// Handle `/skills add <name>` — resolve from registry and push to gateway.
 async fn handle_skills_add(app: &mut App, name: &str) {
+    app.set_status_message(format!("Adding skill '{}'...", name));
     // First resolve the skill from the registry (host-side).
     let skill = match &app.registry {
         Some(registry) => match registry.resolve_skill(name) {
             Ok(s) => s,
             Err(e) => {
-                if let Some(panel) = app.focused_panel_mut() {
-                    panel.chat_history.push(ChatMessage {
-                        role: MessageRole::System,
-                        content: format!("Failed to resolve skill '{}': {}", name, e),
-                    });
-                }
+                push_skills_feedback(
+                    app,
+                    format!("Failed to resolve skill '{}': {}", name, e),
+                    true,
+                );
                 return;
             }
         },
         None => {
-            if let Some(panel) = app.focused_panel_mut() {
-                panel.chat_history.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "No agents registry loaded. Set NANOSB_REGISTRY_PATH or place registry at ~/.nanosandbox/agents-registry/.".to_string(),
-                });
-            }
+            push_skills_feedback(
+                app,
+                "No agents registry loaded. Set NANOSB_REGISTRY_PATH or place registry at ~/.nanosandbox/agents-registry/.".to_string(),
+                true,
+            );
             return;
         }
     };
 
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    let sandbox = match app
+        .panels
+        .get(app.focused_panel)
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
+            push_skills_feedback(
+                app,
+                "No sandbox attached to this panel.".to_string(),
+                true,
+            );
             return;
         }
     };
 
-    let body = match serde_json::to_string(&skill) {
-        Ok(b) => b,
-        Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to serialize skill: {}", e),
-            });
-            return;
-        }
-    };
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post("/api/v1/skills", &body) {
-        Ok((status, _)) if status < 400 => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Skill '{}' added.", name),
-            });
-        }
-        Ok((status, resp)) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to add skill '{}' ({}): {}", name, status, resp),
-            });
+    match sb.add_skill(&skill).await {
+        Ok(()) => {
+            let restart_result = sb.restart_agent("skills_update").await;
+            let content = match restart_result {
+                Ok(_) => format!("Skill '{}' added and agent reloaded.", name),
+                Err(e) => format!(
+                    "Skill '{}' added, but failed to reload agent: {}. Run /agent set claude.",
+                    name, e
+                ),
+            };
+            push_skills_feedback(app, content, false);
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to add skill '{}': {}", name, e),
-            });
+            push_skills_feedback(
+                app,
+                format!("Failed to add skill '{}': {}", name, e),
+                true,
+            );
         }
     }
 }
 
 /// Handle `/skills remove <name>`.
 async fn handle_skills_remove(app: &mut App, name: &str) {
-    let panel = match app.focused_panel_mut() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let sandbox = match panel.sandbox.as_ref() {
-        Some(sb) => Arc::clone(sb),
+    app.set_status_message(format!("Removing skill '{}'...", name));
+    let sandbox = match app
+        .panels
+        .get(app.focused_panel)
+        .and_then(|p| p.sandbox.as_ref())
+        .cloned()
+    {
+        Some(sb) => sb,
         None => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: "No sandbox attached to this panel.".to_string(),
-            });
+            push_skills_feedback(app, "No sandbox attached to this panel.".to_string(), true);
             return;
         }
     };
 
-    let path = format!("/api/v1/skills/{}", name);
     let sb = sandbox.lock().await;
-    match sb.gateway_http_delete(&path) {
-        Ok((status, _)) if status < 400 => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Skill '{}' removed.", name),
-            });
-        }
-        Ok((status, resp)) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to remove skill '{}' ({}): {}", name, status, resp),
-            });
+    match sb.remove_skill(name).await {
+        Ok(()) => {
+            let restart_result = sb.restart_agent("skills_update").await;
+            let content = match restart_result {
+                Ok(_) => format!("Skill '{}' removed and agent reloaded.", name),
+                Err(e) => format!(
+                    "Skill '{}' removed, but failed to reload agent: {}. Run /agent set claude.",
+                    name, e
+                ),
+            };
+            push_skills_feedback(app, content, false);
         }
         Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to remove skill '{}': {}", name, e),
-            });
+            push_skills_feedback(
+                app,
+                format!("Failed to remove skill '{}': {}", name, e),
+                true,
+            );
         }
     }
 }
 
 /// Handle `/skills show <name>` — show skill content from the registry.
 fn handle_skills_show(app: &mut App, name: &str) {
+    app.set_status_message(format!("Showing skill '{}'.", name));
     let content = match &app.registry {
         Some(registry) => match registry.resolve_skill(name) {
             Ok(skill) => {
@@ -4769,12 +5127,7 @@ fn handle_skills_show(app: &mut App, name: &str) {
         None => "No agents registry loaded. Set NANOSB_REGISTRY_PATH or place registry at ~/.nanosandbox/agents-registry/.".to_string(),
     };
 
-    if let Some(panel) = app.focused_panel_mut() {
-        panel.chat_history.push(ChatMessage {
-            role: MessageRole::System,
-            content,
-        });
-    }
+    app.set_system_message_persistent(ChatMessage { role: MessageRole::System, content });
 }
 
 // ========== Agent Handlers ==========
@@ -4793,9 +5146,26 @@ async fn handle_agent_show(app: &mut App) {
         "  /agent show <name> - show agent details".to_string(),
     ];
 
-    // Show current agent name from panel state.
-    if panel.sandbox.is_some() {
-        lines.insert(0, format!("Current agent: {}", panel.agent_name));
+    // Show current sandbox config agent if set
+    if let Some(sb) = panel.sandbox.as_ref() {
+        let sb = sb.lock().await;
+        if let Some(resolved) = sb.config().resolved_agent.as_ref() {
+            let summary = if resolved.agent_name.is_empty() && !resolved.skills.is_empty() {
+                format!(
+                    "Skills from sandbox config (no registry agent): {} skills, {} MCPs",
+                    resolved.skills.len(),
+                    resolved.mcp_servers.len(),
+                )
+            } else {
+                format!(
+                    "Current agent: {} ({} skills, {} MCPs)",
+                    resolved.agent_name,
+                    resolved.skills.len(),
+                    resolved.mcp_servers.len(),
+                )
+            };
+            lines.insert(0, summary);
+        }
     }
 
     panel.chat_history.push(ChatMessage {
@@ -4847,25 +5217,14 @@ async fn handle_agent_set(app: &mut App, name: &str) {
         }
     };
 
-    // Inherit auto_mode, permissions, and agent_type from panel state
-    resolved.auto_mode = panel.auto_mode;
-    resolved.permissions = panel.permissions;
-    resolved.agent_type = panel.agent_type;
-
-    let body = match serde_json::to_string(&resolved) {
-        Ok(b) => b,
-        Err(e) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to serialize agent config: {}", e),
-            });
-            return;
-        }
-    };
-
+    // Inherit auto_mode, permissions, agent_type, and claude_settings from sandbox config
     let sb = sandbox.lock().await;
-    match sb.gateway_http_post("/api/v1/agent/bootstrap", &body) {
-        Ok((status, _resp)) if status < 400 => {
+    resolved.auto_mode = sb.config().auto_mode;
+    resolved.permissions = sb.config().permissions;
+    resolved.agent_type = sb.config().agent_type;
+    resolved.claude_settings = sb.config().claude_settings.clone();
+    match sb.bootstrap_agent(&resolved).await {
+        Ok(()) => {
             let skill_count = resolved.skills.len();
             let mcp_count = resolved.mcp_servers.len();
             panel.chat_history.push(ChatMessage {
@@ -4874,12 +5233,6 @@ async fn handle_agent_set(app: &mut App, name: &str) {
                     "Agent '{}' configured ({} skills, {} MCPs).",
                     name, skill_count, mcp_count,
                 ),
-            });
-        }
-        Ok((status, resp)) => {
-            panel.chat_history.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("Failed to set agent '{}': Bootstrap failed ({}): {}", name, status, resp),
             });
         }
         Err(e) => {
@@ -4965,6 +5318,168 @@ fn handle_agent_info(app: &mut App, name: &str) {
         role: MessageRole::System,
         content,
     });
+}
+
+/// Encrypt and send ALL env vars to the gateway.
+///
+/// This is called for EVERY sandbox after start(). All env vars (from .env,
+/// sandbox.yml env:, --env flags, auto-detected API keys, agent-specific vars)
+/// are encrypted and sent to the gateway's SSH env store + secrets_store.
+///
+/// If a secrets: config is present, also collects from SOPS files and intercepts
+/// credential files from the git repo.
+///
+/// The gateway injects these into every SSH session and exec call via cmd.Env —
+/// no shell export, no .env files inside the VM.
+fn send_encrypted_env(
+    sandbox: &mut sandbox::Sandbox,
+    secrets_config: Option<&sandbox::SecretSource>,
+    config_dir: &std::path::Path,
+    clone_path: &Option<std::path::PathBuf>,
+) -> anyhow::Result<sandbox::SecretManifest> {
+    let mut payload = sandbox::secrets::payload::SecretPayload::new();
+
+    // 1. If secrets: config exists, collect from SOPS file and host env keys
+    if let Some(secrets_cfg) = secrets_config {
+        let extra = crate::collect_secrets(secrets_cfg, config_dir)?;
+        for (k, v) in extra.secrets {
+            payload.add_secret(k, v);
+        }
+
+        // Intercept sensitive files from git repo clone
+        if let Some(ref clone) = clone_path {
+            if !secrets_cfg.intercept_patterns.is_empty() {
+                let result = sandbox::secrets::intercept::intercept_sensitive_files(
+                    clone,
+                    &secrets_cfg.intercept_patterns,
+                );
+                for (path, contents) in result.intercepted {
+                    payload.add_intercepted_file(path, contents);
+                }
+                for (path, err) in &result.errors {
+                    warn!("Failed to intercept {}: {}", path, err);
+                }
+            }
+        }
+    }
+
+    // 2. Add ALL config.env vars to the payload
+    for (k, v) in &(***sandbox).config().env {
+        if !payload.secrets.contains_key(k) {
+            payload.add_secret(k.clone(), v.clone());
+        }
+    }
+
+    if payload.secrets.is_empty() && payload.intercepted_files.is_empty() {
+        return Ok(sandbox::SecretManifest {
+            secrets: std::collections::HashMap::new(),
+            files: std::collections::HashMap::new(),
+        });
+    }
+
+    // 3. Encrypt using the gateway's crypto (same crate as decrypt — no version mismatch)
+    let pubkey_b64 = (**sandbox).gateway()
+        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+        .secrets_pubkey()
+        .ok_or_else(|| anyhow::anyhow!("Gateway secrets pubkey not available"))?;
+
+    let pubkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&pubkey_b64)
+        .map_err(|e| anyhow::anyhow!("Invalid gateway pubkey: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Gateway pubkey must be 32 bytes"))?;
+
+    let plaintext = payload.to_json_bytes()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let encrypted = sandbox::encrypt_payload(&plaintext, &pubkey_bytes)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let encrypted_json = serde_json::to_string(&encrypted)?;
+
+    // 4. Send encrypted payload → gateway decrypts → stores in secrets_store
+    let manifest = (**sandbox).gateway_mut()
+        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
+        .send_secrets(&encrypted_json)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    Ok(manifest)
+}
+
+/// Generate secrets access instructions for agent config files.
+fn secrets_bootstrap_content(manifest: &sandbox::SecretManifest) -> String {
+    let mut lines = Vec::new();
+    lines.push("## Secrets Access".to_string());
+    lines.push(String::new());
+    lines.push("The following secrets are available as environment variables in this session.".to_string());
+    lines.push("Do NOT hardcode these values. Read them from the environment when needed.".to_string());
+    lines.push(String::new());
+
+    if !manifest.secrets.is_empty() {
+        let mut keys: Vec<&String> = manifest.secrets.keys().collect();
+        keys.sort();
+        lines.push(format!(
+            "Available secret env vars: {}",
+            keys.iter().map(|k| format!("`${}`", k)).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    if !manifest.files.is_empty() {
+        lines.push(String::new());
+        lines.push("Intercepted files are available at:".to_string());
+        let mut files: Vec<(&String, &String)> = manifest.files.iter().collect();
+        files.sort_by_key(|(k, _)| *k);
+        for (name, path) in files {
+            lines.push(format!("- `{}` → `{}`", name, path));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("IMPORTANT: Never hardcode secrets. Never echo secret values. Always read from env vars.".to_string());
+
+    lines.join("\n")
+}
+
+/// Write secrets access instructions to the appropriate agent config file inside the VM.
+async fn write_secrets_bootstrap(
+    sandbox: &mut sandbox::Sandbox,
+    agent_type: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    let file_path = match agent_type {
+        "claude" => "/workspace/CLAUDE.md",
+        "codex" => "/workspace/.codexrc",
+        "goose" => "/workspace/.goose/instructions.md",
+        _ => return Ok(()), // Unknown agent, skip
+    };
+
+    // Read existing content (if any) and prepend
+    let existing = match (**sandbox).gateway() {
+        Ok(gw) => gw.exec_with_options("cat", &[file_path], Default::default())
+            .await
+            .map(|r| r.stdout)
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+
+    let new_content = format!("{}\n\n{}", content, existing);
+    let escaped = new_content.replace('\'', "'\\''");
+
+    let write_cmd = format!(
+        "mkdir -p $(dirname '{}') && printf '%s' '{}' > '{}'",
+        file_path, escaped, file_path
+    );
+    match (**sandbox).gateway() {
+        Ok(gw) => {
+            gw.exec_with_options("sh", &["-c", &write_cmd], Default::default())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", file_path, e))?;
+        }
+        Err(e) => return Err(anyhow::anyhow!("Gateway not available: {}", e)),
+    }
+
+    tracing::info!("Wrote secrets bootstrap to {}", file_path);
+    Ok(())
 }
 
 #[cfg(test)]
