@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Downloads and installs the nanosb CLI binary and runtime dependencies on Windows.
-    1. Checks prerequisites (Hyper-V, WSL2) and installs WSL2 if missing
+    1. Checks prerequisites (Hyper-V, WHPX, WSL2, VirtualMachinePlatform) and enables missing features
     2. Downloads the nanosb.exe binary from GitHub Releases
     3. Installs runtime dependencies via install-deps
     4. Adds the install directory to the user PATH
@@ -68,7 +68,8 @@ function Install-NanosandboxCLI {
 
     # --- Windows prerequisites ---
     # Enable all required features in one pass, then do a single reboot if needed.
-    # Features required: Hyper-V, Windows Hypervisor Platform (WHPX), WSL2.
+    # Features required: Hyper-V, Windows Hypervisor Platform (WHPX),
+    # Windows Subsystem for Linux, Virtual Machine Platform (WSL2).
     # VC++ Redistributable is installed inline (no reboot needed).
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -135,33 +136,44 @@ function Install-NanosandboxCLI {
         Write-Ok "Visual C++ Redistributable installed"
     }
 
-    # -- WSL2 --
+    # -- WSL2 (two Windows features: WSL + Virtual Machine Platform) --
     if (-not $SkipWsl2Check) {
-        $wslExe = Join-Path $env:SystemRoot "System32\wsl.exe"
-        $wsl2Ready = $false
-        if (Test-Path $wslExe) {
-            # Use Start-Process to fully isolate wsl.exe — direct invocation
-            # leaks stderr as RemoteException in PS 5.1 regardless of redirects.
-            $proc = Start-Process -FilePath $wslExe -ArgumentList '--status' `
-                -Wait -PassThru -WindowStyle Hidden `
-                -RedirectStandardOutput "$env:TEMP\nanosb-wsl-out.txt" `
-                -RedirectStandardError  "$env:TEMP\nanosb-wsl-err.txt"
-            Remove-Item "$env:TEMP\nanosb-wsl-out.txt","$env:TEMP\nanosb-wsl-err.txt" -Force -ErrorAction SilentlyContinue
-            if ($proc.ExitCode -eq 0) { $wsl2Ready = $true }
-        }
-        if ($wsl2Ready) {
-            Write-Ok "WSL2 available"
-        } elseif (-not $isAdmin) {
-            Write-Warn "WSL2 is not installed (requires Administrator to fix)."
-        } else {
-            Write-Info "Installing WSL2..."
-            try {
-                & $wslExe --install --no-launch 2>&1 | ForEach-Object { Write-Host "  $_" }
-                Write-Ok "WSL2 installed"
-                $rebootNeeded = $true
-            } catch {
-                Write-Warn "WSL2 installation failed: $_"
+        # Check WSL subsystem feature
+        $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -ErrorAction SilentlyContinue
+        if (-not $wslFeature -or $wslFeature.State -ne "Enabled") {
+            if (-not $isAdmin) {
+                Write-Warn "Windows Subsystem for Linux is not enabled (requires Administrator to fix)."
+            } else {
+                Write-Info "Enabling Windows Subsystem for Linux..."
+                try {
+                    $r = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -All -NoRestart -ErrorAction Stop
+                    Write-Ok "Windows Subsystem for Linux enabled"
+                    if ($r.RestartNeeded) { $rebootNeeded = $true }
+                } catch {
+                    Write-Warn "Failed to enable Windows Subsystem for Linux: $_"
+                }
             }
+        } else {
+            Write-Ok "Windows Subsystem for Linux enabled"
+        }
+
+        # Check Virtual Machine Platform feature (required for WSL2)
+        $vmpFeature = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue
+        if (-not $vmpFeature -or $vmpFeature.State -ne "Enabled") {
+            if (-not $isAdmin) {
+                Write-Warn "Virtual Machine Platform is not enabled (requires Administrator to fix)."
+            } else {
+                Write-Info "Enabling Virtual Machine Platform..."
+                try {
+                    $r = Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -All -NoRestart -ErrorAction Stop
+                    Write-Ok "Virtual Machine Platform enabled"
+                    if ($r.RestartNeeded) { $rebootNeeded = $true }
+                } catch {
+                    Write-Warn "Failed to enable Virtual Machine Platform: $_"
+                }
+            }
+        } else {
+            Write-Ok "Virtual Machine Platform enabled"
         }
     }
 
