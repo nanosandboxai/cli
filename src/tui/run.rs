@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use base64::Engine;
 use std::io::{self, IsTerminal};
-use tracing::warn;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -196,9 +195,17 @@ pub(super) fn fix_windows_console_mode() {
 ///
 /// This enables raw mode, enters the alternate screen, and runs the main
 /// event loop. On exit (or error) it restores the terminal.
+#[derive(Debug, Clone)]
+pub enum SessionStartMode {
+    Fresh,
+    ResumeLatest,
+    ResumeById(String),
+}
+
 pub async fn run_tui(
     project_path: Option<std::path::PathBuf>,
     sandbox_configs: Vec<(String, sandbox::AgentSandboxConfig)>,
+    session_start: SessionStartMode,
 ) -> anyhow::Result<()> {
     // Check if we're running in a real terminal.
     if !io::stdout().is_terminal() {
@@ -235,34 +242,74 @@ pub async fn run_tui(
     // Brief pause so the user can see the results
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    // Check for an existing session before entering the alternate screen.
-    // This prompt is shown in the normal terminal (not the TUI) and must
-    // happen BEFORE stderr is redirected (prompt_resume uses eprintln).
-    let resume_session_data = if let Some(ref pp) = project_path {
-        if let Some(session) = sandbox::session::Session::load(pp) {
-            let issues = session.validate();
-            let choice = sandbox::session::prompt_resume(&session, &issues);
-            match choice {
-                sandbox::session::ResumeChoice::Resume => Some(session),
-                sandbox::session::ResumeChoice::ClearAndRestart | sandbox::session::ResumeChoice::Destroy => {
-                    // Remove old project clones.
-                    for panel in &session.panels {
-                        if let Some(ref clone_path) = panel.clone_path {
-                            if clone_path.exists() {
-                                let _ = std::fs::remove_dir_all(clone_path);
-                            }
+    // Resolve startup behavior before entering the alternate screen.
+    let (resume_session_data, resumed_session_id) = if let Some(ref pp) = project_path {
+        match &session_start {
+            SessionStartMode::Fresh => (None, None),
+            SessionStartMode::ResumeLatest => {
+                if let Some(entry) = sandbox::session::Session::list(pp).into_iter().next() {
+                    let issues = entry.session.validate();
+                    if issues.iter().any(|i| !i.recoverable) {
+                        eprintln!("Latest session has unrecoverable issues. Starting fresh.");
+                        for issue in issues {
+                            eprintln!("  - {}", issue);
                         }
+                        (None, None)
+                    } else {
+                        if !issues.is_empty() {
+                            eprintln!("Resuming latest session with warnings:");
+                            for issue in issues {
+                                eprintln!("  - {}", issue);
+                            }
+                        } else {
+                            eprintln!("Resuming latest session.");
+                        }
+                        (Some(entry.session), Some(entry.id))
                     }
-                    // Remove session file + agent state directories.
-                    let _ = sandbox::session::Session::delete(pp, true);
-                    None
+                } else {
+                    eprintln!("No previous session found. Starting fresh.");
+                    (None, None)
                 }
             }
-        } else {
-            None
+            SessionStartMode::ResumeById(session_id) => {
+                if let Some(session) = sandbox::session::Session::load_by_id(pp, session_id) {
+                    let issues = session.validate();
+                    if issues.iter().any(|i| !i.recoverable) {
+                        eprintln!("Session '{}' has unrecoverable issues. Starting fresh.", session_id);
+                        for issue in issues {
+                            eprintln!("  - {}", issue);
+                        }
+                        (None, None)
+                    } else {
+                        if !issues.is_empty() {
+                            eprintln!("Resuming session '{}' with warnings:", session_id);
+                            for issue in issues {
+                                eprintln!("  - {}", issue);
+                            }
+                        } else {
+                            eprintln!("Resuming session '{}'.", session_id);
+                        }
+                        (Some(session), Some(session_id.clone()))
+                    }
+                } else {
+                    eprintln!("Session '{}' not found for this project. Starting fresh.", session_id);
+                    let available: Vec<String> = sandbox::session::Session::list(pp)
+                        .into_iter()
+                        .map(|entry| entry.id)
+                        .collect();
+                    if !available.is_empty() {
+                        eprintln!("Available session IDs: {}", available.join(", "));
+                    }
+                    (None, None)
+                }
+            }
         }
     } else {
-        None
+        match session_start {
+            SessionStartMode::Fresh => {}
+            _ => eprintln!("No project path available; cannot resume session. Starting fresh."),
+        }
+        (None, None)
     };
 
     // Redirect stderr to /dev/null before entering the alternate screen.
@@ -492,6 +539,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         let permissions = panel.permissions;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
+                        let selected_agent_session_id = panel.selected_agent_session_id.clone();
                         let model = panel.model.clone();
                         let tx = tx.clone();
                         tokio::spawn(async move {
@@ -499,7 +547,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                 sandbox, &agent_name, &env,
                                 workdir.as_deref(), permissions,
                                 prompt.as_deref(), is_resumed,
-                                model.as_deref(), panel_idx, tx,
+                                selected_agent_session_id.as_deref(), model.as_deref(), panel_idx, tx,
                             ).await;
                         });
                     }
@@ -525,6 +573,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         let permissions = panel.permissions;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
+                        let selected_agent_session_id = panel.selected_agent_session_id.clone();
                         let model = panel.model.clone();
                         let ssh_host = "127.0.0.1".to_string();
                         let tx = tx.clone();
@@ -541,7 +590,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                     pty_cols, pty_rows,
                                     &agent_name, &env, workdir.as_deref(),
                                     permissions, false, prompt.as_deref(),
-                                    is_resumed, model.as_deref(), panel_idx, tx.clone(),
+                                    is_resumed, selected_agent_session_id.as_deref(), model.as_deref(), panel_idx, tx.clone(),
                                 ).await {
                                     Ok(handle) => {
                                         let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
@@ -919,10 +968,16 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                 .unwrap_or_default();
 
             let session = build_session_from_app(&app, project_path, &sandbox_yml_content);
-            if let Err(e) = session.save() {
-                eprintln!("Warning: failed to save session: {}", e);
-            } else {
-                eprintln!("Session saved. Run nanosb again to resume.");
+            match session.save_with_id(resumed_session_id.as_deref()) {
+                Ok(session_id) => {
+                    eprintln!(
+                        "Session saved (id: {}). Use `nanosb -r` to resume latest or `nanosb --session {}`.",
+                        session_id, session_id
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to save session: {}", e);
+                }
             }
         }
     } else {
@@ -1006,12 +1061,18 @@ async fn spawn_gateway_exec(
     permissions: sandbox::Permissions,
     prompt: Option<&str>,
     is_resumed: bool,
+    selected_agent_session_id: Option<&str>,
     model: Option<&str>,
     panel_idx: usize,
     tx: mpsc::UnboundedSender<AppEvent>,
 ) {
-    let agent_cmd = super::terminal::agent_cli_command(
-        agent_name, permissions, true, is_resumed, model,
+    let agent_cmd = super::terminal::agent_cli_command_with_session(
+        agent_name,
+        permissions,
+        true,
+        is_resumed,
+        selected_agent_session_id,
+        model,
     );
     let cmd = match agent_cmd {
         Some(c) => c,
@@ -2008,6 +2069,7 @@ async fn handle_command(
                     let auto_mode = panel.auto_mode;
                     let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                     let is_resumed = panel.is_resumed;
+                    let selected_agent_session_id = panel.selected_agent_session_id.clone();
                     let model = panel.model.clone();
                     // Use 127.0.0.1 on all platforms — on Windows, portproxy
                     // rules route localhost to the guest IP via HCN NAT.
@@ -2018,7 +2080,7 @@ async fn handle_command(
                             ssh_host, ssh_port, key_path, pty_cols, pty_rows,
                             &agent_name, &env, workdir.as_deref(),
                             permissions, auto_mode, prompt.as_deref(),
-                            is_resumed, model.as_deref(), panel_idx, tx.clone(),
+                            is_resumed, selected_agent_session_id.as_deref(), model.as_deref(), panel_idx, tx.clone(),
                         ).await {
                             Ok(handle) => {
                                 let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
@@ -4289,11 +4351,165 @@ fn add_agent_from_config(
 }
 
 
+fn is_session_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+fn normalize_agent_name(agent_name: &str) -> &str {
+    match agent_name {
+        "claude-code" => "claude",
+        "cursor-agent" => "cursor",
+        _ => agent_name,
+    }
+}
+
+fn extract_session_token_after(label: &str, text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let idx = lower.find(&label.to_lowercase())?;
+    let rest = text.get(idx + label.len()..)?.trim_start();
+    let token: String = rest.chars().take_while(|c| is_session_token_char(*c)).collect();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+fn extract_json_string_field(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let idx = text.find(&needle)?;
+    let after_key = text.get(idx + needle.len()..)?;
+    let colon_idx = after_key.find(':')?;
+    let after_colon = after_key.get(colon_idx + 1..)?.trim_start();
+    if !after_colon.starts_with('"') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut escaped = false;
+    for c in after_colon[1..].chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == '"' {
+            break;
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn collect_state_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+
+    files.sort_by(|a, b| {
+        let ma = std::fs::metadata(a)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let mb = std::fs::metadata(b)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        mb.cmp(&ma)
+    });
+    files
+}
+
+fn detect_agent_session_id_from_state(
+    agent_name: &str,
+    clone_path: &std::path::Path,
+) -> Option<String> {
+    let state_root = clone_path.join(".nanosb-state");
+    if !state_root.exists() {
+        return None;
+    }
+
+    let agent_dir = match normalize_agent_name(agent_name) {
+        "claude" => state_root.join(".claude"),
+        "codex" => state_root.join(".codex"),
+        "cursor" => state_root.join(".cursor"),
+        "goose" => state_root.join(".config/goose"),
+        _ => state_root,
+    };
+
+    if !agent_dir.exists() {
+        return None;
+    }
+
+    let files = collect_state_files(&agent_dir);
+    for path in files.iter().take(250) {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        if content.is_empty() {
+            continue;
+        }
+
+        let by_json = match normalize_agent_name(agent_name) {
+            "claude" => {
+                extract_json_string_field(&content, "session_id")
+                    .or_else(|| extract_json_string_field(&content, "sessionId"))
+            }
+            "cursor" => {
+                extract_json_string_field(&content, "chatId")
+                    .or_else(|| extract_json_string_field(&content, "session_id"))
+                    .or_else(|| extract_json_string_field(&content, "sessionId"))
+            }
+            "goose" => {
+                extract_json_string_field(&content, "session_id")
+                    .or_else(|| extract_json_string_field(&content, "sessionId"))
+            }
+            _ => {
+                extract_json_string_field(&content, "session_id")
+                    .or_else(|| extract_json_string_field(&content, "sessionId"))
+            }
+        };
+        if by_json.is_some() {
+            return by_json;
+        }
+
+        if normalize_agent_name(agent_name) == "goose" {
+            if let Some(v) = extract_session_token_after("session:", &content) {
+                return Some(v);
+            }
+        }
+    }
+
+    None
+}
+
+fn should_resume_panel(had_interaction: bool, selected_agent_session_id: Option<&str>) -> bool {
+    had_interaction && selected_agent_session_id.is_some()
+}
+
 /// Resume panels from a saved session.
 ///
 /// For each panel in the session, this creates a fresh sandbox with the saved config
 /// but reuses the existing project clone (if still present). The agent is launched
-/// with its resume command variant so it can pick up the previous conversation.
+/// with an explicit native session id when available.
 fn resume_session(
     app: &mut App,
     session: &sandbox::session::Session,
@@ -4385,11 +4601,23 @@ fn resume_session(
             }
         }
 
-        // Only pass resume flags (--continue, -c, etc.) if the user actually
-        // interacted with the agent in the previous session. Without this check,
-        // agents like cursor-agent fail with "No previous chats found" when
-        // resumed after being started but never used.
-        panel.is_resumed = sp.had_interaction;
+        let detected_session_id = panel
+            .project_mount
+            .as_ref()
+            .and_then(|pm| pm.worktree_base.as_ref())
+            .and_then(|clone| detect_agent_session_id_from_state(&agent_type, clone));
+
+        panel.selected_agent_session_id = sp
+            .selected_agent_session_id
+            .clone()
+            .or(detected_session_id);
+
+        // Resume only when we have a deterministic agent-native session id.
+        // This avoids generic continue flags resuming an unrelated conversation.
+        panel.is_resumed = should_resume_panel(
+            sp.had_interaction,
+            panel.selected_agent_session_id.as_deref(),
+        );
 
         app.panels.push(panel);
         let panel_idx = app.panels.len() - 1;
@@ -4828,6 +5056,15 @@ fn build_session_from_app(
 
             let env_keys: Vec<String> = panel.env.keys().cloned().collect();
 
+            let selected_agent_session_id = panel
+                .selected_agent_session_id
+                .clone()
+                .or_else(|| {
+                    clone_path
+                        .as_ref()
+                        .and_then(|clone| detect_agent_session_id_from_state(&panel.agent_name, clone))
+                });
+
             Some(SessionPanel {
                 agent_name: panel.agent_name.clone(),
                 display_name: panel.display_name.clone(),
@@ -4843,6 +5080,7 @@ fn build_session_from_app(
                 env_keys,
                 visible: panel.visible,
                 had_interaction: panel.had_interaction,
+                selected_agent_session_id,
             })
         })
         .collect();
@@ -5423,6 +5661,19 @@ async fn write_secrets_bootstrap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nanosb-{}-{}", name, nonce));
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        dir
+    }
 
     #[test]
     fn test_detect_agent_type_localhost_registry() {
@@ -5485,5 +5736,34 @@ mod tests {
         assert_eq!(detect_agent_type_from_image("alpine:3.19"), None);
         assert_eq!(detect_agent_type_from_image("my-custom-image:latest"), None);
         assert_eq!(detect_agent_type_from_image("ubuntu"), None);
+    }
+
+    #[test]
+    fn test_detect_agent_session_id_from_claude_session_id_camel_case() {
+        let clone_dir = make_temp_dir("claude-session-detect");
+        let sessions_dir = clone_dir.join(".nanosb-state/.claude/sessions");
+        fs::create_dir_all(&sessions_dir).expect("failed to create claude sessions dir");
+
+        let session_file = sessions_dir.join("280.json");
+        fs::write(
+            &session_file,
+            r#"{"sessionId":"8df83130-8dbe-4f28-8dff-52e44405e77d","kind":"interactive"}"#,
+        )
+        .expect("failed to write session file");
+
+        let detected = detect_agent_session_id_from_state("claude", &clone_dir);
+        assert_eq!(
+            detected,
+            Some("8df83130-8dbe-4f28-8dff-52e44405e77d".to_string())
+        );
+
+        let _ = fs::remove_dir_all(&clone_dir);
+    }
+
+    #[test]
+    fn test_should_resume_panel_requires_explicit_session_id() {
+        assert!(!should_resume_panel(false, Some("sess-1")));
+        assert!(!should_resume_panel(true, None));
+        assert!(should_resume_panel(true, Some("sess-1")));
     }
 }

@@ -183,6 +183,7 @@ pub async fn connect_ssh(
     auto_mode: bool,
     prompt: Option<&str>,
     is_resumed: bool,
+    selected_session_id: Option<&str>,
     model: Option<&str>,
     panel_idx: usize,
     tx: mpsc::UnboundedSender<AppEvent>,
@@ -219,7 +220,14 @@ pub async fn connect_ssh(
         env_parts.push(format!("cd '{}'", dir));
     }
 
-    let agent_cmd = agent_cli_command(agent_name, permissions, auto_mode, is_resumed, model);
+    let agent_cmd = agent_cli_command_with_session(
+        agent_name,
+        permissions,
+        auto_mode,
+        is_resumed,
+        selected_session_id,
+        model,
+    );
 
     let channel = session.channel_open_session().await?;
 
@@ -429,6 +437,17 @@ pub(super) fn agent_cli_command(
     is_resumed: bool,
     model: Option<&str>,
 ) -> Option<String> {
+    agent_cli_command_with_session(agent_name, permissions, auto_mode, is_resumed, None, model)
+}
+
+pub(super) fn agent_cli_command_with_session(
+    agent_name: &str,
+    permissions: sandbox::Permissions,
+    auto_mode: bool,
+    is_resumed: bool,
+    selected_session_id: Option<&str>,
+    model: Option<&str>,
+) -> Option<String> {
     use sandbox::Permissions;
     let effective = permissions.effective(auto_mode);
 
@@ -445,9 +464,13 @@ pub(super) fn agent_cli_command(
                     "stream-json".to_string(),
                     "--verbose".to_string(),
                 ]);
-                if is_resumed {
+                if let Some(session_id) = selected_session_id {
+                    parts.extend(["--resume".to_string(), session_id.to_string()]);
+                } else if is_resumed {
                     parts.push("--continue".to_string());
                 }
+            } else if let Some(session_id) = selected_session_id {
+                parts.extend(["--resume".to_string(), session_id.to_string()]);
             } else if is_resumed {
                 parts.push("-c".to_string());
             }
@@ -484,6 +507,8 @@ pub(super) fn agent_cli_command(
             // Goose permissions and model handled via env vars in connect_ssh.
             if auto_mode {
                 Some("goose run --output-format stream-json --no-session -t \"$NANOSB_PROMPT\"".to_string())
+            } else if let Some(session_id) = selected_session_id {
+                Some(format!("goose session resume {}", session_id))
             } else if is_resumed {
                 Some("goose session -r".to_string())
             } else {
@@ -508,7 +533,9 @@ pub(super) fn agent_cli_command(
                 Some(parts.join(" "))
             } else {
                 let mut parts = vec!["codex".to_string()];
-                if is_resumed {
+                if let Some(session_id) = selected_session_id {
+                    parts.extend(["resume".to_string(), session_id.to_string()]);
+                } else if is_resumed {
                     parts.extend(["resume".to_string(), "--last".to_string()]);
                 }
                 match effective {
@@ -532,9 +559,13 @@ pub(super) fn agent_cli_command(
                     "--output-format".to_string(),
                     "stream-json".to_string(),
                 ]);
-                if is_resumed {
+                if let Some(session_id) = selected_session_id {
+                    parts.extend(["--resume".to_string(), session_id.to_string()]);
+                } else if is_resumed {
                     parts.push("--continue".to_string());
                 }
+            } else if let Some(session_id) = selected_session_id {
+                parts.extend(["--resume".to_string(), session_id.to_string()]);
             } else if is_resumed {
                 parts.push("--continue".to_string());
             }
@@ -1172,6 +1203,35 @@ mod tests {
         let cmd = agent_cli_command("cursor", Permissions::AllowAll, false, true, None).unwrap();
         assert!(cmd.contains("--continue"));
         assert!(cmd.contains("--force"));
+    }
+
+    #[test]
+    fn test_agent_cli_command_selected_session_id() {
+        use sandbox::Permissions;
+
+        let claude = agent_cli_command_with_session(
+            "claude",
+            Permissions::Default,
+            false,
+            true,
+            Some("sess-claude-123"),
+            None,
+        )
+        .unwrap();
+        assert!(claude.contains("--resume sess-claude-123"));
+        assert!(!claude.contains(" -c"));
+
+        let codex = agent_cli_command_with_session(
+            "codex",
+            Permissions::Default,
+            false,
+            true,
+            Some("sess-codex-456"),
+            None,
+        )
+        .unwrap();
+        assert!(codex.contains("resume sess-codex-456"));
+        assert!(!codex.contains("resume --last"));
     }
 
     #[test]

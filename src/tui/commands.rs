@@ -762,6 +762,7 @@ mod tests {
                 name: "github".to_string(),
                 command: "npx".to_string(),
                 args: vec!["@github/mcp-server".to_string()],
+                target: None,
             })
         );
     }
@@ -772,6 +773,7 @@ mod tests {
             parse_command("/mcp remove github"),
             Some(Command::McpRemove {
                 name: "github".to_string(),
+                target: None,
             })
         );
     }
