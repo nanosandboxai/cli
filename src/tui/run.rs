@@ -454,7 +454,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                     panel.loading_message = Some(message);
                 }
             }
-            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount, secrets_active } => {
+            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount } => {
                 // Get SSH info before storing sandbox
                 let ssh_info = {
                     let sb = sandbox.lock().await;
@@ -475,7 +475,6 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         panel.ssh_host_port = Some(port);
                         panel.ssh_key_path = Some(key.clone());
                     }
-                    panel.secrets_active = secrets_active;
                 }
 
                 let is_auto_mode = app.panels.get(panel_idx)
@@ -4076,7 +4075,7 @@ fn add_agent(
                             .project_mount()
                             .and_then(|pm| pm.worktree_base.clone());
                         if let Err(e) = send_encrypted_env(
-                            &mut sandbox, None, std::path::Path::new("."), &clone_path,
+                            &mut sandbox, std::path::Path::new("."), &clone_path,
                         ) {
                             tracing::warn!("Failed to send env to gateway: {}", e);
                         }
@@ -4090,7 +4089,6 @@ fn add_agent(
                             sandbox: sb,
                             short_id,
                             project_mount,
-                            secrets_active: false,
                         });
                     }
                     Err(e) => {
@@ -4146,17 +4144,7 @@ fn add_agent_from_config(
     for (api_key, _) in &required_api_keys(&agent_type) {
         if !panel.env.contains_key(*api_key) {
             if let Ok(val) = std::env::var(api_key) {
-                if config.secrets.is_some() {
-                    // Route through encrypted secrets pipeline
-                    if let Some(ref mut secrets) = config.secrets {
-                        if !secrets.keys.contains(&api_key.to_string()) {
-                            secrets.keys.push(api_key.to_string());
-                        }
-                    }
-                } else {
-                    // Legacy path: add to env
-                    panel.env.insert(api_key.to_string(), val);
-                }
+                panel.env.insert(api_key.to_string(), val);
             }
         }
     }
@@ -4210,7 +4198,6 @@ fn add_agent_from_config(
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
         let resolved_agent = config.resolved_agent.clone();
-        let secrets_cfg = config.secrets.clone();
         let _ = tx.send(AppEvent::SandboxCreating {
             panel_idx,
             message: "Pulling image...".into(),
@@ -4256,9 +4243,8 @@ fn add_agent_from_config(
                         let clone_path = sandbox
                             .project_mount()
                             .and_then(|pm| pm.worktree_base.clone());
-                        let secrets_active = match send_encrypted_env(
+                        match send_encrypted_env(
                             &mut sandbox,
-                            secrets_cfg.as_ref(),
                             &config_dir,
                             &clone_path,
                         ) {
@@ -4269,13 +4255,11 @@ fn add_agent_from_config(
                                         tracing::warn!("Failed to write secrets bootstrap: {}", e);
                                     }
                                 }
-                                true
                             }
                             Err(e) => {
                                 tracing::error!("Failed to send env to gateway: {}", e);
-                                false
                             }
-                        };
+                        }
 
                         let project_mount = sandbox.take_project_mount();
                         let sb = Arc::new(Mutex::new(sandbox));
@@ -4284,7 +4268,6 @@ fn add_agent_from_config(
                             sandbox: sb,
                             short_id,
                             project_mount,
-                            secrets_active,
                         });
                     }
                     Err(e) => {
@@ -4355,17 +4338,7 @@ fn resume_session(
         for (api_key, _) in &required_api_keys(&agent_type) {
             if !panel.env.contains_key(*api_key) {
                 if let Ok(val) = std::env::var(api_key) {
-                    if config.secrets.is_some() {
-                        // Route through encrypted secrets pipeline
-                        if let Some(ref mut secrets) = config.secrets {
-                            if !secrets.keys.contains(&api_key.to_string()) {
-                                secrets.keys.push(api_key.to_string());
-                            }
-                        }
-                    } else {
-                        // Legacy path: add to env
-                        panel.env.insert(api_key.to_string(), val);
-                    }
+                    panel.env.insert(api_key.to_string(), val);
                 }
             }
         }
@@ -4444,7 +4417,6 @@ fn resume_session(
         let image_manager = app.image_manager.clone();
         tokio::spawn(async move {
             let resolved_agent = config.resolved_agent.clone();
-            let secrets_cfg = config.secrets.clone();
             let _ = tx.send(AppEvent::SandboxCreating {
                 panel_idx,
                 message: "Pulling image...".into(),
@@ -4490,9 +4462,8 @@ fn resume_session(
                             let clone_path = sandbox
                                 .project_mount()
                                 .and_then(|pm| pm.worktree_base.clone());
-                            let secrets_active = match send_encrypted_env(
+                            match send_encrypted_env(
                                 &mut sandbox,
-                                secrets_cfg.as_ref(),
                                 &config_dir,
                                 &clone_path,
                             ) {
@@ -4503,13 +4474,11 @@ fn resume_session(
                                             tracing::warn!("Failed to write secrets bootstrap: {}", e);
                                         }
                                     }
-                                    true
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to send env to gateway: {}", e);
-                                    false
                                 }
-                            };
+                            }
 
                             let project_mount = sandbox.take_project_mount();
                             let sb = Arc::new(Mutex::new(sandbox));
@@ -4518,7 +4487,6 @@ fn resume_session(
                                 sandbox: sb,
                                 short_id,
                                 project_mount,
-                                secrets_active,
                             });
                         }
                         Err(e) => {
@@ -5326,51 +5294,21 @@ fn handle_agent_info(app: &mut App, name: &str) {
 /// sandbox.yml env:, --env flags, auto-detected API keys, agent-specific vars)
 /// are encrypted and sent to the gateway's SSH env store + secrets_store.
 ///
-/// If a secrets: config is present, also collects from SOPS files and intercepts
-/// credential files from the git repo.
-///
 /// The gateway injects these into every SSH session and exec call via cmd.Env —
 /// no shell export, no .env files inside the VM.
 fn send_encrypted_env(
     sandbox: &mut sandbox::Sandbox,
-    secrets_config: Option<&sandbox::SecretSource>,
-    config_dir: &std::path::Path,
-    clone_path: &Option<std::path::PathBuf>,
+    _config_dir: &std::path::Path,
+    _clone_path: &Option<std::path::PathBuf>,
 ) -> anyhow::Result<sandbox::SecretManifest> {
     let mut payload = sandbox::secrets::payload::SecretPayload::new();
 
-    // 1. If secrets: config exists, collect from SOPS file and host env keys
-    if let Some(secrets_cfg) = secrets_config {
-        let extra = crate::collect_secrets(secrets_cfg, config_dir)?;
-        for (k, v) in extra.secrets {
-            payload.add_secret(k, v);
-        }
-
-        // Intercept sensitive files from git repo clone
-        if let Some(ref clone) = clone_path {
-            if !secrets_cfg.intercept_patterns.is_empty() {
-                let result = sandbox::secrets::intercept::intercept_sensitive_files(
-                    clone,
-                    &secrets_cfg.intercept_patterns,
-                );
-                for (path, contents) in result.intercepted {
-                    payload.add_intercepted_file(path, contents);
-                }
-                for (path, err) in &result.errors {
-                    warn!("Failed to intercept {}: {}", path, err);
-                }
-            }
-        }
-    }
-
-    // 2. Add ALL config.env vars to the payload
+    // Add ALL config.env vars to the payload
     for (k, v) in &(***sandbox).config().env {
-        if !payload.secrets.contains_key(k) {
-            payload.add_secret(k.clone(), v.clone());
-        }
+        payload.add_secret(k.clone(), v.clone());
     }
 
-    if payload.secrets.is_empty() && payload.intercepted_files.is_empty() {
+    if payload.secrets.is_empty() {
         return Ok(sandbox::SecretManifest {
             secrets: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
