@@ -5146,7 +5146,7 @@ fn load_agents_registry() -> Option<sandbox::AgentsRegistryClient> {
         }
     }
 
-    None
+    Some(AgentsRegistryClient::online_only())
 }
 
 // ========== Skills Handlers ==========
