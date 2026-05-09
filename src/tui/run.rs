@@ -1,7 +1,6 @@
 //! Main event loop for the TUI.
 
 use std::collections::HashMap;
-use base64::Engine;
 use std::io::{self, IsTerminal};
 use tracing::warn;
 use std::sync::Arc;
@@ -454,7 +453,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                     panel.loading_message = Some(message);
                 }
             }
-            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount, secrets_active } => {
+            AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount } => {
                 // Get SSH info before storing sandbox
                 let ssh_info = {
                     let sb = sandbox.lock().await;
@@ -475,7 +474,6 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         panel.ssh_host_port = Some(port);
                         panel.ssh_key_path = Some(key.clone());
                     }
-                    panel.secrets_active = secrets_active;
                 }
 
                 let is_auto_mode = app.panels.get(panel_idx)
@@ -4071,16 +4069,6 @@ fn add_agent(
                         ) {
                             (**sandbox).config_mut().env.insert(key, val);
                         }
-                        // Encrypt and send ALL env vars to gateway
-                        let clone_path = sandbox
-                            .project_mount()
-                            .and_then(|pm| pm.worktree_base.clone());
-                        if let Err(e) = send_encrypted_env(
-                            &mut sandbox, None, std::path::Path::new("."), &clone_path,
-                        ) {
-                            tracing::warn!("Failed to send env to gateway: {}", e);
-                        }
-
                         // Take the project mount from the sandbox so we can
                         // store it on the panel for teardown on kill.
                         let project_mount = sandbox.take_project_mount();
@@ -4090,7 +4078,6 @@ fn add_agent(
                             sandbox: sb,
                             short_id,
                             project_mount,
-                            secrets_active: false,
                         });
                     }
                     Err(e) => {
@@ -4146,17 +4133,7 @@ fn add_agent_from_config(
     for (api_key, _) in &required_api_keys(&agent_type) {
         if !panel.env.contains_key(*api_key) {
             if let Ok(val) = std::env::var(api_key) {
-                if config.secrets.is_some() {
-                    // Route through encrypted secrets pipeline
-                    if let Some(ref mut secrets) = config.secrets {
-                        if !secrets.keys.contains(&api_key.to_string()) {
-                            secrets.keys.push(api_key.to_string());
-                        }
-                    }
-                } else {
-                    // Legacy path: add to env
-                    panel.env.insert(api_key.to_string(), val);
-                }
+                panel.env.insert(api_key.to_string(), val);
             }
         }
     }
@@ -4197,9 +4174,7 @@ fn add_agent_from_config(
         .map(|p| p.path.clone())
         .or_else(|| app.project_path.clone())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    // Capture the agent type string for secrets bootstrap.
     let agent_type_str = agent_type.clone();
-
     // Capture agent-specific fields before config is moved into the async block.
     let agent_auto_mode = config.auto_mode;
     let agent_permissions = config.permissions;
@@ -4210,7 +4185,6 @@ fn add_agent_from_config(
     let image_manager = app.image_manager.clone();
     tokio::spawn(async move {
         let resolved_agent = config.resolved_agent.clone();
-        let secrets_cfg = config.secrets.clone();
         let _ = tx.send(AppEvent::SandboxCreating {
             panel_idx,
             message: "Pulling image...".into(),
@@ -4252,31 +4226,6 @@ fn add_agent_from_config(
                             (**sandbox).config_mut().env.insert(key, val);
                         }
 
-                        // Encrypt and send ALL env vars to gateway (always — not just when secrets: is configured)
-                        let clone_path = sandbox
-                            .project_mount()
-                            .and_then(|pm| pm.worktree_base.clone());
-                        let secrets_active = match send_encrypted_env(
-                            &mut sandbox,
-                            secrets_cfg.as_ref(),
-                            &config_dir,
-                            &clone_path,
-                        ) {
-                            Ok(manifest) => {
-                                if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
-                                    let bootstrap = secrets_bootstrap_content(&manifest);
-                                    if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
-                                        tracing::warn!("Failed to write secrets bootstrap: {}", e);
-                                    }
-                                }
-                                true
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to send env to gateway: {}", e);
-                                false
-                            }
-                        };
-
                         let project_mount = sandbox.take_project_mount();
                         let sb = Arc::new(Mutex::new(sandbox));
                         let _ = tx.send(AppEvent::SandboxReady {
@@ -4284,7 +4233,6 @@ fn add_agent_from_config(
                             sandbox: sb,
                             short_id,
                             project_mount,
-                            secrets_active,
                         });
                     }
                     Err(e) => {
@@ -4355,17 +4303,7 @@ fn resume_session(
         for (api_key, _) in &required_api_keys(&agent_type) {
             if !panel.env.contains_key(*api_key) {
                 if let Ok(val) = std::env::var(api_key) {
-                    if config.secrets.is_some() {
-                        // Route through encrypted secrets pipeline
-                        if let Some(ref mut secrets) = config.secrets {
-                            if !secrets.keys.contains(&api_key.to_string()) {
-                                secrets.keys.push(api_key.to_string());
-                            }
-                        }
-                    } else {
-                        // Legacy path: add to env
-                        panel.env.insert(api_key.to_string(), val);
-                    }
+                    panel.env.insert(api_key.to_string(), val);
                 }
             }
         }
@@ -4424,13 +4362,6 @@ fn resume_session(
         app.show_welcome = false;
         app.focus_panel_input();
 
-        // Capture config_dir and agent_type_str for secrets injection before async move.
-        let config_dir = config
-            .sandbox
-            .project
-            .as_ref()
-            .map(|p| p.path.clone())
-            .unwrap_or_else(|| session.project_path.clone());
         let agent_type_str = agent_type.clone();
 
         // Capture agent-specific fields before config is moved into the async block.
@@ -4444,7 +4375,6 @@ fn resume_session(
         let image_manager = app.image_manager.clone();
         tokio::spawn(async move {
             let resolved_agent = config.resolved_agent.clone();
-            let secrets_cfg = config.secrets.clone();
             let _ = tx.send(AppEvent::SandboxCreating {
                 panel_idx,
                 message: "Pulling image...".into(),
@@ -4486,31 +4416,6 @@ fn resume_session(
                                 (**sandbox).config_mut().env.insert(key, val);
                             }
 
-                            // Encrypt and send ALL env vars to gateway (always)
-                            let clone_path = sandbox
-                                .project_mount()
-                                .and_then(|pm| pm.worktree_base.clone());
-                            let secrets_active = match send_encrypted_env(
-                                &mut sandbox,
-                                secrets_cfg.as_ref(),
-                                &config_dir,
-                                &clone_path,
-                            ) {
-                                Ok(manifest) => {
-                                    if !manifest.secrets.is_empty() || !manifest.files.is_empty() {
-                                        let bootstrap = secrets_bootstrap_content(&manifest);
-                                        if let Err(e) = write_secrets_bootstrap(&mut sandbox, &agent_type_str, &bootstrap).await {
-                                            tracing::warn!("Failed to write secrets bootstrap: {}", e);
-                                        }
-                                    }
-                                    true
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to send env to gateway: {}", e);
-                                    false
-                                }
-                            };
-
                             let project_mount = sandbox.take_project_mount();
                             let sb = Arc::new(Mutex::new(sandbox));
                             let _ = tx.send(AppEvent::SandboxReady {
@@ -4518,7 +4423,6 @@ fn resume_session(
                                 sandbox: sb,
                                 short_id,
                                 project_mount,
-                                secrets_active,
                             });
                         }
                         Err(e) => {
@@ -5320,167 +5224,6 @@ fn handle_agent_info(app: &mut App, name: &str) {
     });
 }
 
-/// Encrypt and send ALL env vars to the gateway.
-///
-/// This is called for EVERY sandbox after start(). All env vars (from .env,
-/// sandbox.yml env:, --env flags, auto-detected API keys, agent-specific vars)
-/// are encrypted and sent to the gateway's SSH env store + secrets_store.
-///
-/// If a secrets: config is present, also collects from SOPS files and intercepts
-/// credential files from the git repo.
-///
-/// The gateway injects these into every SSH session and exec call via cmd.Env —
-/// no shell export, no .env files inside the VM.
-fn send_encrypted_env(
-    sandbox: &mut sandbox::Sandbox,
-    secrets_config: Option<&sandbox::SecretSource>,
-    config_dir: &std::path::Path,
-    clone_path: &Option<std::path::PathBuf>,
-) -> anyhow::Result<sandbox::SecretManifest> {
-    let mut payload = sandbox::secrets::payload::SecretPayload::new();
-
-    // 1. If secrets: config exists, collect from SOPS file and host env keys
-    if let Some(secrets_cfg) = secrets_config {
-        let extra = crate::collect_secrets(secrets_cfg, config_dir)?;
-        for (k, v) in extra.secrets {
-            payload.add_secret(k, v);
-        }
-
-        // Intercept sensitive files from git repo clone
-        if let Some(ref clone) = clone_path {
-            if !secrets_cfg.intercept_patterns.is_empty() {
-                let result = sandbox::secrets::intercept::intercept_sensitive_files(
-                    clone,
-                    &secrets_cfg.intercept_patterns,
-                );
-                for (path, contents) in result.intercepted {
-                    payload.add_intercepted_file(path, contents);
-                }
-                for (path, err) in &result.errors {
-                    warn!("Failed to intercept {}: {}", path, err);
-                }
-            }
-        }
-    }
-
-    // 2. Add ALL config.env vars to the payload
-    for (k, v) in &(***sandbox).config().env {
-        if !payload.secrets.contains_key(k) {
-            payload.add_secret(k.clone(), v.clone());
-        }
-    }
-
-    if payload.secrets.is_empty() && payload.intercepted_files.is_empty() {
-        return Ok(sandbox::SecretManifest {
-            secrets: std::collections::HashMap::new(),
-            files: std::collections::HashMap::new(),
-        });
-    }
-
-    // 3. Encrypt using the gateway's crypto (same crate as decrypt — no version mismatch)
-    let pubkey_b64 = (**sandbox).gateway()
-        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
-        .secrets_pubkey()
-        .ok_or_else(|| anyhow::anyhow!("Gateway secrets pubkey not available"))?;
-
-    let pubkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&pubkey_b64)
-        .map_err(|e| anyhow::anyhow!("Invalid gateway pubkey: {}", e))?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Gateway pubkey must be 32 bytes"))?;
-
-    let plaintext = payload.to_json_bytes()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    let encrypted = sandbox::encrypt_payload(&plaintext, &pubkey_bytes)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    let encrypted_json = serde_json::to_string(&encrypted)?;
-
-    // 4. Send encrypted payload → gateway decrypts → stores in secrets_store
-    let manifest = (**sandbox).gateway_mut()
-        .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
-        .send_secrets(&encrypted_json)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    Ok(manifest)
-}
-
-/// Generate secrets access instructions for agent config files.
-fn secrets_bootstrap_content(manifest: &sandbox::SecretManifest) -> String {
-    let mut lines = Vec::new();
-    lines.push("## Secrets Access".to_string());
-    lines.push(String::new());
-    lines.push("The following secrets are available as environment variables in this session.".to_string());
-    lines.push("Do NOT hardcode these values. Read them from the environment when needed.".to_string());
-    lines.push(String::new());
-
-    if !manifest.secrets.is_empty() {
-        let mut keys: Vec<&String> = manifest.secrets.keys().collect();
-        keys.sort();
-        lines.push(format!(
-            "Available secret env vars: {}",
-            keys.iter().map(|k| format!("`${}`", k)).collect::<Vec<_>>().join(", ")
-        ));
-    }
-
-    if !manifest.files.is_empty() {
-        lines.push(String::new());
-        lines.push("Intercepted files are available at:".to_string());
-        let mut files: Vec<(&String, &String)> = manifest.files.iter().collect();
-        files.sort_by_key(|(k, _)| *k);
-        for (name, path) in files {
-            lines.push(format!("- `{}` → `{}`", name, path));
-        }
-    }
-
-    lines.push(String::new());
-    lines.push("IMPORTANT: Never hardcode secrets. Never echo secret values. Always read from env vars.".to_string());
-
-    lines.join("\n")
-}
-
-/// Write secrets access instructions to the appropriate agent config file inside the VM.
-async fn write_secrets_bootstrap(
-    sandbox: &mut sandbox::Sandbox,
-    agent_type: &str,
-    content: &str,
-) -> anyhow::Result<()> {
-    let file_path = match agent_type {
-        "claude" => "/workspace/CLAUDE.md",
-        "codex" => "/workspace/.codexrc",
-        "goose" => "/workspace/.goose/instructions.md",
-        _ => return Ok(()), // Unknown agent, skip
-    };
-
-    // Read existing content (if any) and prepend
-    let existing = match (**sandbox).gateway() {
-        Ok(gw) => gw.exec_with_options("cat", &[file_path], Default::default())
-            .await
-            .map(|r| r.stdout)
-            .unwrap_or_default(),
-        Err(_) => String::new(),
-    };
-
-    let new_content = format!("{}\n\n{}", content, existing);
-    let escaped = new_content.replace('\'', "'\\''");
-
-    let write_cmd = format!(
-        "mkdir -p $(dirname '{}') && printf '%s' '{}' > '{}'",
-        file_path, escaped, file_path
-    );
-    match (**sandbox).gateway() {
-        Ok(gw) => {
-            gw.exec_with_options("sh", &["-c", &write_cmd], Default::default())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", file_path, e))?;
-        }
-        Err(e) => return Err(anyhow::anyhow!("Gateway not available: {}", e)),
-    }
-
-    tracing::info!("Wrote secrets bootstrap to {}", file_path);
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
