@@ -6,12 +6,15 @@ mod cli {
     use clap::{Parser, Subcommand, ValueEnum};
     use colored::Colorize;
     use indicatif::{ProgressBar, ProgressStyle};
-    use sandbox::{normalize_image, ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus, Stream};
+    use sandbox::{
+        normalize_image, ImageManager, Sandbox, SandboxConfig, SandboxRegistry, SandboxStatus,
+        Stream,
+    };
     use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Mutex;
     use tabled::{Table, Tabled};
+    use tokio::sync::Mutex;
     use tracing::{error, info, warn};
 
     /// Output format for commands
@@ -74,6 +77,19 @@ mod cli {
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long = "env-file", global = true)]
         pub env_file: Vec<String>,
+
+        /// Resume the most recent saved session for this project
+        #[arg(
+            short = 'r',
+            long = "resume",
+            global = true,
+            conflicts_with = "session"
+        )]
+        pub resume: bool,
+
+        /// Resume a specific session id from history
+        #[arg(long, global = true)]
+        pub session: Option<String>,
     }
 
     #[derive(Subcommand)]
@@ -178,6 +194,13 @@ mod cli {
             project: Option<String>,
         },
 
+        /// List saved nanosb sessions for a project
+        Sessions {
+            /// Project directory (defaults to current directory)
+            #[arg(long)]
+            project: Option<String>,
+        },
+
         /// Manage the image and blob cache
         Cache {
             #[command(subcommand)]
@@ -221,6 +244,21 @@ mod cli {
         status: String,
         #[tabled(rename = "CREATED")]
         created: String,
+    }
+
+    /// Saved session info for table display
+    #[derive(Tabled)]
+    struct SessionRow {
+        #[tabled(rename = "ID")]
+        id: String,
+        #[tabled(rename = "UPDATED_AT")]
+        updated_at: String,
+        #[tabled(rename = "UPDATED")]
+        updated: String,
+        #[tabled(rename = "PANELS")]
+        panels: usize,
+        #[tabled(rename = "SUMMARY")]
+        summary: String,
     }
 
     /// Format bytes to human readable
@@ -281,11 +319,15 @@ mod cli {
         {
             use tracing_subscriber::layer::SubscriberExt;
             use tracing_subscriber::util::SubscriberInitExt;
-            use tracing_subscriber::{EnvFilter, Layer, fmt};
+            use tracing_subscriber::{fmt, EnvFilter, Layer};
 
             let logs_dir = logs_dir();
             let file_setup = if let Err(e) = std::fs::create_dir_all(&logs_dir) {
-                eprintln!("Warning: could not create logs directory {}: {}", logs_dir.display(), e);
+                eprintln!(
+                    "Warning: could not create logs directory {}: {}",
+                    logs_dir.display(),
+                    e
+                );
                 None
             } else {
                 cleanup_old_logs(&logs_dir, 7);
@@ -301,12 +343,19 @@ mod cli {
                 // it corrupts the ratatui alternate screen. So default to info
                 // there to capture the SSE/exec diagnostics. For command mode,
                 // keep warn so we don't spam the file unnecessarily.
-                let default_level = if cli.command.is_none() { "info" } else { "warn" };
+                let default_level = if cli.command.is_none() {
+                    "info"
+                } else {
+                    "warn"
+                };
                 let file_level = std::env::var("NANOSB_LOG")
                     .ok()
                     .filter(|v| !v.is_empty())
                     .unwrap_or_else(|| default_level.to_string());
-                let file_filter = format!("runtime={lvl},nanosb_cli={lvl},nanosb={lvl},sandbox={lvl}", lvl = file_level);
+                let file_filter = format!(
+                    "runtime={lvl},nanosb_cli={lvl},nanosb={lvl},sandbox={lvl}",
+                    lvl = file_level
+                );
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
@@ -315,24 +364,27 @@ mod cli {
                 // Only attach a stderr layer when there's a command AND --verbose.
                 // TUI must never write to stderr (it breaks the alternate screen).
                 if cli.command.is_some() && cli.verbose {
-                    let stderr_layer = fmt::layer()
-                        .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug"));
+                    let stderr_layer =
+                        fmt::layer()
+                            .with_writer(std::io::stderr)
+                            .with_filter(EnvFilter::new(
+                                "runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug",
+                            ));
 
                     tracing_subscriber::registry()
                         .with(file_layer)
                         .with(stderr_layer)
                         .init();
                 } else {
-                    tracing_subscriber::registry()
-                        .with(file_layer)
-                        .init();
+                    tracing_subscriber::registry().with(file_layer).init();
                 }
             } else {
                 _log_guard = None;
                 if cli.command.is_some() && cli.verbose {
                     tracing_subscriber::fmt()
-                        .with_env_filter("runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug")
+                        .with_env_filter(
+                            "runtime=debug,nanosb_cli=debug,nanosb=debug,sandbox=debug",
+                        )
                         .init();
                 } else {
                     let _ = env_logger::Builder::from_env(
@@ -346,17 +398,12 @@ mod cli {
         match cli.command {
             None => {
                 // Collect config file paths.
-                let mut config_paths: Vec<std::path::PathBuf> = cli
-                    .configs
-                    .iter()
-                    .map(std::path::PathBuf::from)
-                    .collect();
+                let mut config_paths: Vec<std::path::PathBuf> =
+                    cli.configs.iter().map(std::path::PathBuf::from).collect();
 
                 // Auto-detect sandbox.yml in CWD.
                 let cwd = std::env::current_dir()?;
-                if sandbox::find_sandbox_file(&cwd).is_some()
-                    && !config_paths.contains(&cwd)
-                {
+                if sandbox::find_sandbox_file(&cwd).is_some() && !config_paths.contains(&cwd) {
                     config_paths.insert(0, cwd.clone());
                 }
 
@@ -380,23 +427,28 @@ mod cli {
 
                 // Auto-load .env from project directory (lowest priority).
                 // Check --project flag first, then CWD if it's a git repo.
-                let auto_env_dir = cli.project.as_ref().map(std::path::PathBuf::from)
+                let auto_env_dir = cli
+                    .project
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
                     .or_else(|| std::env::current_dir().ok());
                 if let Some(ref dir) = auto_env_dir {
                     let env_path = dir.join(".env");
                     if env_path.exists() {
-                        let project_env = sandbox::config::file::load_env_file(
-                            &env_path.to_string_lossy(),
-                            dir,
-                        )
-                        .map_err(|e| {
-                            error!("Failed to load env file {:?}: {}", env_path, e);
-                            anyhow::anyhow!("{}", e)
-                        })?;
+                        let project_env =
+                            sandbox::config::file::load_env_file(&env_path.to_string_lossy(), dir)
+                                .map_err(|e| {
+                                    error!("Failed to load env file {:?}: {}", env_path, e);
+                                    anyhow::anyhow!("{}", e)
+                                })?;
                         for (_, config) in sandbox_configs.iter_mut() {
                             for (k, v) in &project_env {
                                 // Only set if not already defined by sandbox.yml
-                                config.sandbox.env.entry(k.clone()).or_insert_with(|| v.clone());
+                                config
+                                    .sandbox
+                                    .env
+                                    .entry(k.clone())
+                                    .or_insert_with(|| v.clone());
                             }
                         }
                     }
@@ -406,7 +458,9 @@ mod cli {
                 let cli_env = parse_env_vars(&cli.env, &cli.env_file)?;
 
                 // Parse --permissions flag.
-                let cli_permissions = cli.permissions.as_deref()
+                let cli_permissions = cli
+                    .permissions
+                    .as_deref()
                     .map(|s| s.parse::<sandbox::Permissions>())
                     .transpose()
                     .map_err(|e| {
@@ -432,10 +486,7 @@ mod cli {
                         .collect();
                     if filtered.is_empty() {
                         error!("Sandbox '{}' not found in config files", name);
-                        anyhow::bail!(
-                            "Sandbox '{}' not found in config files",
-                            name
-                        );
+                        anyhow::bail!("Sandbox '{}' not found in config files", name);
                     }
                     filtered
                 } else {
@@ -444,11 +495,20 @@ mod cli {
 
                 // Always use CWD as project path so non-git directories get session
                 // persistence and project mounting (git is initialised in source on first use).
-                let project_path = cli.project
+                let project_path = cli
+                    .project
                     .map(std::path::PathBuf::from)
                     .or_else(|| std::env::current_dir().ok());
 
-                nanosb_cli::tui::run::run_tui(project_path, sandbox_configs).await
+                let session_start = if let Some(session_id) = cli.session {
+                    nanosb_cli::tui::run::SessionStartMode::ResumeById(session_id)
+                } else if cli.resume {
+                    nanosb_cli::tui::run::SessionStartMode::ResumeLatest
+                } else {
+                    nanosb_cli::tui::run::SessionStartMode::Fresh
+                };
+
+                nanosb_cli::tui::run::run_tui(project_path, sandbox_configs, session_start).await
             }
             Some(Commands::Pull { image }) => cmd_pull(&image, cli.format, cli.verbose).await,
             Some(Commands::Images) => cmd_images(cli.format).await,
@@ -491,6 +551,9 @@ mod cli {
             Some(Commands::Rm { sandbox, force }) => cmd_rm(&sandbox, force, cli.verbose).await,
             Some(Commands::Doctor) => cmd_doctor(cli.format).await,
             Some(Commands::Cleanup { project }) => cmd_cleanup(project.as_deref()).await,
+            Some(Commands::Sessions { project }) => {
+                cmd_sessions(project.as_deref(), cli.format).await
+            }
             Some(Commands::Cache { action }) => match action {
                 CacheAction::Prune { all } => cmd_cache_prune(all, cli.format).await,
             },
@@ -618,45 +681,6 @@ mod cli {
         Ok(vars)
     }
 
-    /// Collect secrets from the SecretSource configuration.
-    /// Returns a SecretPayload ready for encryption.
-    fn collect_secrets(
-        secrets_config: &sandbox::SecretSource,
-        config_dir: &std::path::Path,
-    ) -> anyhow::Result<sandbox::secrets::payload::SecretPayload> {
-        let mut payload = sandbox::secrets::payload::SecretPayload::new();
-
-        // 1. Load from SOPS-encrypted file if specified
-        if let Some(ref file) = secrets_config.file {
-            let file_path = std::path::Path::new(file);
-            match sandbox::secrets::sops::decrypt_sops_file(file_path, config_dir) {
-                Ok(secrets) => {
-                    for (key, value) in secrets {
-                        payload.add_secret(key, value);
-                    }
-                    info!("Loaded {} secrets from SOPS file: {}", payload.secrets.len(), file);
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Failed to decrypt SOPS file '{}': {}", file, e));
-                }
-            }
-        }
-
-        // 2. Read explicit keys from host environment (without set_var!)
-        for key in &secrets_config.keys {
-            match std::env::var(key) {
-                Ok(value) => {
-                    payload.add_secret(key.clone(), value);
-                }
-                Err(_) => {
-                    warn!("Secret key '{}' not found in host environment", key);
-                }
-            }
-        }
-
-        Ok(payload)
-    }
-
     /// Run a command in a new sandbox
     ///
     /// By default, output is streamed in real-time (like `docker run`).
@@ -671,11 +695,17 @@ mod cli {
                 continue;
             }
             let pair = if let Some((h, g)) = s.split_once(':') {
-                let host: u16 = h.parse().map_err(|_| anyhow::anyhow!("invalid host port in '{}'", s))?;
-                let guest: u16 = g.parse().map_err(|_| anyhow::anyhow!("invalid guest port in '{}'", s))?;
+                let host: u16 = h
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid host port in '{}'", s))?;
+                let guest: u16 = g
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid guest port in '{}'", s))?;
                 (host, guest)
             } else {
-                let p: u16 = s.parse().map_err(|_| anyhow::anyhow!("invalid port '{}'", s))?;
+                let p: u16 = s
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid port '{}'", s))?;
                 (p, p)
             };
             out.push(pair);
@@ -735,7 +765,11 @@ mod cli {
         let mut config = builder.build();
 
         for (host, guest) in ports {
-            config.sandbox.network.port_mappings.push(sandbox::PortMapping::tcp(*host, *guest));
+            config
+                .sandbox
+                .network
+                .port_mappings
+                .push(sandbox::PortMapping::tcp(*host, *guest));
         }
 
         let pb = create_pull_progress();
@@ -804,7 +838,8 @@ mod cli {
                     let sb = guard.as_mut().expect("sandbox exists");
                     sb.gateway()
                         .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
-                        .exec(cmd, &args).await?
+                        .exec(cmd, &args)
+                        .await?
                 };
 
                 match format {
@@ -842,20 +877,18 @@ mod cli {
                     let sb = guard.as_mut().expect("sandbox exists");
                     sb.gateway()
                         .map_err(|e| anyhow::anyhow!("Gateway not available: {}", e))?
-                        .exec_stream(cmd, &args, |chunk| {
-                            match chunk.stream {
-                                Stream::Stdout => {
-                                    let data = format!("{}\n", chunk.data);
-                                    let stdout = std::io::stdout();
-                                    let mut handle = stdout.lock();
-                                    write_all_retry(&mut handle, data.as_bytes());
-                                }
-                                Stream::Stderr => {
-                                    let data = format!("{}\n", chunk.data);
-                                    let stderr = std::io::stderr();
-                                    let mut handle = stderr.lock();
-                                    write_all_retry(&mut handle, data.as_bytes());
-                                }
+                        .exec_stream(cmd, &args, |chunk| match chunk.stream {
+                            Stream::Stdout => {
+                                let data = format!("{}\n", chunk.data);
+                                let stdout = std::io::stdout();
+                                let mut handle = stdout.lock();
+                                write_all_retry(&mut handle, data.as_bytes());
+                            }
+                            Stream::Stderr => {
+                                let data = format!("{}\n", chunk.data);
+                                let stderr = std::io::stderr();
+                                let mut handle = stderr.lock();
+                                write_all_retry(&mut handle, data.as_bytes());
                             }
                         })
                         .await?
@@ -1018,11 +1051,10 @@ mod cli {
             .into_iter()
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
-        let sandbox_info =
-            sandbox_info.ok_or_else(|| {
-                error!("Sandbox not found for stop: {}", sandbox_id);
-                anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
-            })?;
+        let sandbox_info = sandbox_info.ok_or_else(|| {
+            error!("Sandbox not found for stop: {}", sandbox_id);
+            anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+        })?;
 
         if verbose {
             eprintln!(
@@ -1052,11 +1084,10 @@ mod cli {
             .into_iter()
             .find(|s| s.id.starts_with(sandbox_id) || s.name.starts_with(sandbox_id));
 
-        let sandbox_info =
-            sandbox_info.ok_or_else(|| {
-                error!("Sandbox not found: {}", sandbox_id);
-                anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
-            })?;
+        let sandbox_info = sandbox_info.ok_or_else(|| {
+            error!("Sandbox not found: {}", sandbox_id);
+            anyhow::anyhow!("Sandbox not found: {}", sandbox_id)
+        })?;
 
         if sandbox_info.status == SandboxStatus::Running && !force {
             warn!("Attempted to remove running sandbox {}", sandbox_id);
@@ -1089,11 +1120,9 @@ mod cli {
         Ok(())
     }
 
-
     /// Check runtime prerequisites and display status
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
         use sandbox::validation::validate_runtime_prerequisites_detailed;
-
 
         let result = validate_runtime_prerequisites_detailed().await;
 
@@ -1133,21 +1162,12 @@ mod cli {
             let warned = warnings.iter().find(|w| w.contains(check.keyword));
 
             if let Some(err) = failed {
-                println!(
-                    "  {} {}: {}",
-                    "[✗]".red().bold(),
-                    check.name,
-                    err.message
-                );
+                println!("  {} {}: {}", "[✗]".red().bold(), check.name, err.message);
                 if let Some(ref hint) = &err.fix_hint {
                     println!("      {}: {}", "Fix".yellow(), hint);
                 }
             } else if let Some(warning) = warned {
-                println!(
-                    "  {} {}",
-                    "[!]".yellow().bold(),
-                    warning
-                );
+                println!("  {} {}", "[!]".yellow().bold(), warning);
                 passed += 1;
             } else {
                 println!(
@@ -1163,12 +1183,7 @@ mod cli {
         // Show any errors that didn't match a known check name
         for err in errors {
             if !check_names.contains(&err.check.as_str()) {
-                println!(
-                    "  {} {}: {}",
-                    "[✗]".red().bold(),
-                    err.check,
-                    err.message
-                );
+                println!("  {} {}: {}", "[✗]".red().bold(), err.check, err.message);
                 if let Some(ref hint) = &err.fix_hint {
                     println!("      {}: {}", "Fix".yellow(), hint);
                 }
@@ -1289,9 +1304,7 @@ mod cli {
         }
     }
 
-    fn doctor_results_to_json(
-        result: &sandbox::validation::ValidationResult,
-    ) -> serde_json::Value {
+    fn doctor_results_to_json(result: &sandbox::validation::ValidationResult) -> serde_json::Value {
         serde_json::json!({
             "ok": result.is_ok(),
             "platform": std::env::consts::OS,
@@ -1373,7 +1386,9 @@ mod cli {
             None => std::env::current_dir()?,
         };
 
-        let canonical_path = project_path.canonicalize().unwrap_or_else(|_| project_path.clone());
+        let canonical_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
         let clones = sandbox::project::clones_dir(&canonical_path);
         if !clones.exists() {
             println!("No nanosb clones found for {}", project_path.display());
@@ -1430,12 +1445,7 @@ mod cli {
                     if let Some(ref branch) = branch_name {
                         let refspec = format!("{}:{}", branch, branch);
                         let _ = std::process::Command::new("git")
-                            .args([
-                                "fetch",
-                                &clone_path.to_string_lossy(),
-                                &refspec,
-                                "--force",
-                            ])
+                            .args(["fetch", &clone_path.to_string_lossy(), &refspec, "--force"])
                             .current_dir(&project_path)
                             .output();
                     }
@@ -1476,10 +1486,88 @@ mod cli {
         Ok(())
     }
 
+    /// List saved sessions for the current or provided project path.
+    async fn cmd_sessions(project: Option<&str>, format: OutputFormat) -> anyhow::Result<()> {
+        fn format_age_precise(dt: &chrono::DateTime<chrono::Utc>) -> String {
+            let now = chrono::Utc::now();
+            let duration = now.signed_duration_since(*dt);
+            let secs = duration.num_seconds();
+
+            if secs < 60 {
+                format!("{}s ago", secs.max(0))
+            } else if secs < 3600 {
+                format!("{}m ago", duration.num_minutes())
+            } else if secs < 86_400 {
+                format!("{}h ago", duration.num_hours())
+            } else {
+                format!("{}d ago", duration.num_days())
+            }
+        }
+
+        let project_path = match project {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::env::current_dir()?,
+        };
+
+        let sessions = sandbox::session::Session::list(&project_path);
+
+        match format {
+            OutputFormat::Text => {
+                if sessions.is_empty() {
+                    println!("No saved sessions for {}", project_path.display());
+                    return Ok(());
+                }
+
+                let rows: Vec<SessionRow> = sessions
+                    .iter()
+                    .map(|entry| SessionRow {
+                        id: entry.id.clone(),
+                        updated_at: entry
+                            .session
+                            .updated_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string(),
+                        updated: format_age_precise(&entry.session.updated_at),
+                        panels: entry.session.panels.len(),
+                        summary: entry.session.summary(),
+                    })
+                    .collect();
+
+                println!("Project: {}", project_path.display());
+                println!("{}", Table::new(rows));
+                println!("\nResume latest: nanosb -r");
+                println!("Resume specific: nanosb --session <id>");
+            }
+            OutputFormat::Json => {
+                let json_sessions: Vec<_> = sessions
+                    .iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "id": entry.id,
+                            "created_at": entry.session.created_at,
+                            "updated_at": entry.session.updated_at,
+                            "updated": format_age_precise(&entry.session.updated_at),
+                            "panels": entry.session.panels.len(),
+                            "summary": entry.session.summary(),
+                        })
+                    })
+                    .collect();
+
+                let out = serde_json::json!({
+                    "project": project_path,
+                    "sessions": json_sessions,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run preflight validation, showing doctor output on failure.
     async fn preflight_check() -> anyhow::Result<()> {
         use sandbox::validation::validate_runtime_prerequisites_detailed;
-
 
         let result = validate_runtime_prerequisites_detailed().await;
         if !result.is_ok() {
@@ -1525,9 +1613,13 @@ mod cli {
         dirs::home_dir()
             .unwrap_or_else(|| {
                 #[cfg(target_os = "windows")]
-                { std::path::PathBuf::from(".") }
+                {
+                    std::path::PathBuf::from(".")
+                }
                 #[cfg(not(target_os = "windows"))]
-                { std::path::PathBuf::from("/tmp") }
+                {
+                    std::path::PathBuf::from("/tmp")
+                }
             })
             .join(".nanosandbox")
             .join("logs")

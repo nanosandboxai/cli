@@ -30,8 +30,6 @@ pub enum AppEvent {
         short_id: String,
         /// Project mount transferred from the sandbox (if any).
         project_mount: Option<sandbox::ProjectMount>,
-        /// Whether secrets were successfully injected into this sandbox.
-        secrets_active: bool,
     },
     /// Sandbox creation or startup failed.
     SandboxFailed {

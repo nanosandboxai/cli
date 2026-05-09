@@ -132,9 +132,7 @@ pub struct MouseSelection {
 impl MouseSelection {
     /// Return (start, end) normalized so start comes before end in row-major order.
     pub fn normalized(&self) -> ((u16, u16), (u16, u16)) {
-        if self.start.0 < self.end.0
-            || (self.start.0 == self.end.0 && self.start.1 <= self.end.1)
-        {
+        if self.start.0 < self.end.0 || (self.start.0 == self.end.0 && self.start.1 <= self.end.1) {
             (self.start, self.end)
         } else {
             (self.end, self.start)
@@ -347,8 +345,8 @@ pub struct AgentPanel {
     /// Whether the user sent at least one keystroke to this agent's terminal.
     /// Used to decide whether resume flags (--continue) are appropriate on next session load.
     pub had_interaction: bool,
-    /// Whether secrets were injected into this sandbox via the encrypted pipeline.
-    pub secrets_active: bool,
+    /// Explicit agent-native session ID to resume (if user selected one).
+    pub selected_agent_session_id: Option<String>,
     /// Overlay notification shown on top of the terminal (message, is_error, remaining ticks).
     /// Replaces previous notification; auto-dismissed after countdown reaches 0.
     pub notification: Option<(String, bool, u8)>,
@@ -393,7 +391,7 @@ impl AgentPanel {
             original_config: None,
             is_resumed: false,
             had_interaction: false,
-            secrets_active: false,
+            selected_agent_session_id: None,
             notification: None,
         }
     }
@@ -563,13 +561,11 @@ impl App {
                     .current_dir(wt)
                     .output();
                 match output {
-                    Ok(out) => {
-                        String::from_utf8_lossy(&out.stdout)
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .map(|l| l.to_string())
-                            .collect()
-                    }
+                    Ok(out) => String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(|l| l.to_string())
+                        .collect(),
                     Err(_) => Vec::new(),
                 }
             }
@@ -589,7 +585,10 @@ impl App {
         let panel = self.panels.get(self.focused_panel);
         let (worktree_path, base) = match panel {
             Some(p) => {
-                let wt = p.project_mount.as_ref().and_then(|pm| pm.worktree_base.as_ref());
+                let wt = p
+                    .project_mount
+                    .as_ref()
+                    .and_then(|pm| pm.worktree_base.as_ref());
                 let base = p.base_commit.as_deref();
                 (wt, base)
             }
@@ -604,13 +603,11 @@ impl App {
                     .current_dir(wt)
                     .output();
                 match output {
-                    Ok(out) if out.status.success() => {
-                        String::from_utf8_lossy(&out.stdout)
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .map(|l| l.to_string())
-                            .collect()
-                    }
+                    Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(|l| l.to_string())
+                        .collect(),
                     _ => Vec::new(),
                 }
             }
@@ -670,8 +667,7 @@ impl App {
             }
 
             // Determine if auto-sync is active for this panel.
-            let auto_sync = panel.sync_override
-                .unwrap_or(global_auto_sync);
+            let auto_sync = panel.sync_override.unwrap_or(global_auto_sync);
 
             // Get commit info for notification.
             let subject = std::process::Command::new("git")
@@ -692,7 +688,10 @@ impl App {
                         if notify_on_commit {
                             notifications.push((
                                 panel_idx,
-                                format!("New commit {}: {} (use /gitsync now to sync)", short_sha, subject),
+                                format!(
+                                    "New commit {}: {} (use /gitsync now to sync)",
+                                    short_sha, subject
+                                ),
                             ));
                         }
                         panel.last_known_head = Some(current_head);
@@ -718,7 +717,10 @@ impl App {
                 // Notify only — don't fetch.
                 notifications.push((
                     panel_idx,
-                    format!("New commit {}: {} (use /gitsync now to sync)", short_sha, subject),
+                    format!(
+                        "New commit {}: {} (use /gitsync now to sync)",
+                        short_sha, subject
+                    ),
                 ));
             }
 
@@ -1078,7 +1080,6 @@ impl App {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1180,7 +1181,9 @@ mod tests {
         app.handle_char('d');
         app.handle_char('e');
         let result = app.handle_submit();
-        assert!(matches!(result, SubmitResult::Command(Command::AddAgent { ref agent, .. }) if agent == "claude"));
+        assert!(
+            matches!(result, SubmitResult::Command(Command::AddAgent { ref agent, .. }) if agent == "claude")
+        );
         assert!(app.global_input.is_empty());
     }
 
