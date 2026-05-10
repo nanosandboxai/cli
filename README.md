@@ -59,6 +59,20 @@ nanosb --project /path/to/project
 
 # Override resources
 nanosb --cpus 4 --memory 8192 --timeout 1200
+
+# Provide runtime env pool for this TUI run
+nanosb --env OPENAI_API_KEY=... --env-file .env.local
+```
+
+Notes:
+- In TUI mode, startup env is runtime-only (not persisted to sessions).
+- `sandbox.yml` env values take precedence over startup env for matching keys.
+- Local `.env` is auto-loaded only when no `sandbox.yml` is active.
+- `/add` does not import startup env automatically; select keys explicitly with `--use-env`.
+
+```bash
+# Add panel and import selected startup env keys
+/add claude --use-env OPENAI_API_KEY --use-env GITHUB_TOKEN
 ```
 
 ### CLI Commands

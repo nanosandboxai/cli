@@ -206,6 +206,7 @@ pub async fn run_tui(
     project_path: Option<std::path::PathBuf>,
     sandbox_configs: Vec<(String, sandbox::AgentSandboxConfig)>,
     session_start: SessionStartMode,
+    runtime_env_pool: HashMap<String, String>,
 ) -> anyhow::Result<()> {
     // Check if we're running in a real terminal.
     if !io::stdout().is_terminal() {
@@ -358,6 +359,7 @@ pub async fn run_tui(
     // Create app state.
     let mut app = App::new();
     app.project_path = project_path;
+    app.runtime_env_pool = runtime_env_pool;
 
     // Create shared image manager so all sandboxes coordinate pulls
     // (prevents concurrent downloads of the same image layers).
@@ -1882,7 +1884,7 @@ async fn handle_command(
                 role: MessageRole::System,
                 content: concat!(
                     "Available commands:\n",
-                    "  /add <agent> [--image <img>] [--project <path>] [--branch <name>] [--name <name>]\n",
+                    "  /add <agent> [--image <img>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n",
                     "                                Add a new agent panel\n",
                     "  /sandboxes                    Toggle sandbox sidebar\n",
                     "  /focus <n>                    Focus panel n (0-indexed)\n",
@@ -2009,8 +2011,8 @@ async fn handle_command(
         Command::McpToggle => {
             app.show_mcp_sidebar = !app.show_mcp_sidebar;
         }
-        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model } => {
-            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), tx);
+        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model, use_env } => {
+            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), &use_env, tx);
         }
         Command::Env { assignment } => {
             handle_env(app, assignment);
@@ -3991,6 +3993,7 @@ fn add_agent(
     auto_mode: bool,
     prompt: Option<&str>,
     model: Option<&str>,
+    use_env_keys: &[String],
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
     // Build image reference. --tag overrides the default "latest" tag
@@ -4027,6 +4030,30 @@ fn add_agent(
             panel.env.insert("GOOSE_PROVIDER".to_string(), "anthropic".to_string());
         } else if panel.env.contains_key("OPENAI_API_KEY") {
             panel.env.insert("GOOSE_PROVIDER".to_string(), "openai".to_string());
+        }
+    }
+
+    // Selectively import startup runtime env keys into this panel.
+    if !use_env_keys.is_empty() {
+        let mut missing: Vec<String> = Vec::new();
+        for key in use_env_keys {
+            if let Some(value) = app.runtime_env_pool.get(key) {
+                panel.env.insert(key.clone(), value.clone());
+                panel.runtime_env_keys.insert(key.clone());
+            } else {
+                missing.push(key.clone());
+            }
+        }
+
+        if !missing.is_empty() {
+            app.set_system_message(ChatMessage {
+                role: MessageRole::System,
+                content: format!(
+                    "Cannot add panel: runtime env key(s) not found: {}",
+                    missing.join(", ")
+                ),
+            });
+            return;
         }
     }
 
@@ -4202,6 +4229,14 @@ fn add_agent_from_config(
         panel.env.insert(k.clone(), v.clone());
     }
 
+    // Import startup runtime env pool as fallback only (config keys win).
+    for (key, value) in &app.runtime_env_pool {
+        if !panel.env.contains_key(key) {
+            panel.env.insert(key.clone(), value.clone());
+            panel.runtime_env_keys.insert(key.clone());
+        }
+    }
+
     // Auto-detect API keys from host environment (if not already in config env).
     for (api_key, _) in &required_api_keys(&agent_type) {
         if !panel.env.contains_key(*api_key) {
@@ -4231,6 +4266,7 @@ fn add_agent_from_config(
 
     // Store the runtime config for session persistence.
     panel.original_config = Some(config.clone());
+    let panel_env: HashMap<String, String> = panel.env.clone();
 
     app.panels.push(panel);
     let panel_idx = app.panels.len() - 1;
@@ -4286,6 +4322,12 @@ fn add_agent_from_config(
                     Ok(()) => {
                         if let Some(resolved) = &resolved_agent {
                             let _ = sandbox.bootstrap_agent(resolved).await;
+                        }
+
+                        // Insert panel env vars (config env + runtime-selected/startup fallback)
+                        // into runtime config.env so they're delivered via gateway POST.
+                        for (key, val) in &panel_env {
+                            (**sandbox).config_mut().env.insert(key.clone(), val.clone());
                         }
 
                         // Merge agent-specific env vars (GOOSE_MODE, NANOSB_PROMPT, etc.)
@@ -4521,13 +4563,6 @@ fn resume_session(
         // Normalize the image in case the session was saved with a bare name.
         config.sandbox.image = sandbox::normalize_image(&config.sandbox.image);
 
-        // Re-populate env vars from host environment (secrets are not stored in session).
-        for key in &sp.env_keys {
-            if let Ok(val) = std::env::var(key) {
-                config.sandbox.env.insert(key.clone(), val);
-            }
-        }
-
         // Set up the agent panel.
         let agent_type = detect_agent_type_from_image(&config.sandbox.image)
             .unwrap_or_else(|| sp.agent_name.clone());
@@ -4548,6 +4583,17 @@ fn resume_session(
         // Copy env vars from config to panel.
         for (k, v) in &config.sandbox.env {
             panel.env.insert(k.clone(), v.clone());
+        }
+
+        // Re-populate saved env keys from host env first, then startup runtime pool.
+        // Values are runtime-only and are not copied back into persisted config.
+        for key in &sp.env_keys {
+            if let Ok(val) = std::env::var(key) {
+                panel.env.insert(key.clone(), val);
+            } else if let Some(val) = app.runtime_env_pool.get(key) {
+                panel.env.insert(key.clone(), val.clone());
+                panel.runtime_env_keys.insert(key.clone());
+            }
         }
 
         // Auto-detect API keys from host environment.
@@ -4619,6 +4665,8 @@ fn resume_session(
             panel.selected_agent_session_id.as_deref(),
         );
 
+        let panel_env: HashMap<String, String> = panel.env.clone();
+
         app.panels.push(panel);
         let panel_idx = app.panels.len() - 1;
         app.focused_panel = panel_idx;
@@ -4671,6 +4719,12 @@ fn resume_session(
                         Ok(()) => {
                             if let Some(resolved) = &resolved_agent {
                                 let _ = sandbox.bootstrap_agent(resolved).await;
+                            }
+
+                            // Insert panel env vars (config + resumed runtime values)
+                            // into runtime config.env so they're delivered via gateway POST.
+                            for (key, val) in &panel_env {
+                                (**sandbox).config_mut().env.insert(key.clone(), val.clone());
                             }
 
                             // Merge agent-specific env vars (GOOSE_MODE, NANOSB_PROMPT, etc.)
@@ -4772,6 +4826,7 @@ fn handle_env(app: &mut App, assignment: Option<(String, String)>) {
         }
         Some((key, value)) => {
             if let Some(panel) = app.focused_panel_mut() {
+                panel.runtime_env_keys.remove(&key);
                 panel.env.insert(key.clone(), value);
                 panel.chat_history.push(ChatMessage {
                     role: MessageRole::System,
@@ -5054,7 +5109,12 @@ fn build_session_from_app(
                 .map(|pm| pm.created_branches.clone())
                 .unwrap_or_default();
 
-            let env_keys: Vec<String> = panel.env.keys().cloned().collect();
+            let env_keys: Vec<String> = panel
+                .env
+                .keys()
+                .filter(|k| !panel.runtime_env_keys.contains(*k))
+                .cloned()
+                .collect();
 
             let selected_agent_session_id = panel
                 .selected_agent_session_id

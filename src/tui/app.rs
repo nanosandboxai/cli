@@ -285,6 +285,9 @@ pub struct AgentPanel {
     /// Per-panel environment variables (e.g., API keys).
     /// Merged with host env when sending messages (panel env takes priority).
     pub env: HashMap<String, String>,
+    /// Env keys that came from startup runtime env pool for this invocation.
+    /// These keys are runtime-only and must not be persisted into sessions.
+    pub runtime_env_keys: HashSet<String>,
     /// Current operating mode of the panel.
     pub mode: PanelMode,
     /// Last rendered input width (set by renderer, used by key handler for cursor movement).
@@ -363,6 +366,7 @@ impl AgentPanel {
             input: TextInput::new(),
             sandbox_id_short: String::new(),
             env: HashMap::new(),
+            runtime_env_keys: HashSet::new(),
             mode: PanelMode::Loading,
             last_input_width: 40,
             terminal: None,
@@ -468,6 +472,9 @@ pub struct App {
     /// Pending confirmation prompt: message + list of panel indices to reconnect on 'y'.
     /// Shown as a system popup; 'y' triggers reconnect, 'n'/Esc dismisses.
     pub pending_reconnect: Option<Vec<usize>>,
+    /// Startup runtime env pool (`--env`, `--env-file`, optional auto `.env` in no-config mode).
+    /// This is in-memory only for the current process.
+    pub runtime_env_pool: HashMap<String, String>,
 }
 
 impl Default for App {
@@ -515,6 +522,7 @@ impl App {
             destroy_on_quit: false,
             command_history: CommandHistory::new(),
             pending_reconnect: None,
+            runtime_env_pool: HashMap::new(),
         }
     }
 
