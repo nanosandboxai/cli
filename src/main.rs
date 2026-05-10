@@ -425,37 +425,26 @@ mod cli {
                         .map_err(|e| anyhow::anyhow!("{}", e))?
                 };
 
-                // Auto-load .env from project directory (lowest priority).
-                // Check --project flag first, then CWD if it's a git repo.
-                let auto_env_dir = cli
-                    .project
-                    .as_ref()
-                    .map(std::path::PathBuf::from)
-                    .or_else(|| std::env::current_dir().ok());
-                if let Some(ref dir) = auto_env_dir {
-                    let env_path = dir.join(".env");
-                    if env_path.exists() {
-                        let project_env =
-                            sandbox::config::file::load_env_file(&env_path.to_string_lossy(), dir)
-                                .map_err(|e| {
-                                    error!("Failed to load env file {:?}: {}", env_path, e);
-                                    anyhow::anyhow!("{}", e)
-                                })?;
-                        for (_, config) in sandbox_configs.iter_mut() {
-                            for (k, v) in &project_env {
-                                // Only set if not already defined by sandbox.yml
-                                config
-                                    .sandbox
-                                    .env
-                                    .entry(k.clone())
-                                    .or_insert_with(|| v.clone());
-                            }
+                // Build runtime-only env pool for this invocation.
+                // Source order: optional auto .env (no-config mode only), then --env-file, then --env.
+                let mut runtime_env: Vec<(String, String)> = Vec::new();
+
+                // Auto-load .env only when no sandbox config is active.
+                if sandbox_configs.is_empty() {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        let env_path = cwd.join(".env");
+                        if env_path.exists() {
+                            let auto_env_files = vec![env_path.to_string_lossy().to_string()];
+                            let auto_env = parse_env_vars(&[], &auto_env_files)?;
+                            runtime_env.extend(auto_env);
                         }
                     }
                 }
 
                 // Parse --env and --env-file into key-value pairs.
+                // These are runtime-only for TUI mode and never persisted.
                 let cli_env = parse_env_vars(&cli.env, &cli.env_file)?;
+                runtime_env.extend(cli_env.iter().cloned());
 
                 // Parse --permissions flag.
                 let cli_permissions = cli
@@ -475,8 +464,13 @@ mod cli {
                     cli.memory,
                     cli.timeout,
                     cli_permissions,
-                    &cli_env,
+                    &[],
                 );
+
+                let mut runtime_env_pool = std::collections::HashMap::new();
+                for (k, v) in runtime_env {
+                    runtime_env_pool.insert(k, v);
+                }
 
                 // Filter to a single sandbox if --sandbox is specified.
                 let sandbox_configs = if let Some(ref name) = cli.sandbox {
@@ -508,7 +502,13 @@ mod cli {
                     nanosb_cli::tui::run::SessionStartMode::Fresh
                 };
 
-                nanosb_cli::tui::run::run_tui(project_path, sandbox_configs, session_start).await
+                nanosb_cli::tui::run::run_tui(
+                    project_path,
+                    sandbox_configs,
+                    session_start,
+                    runtime_env_pool,
+                )
+                .await
             }
             Some(Commands::Pull { image }) => cmd_pull(&image, cli.format, cli.verbose).await,
             Some(Commands::Images) => cmd_images(cli.format).await,
