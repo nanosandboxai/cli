@@ -1884,7 +1884,7 @@ async fn handle_command(
                 role: MessageRole::System,
                 content: concat!(
                     "Available commands:\n",
-                    "  /add <agent> [--image <img>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n",
+                    "  /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--image <img>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n",
                     "                                Add a new agent panel\n",
                     "  /sandboxes                    Toggle sandbox sidebar\n",
                     "  /focus <n>                    Focus panel n (0-indexed)\n",
