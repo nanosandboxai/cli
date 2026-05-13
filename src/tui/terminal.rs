@@ -197,7 +197,45 @@ pub async fn connect_ssh(
     );
 
     // Connect
-    let config = russh::client::Config::default();
+    let mut config = russh::client::Config::default();
+
+    // Legacy Windows localhost SSH used an HvSocket-backed path that could
+    // stall. We still detect that case and use more conservative settings.
+    let is_localhost_ssh = ssh_host == "127.0.0.1" || ssh_host.eq_ignore_ascii_case("localhost");
+
+    let aggressive_stall_detection = cfg!(target_os = "windows") && is_localhost_ssh;
+    let read_timeout = if aggressive_stall_detection {
+        std::time::Duration::from_secs(30)
+    } else {
+        std::time::Duration::from_secs(3600)
+    };
+    tracing::info!(
+        panel_idx,
+        ssh_host = %ssh_host,
+        ssh_port,
+        is_localhost_ssh,
+        aggressive_stall_detection,
+        read_timeout_secs = read_timeout.as_secs(),
+        "SSH terminal transport profile"
+    );
+
+    // Windows: SSH keepalive to detect dead connections.
+    #[cfg(target_os = "windows")]
+    {
+        config.keepalive_interval = Some(std::time::Duration::from_secs(15));
+        config.keepalive_max = 3;
+    }
+
+    // Legacy localhost/HvSocket path: cap SSH window to avoid transport
+    // backpressure deadlocks. For TCP guest_ip path, keep default values.
+    #[cfg(target_os = "windows")]
+    {
+        if is_localhost_ssh {
+            config.window_size = 262144; // 256KB
+            config.maximum_packet_size = 32768;
+        }
+    }
+
     let config = std::sync::Arc::new(config);
     let sh = SshHandler;
     let mut session =
@@ -327,42 +365,82 @@ pub async fn connect_ssh(
         });
     }
 
-    // Spawn read loop: forwards SSH channel data to TUI events
+    // Spawn read loop: forwards SSH channel data to TUI events.
     let tx_read = tx;
     tokio::spawn(async move {
         use russh::ChannelMsg;
-        while let Some(msg) = read_half.wait().await {
+
+        let mut consecutive_timeouts: u32 = 0;
+
+        loop {
+            let msg = tokio::time::timeout(read_timeout, read_half.wait()).await;
             match msg {
-                ChannelMsg::Data { data } => {
-                    let _ = tx_read.send(AppEvent::TerminalData {
-                        panel_idx,
-                        data: data.to_vec(),
-                    });
+                Ok(Some(msg)) => {
+                    consecutive_timeouts = 0;
+                    match msg {
+                        ChannelMsg::Data { data } => {
+                            let _ = tx_read.send(AppEvent::TerminalData {
+                                panel_idx,
+                                data: data.to_vec(),
+                            });
+                        }
+                        ChannelMsg::ExtendedData { data, .. } => {
+                            let _ = tx_read.send(AppEvent::TerminalData {
+                                panel_idx,
+                                data: data.to_vec(),
+                            });
+                        }
+                        ChannelMsg::Eof | ChannelMsg::Close => {
+                            let _ = tx_read.send(AppEvent::SshDisconnected {
+                                panel_idx,
+                                error: None,
+                            });
+                            break;
+                        }
+                        ChannelMsg::ExitStatus { exit_status } => {
+                            let _ = tx_read.send(AppEvent::SshDisconnected {
+                                panel_idx,
+                                error: if exit_status != 0 {
+                                    Some(format!("Remote process exited with status {}", exit_status))
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+                        _ => {}
+                    }
                 }
-                ChannelMsg::ExtendedData { data, .. } => {
-                    let _ = tx_read.send(AppEvent::TerminalData {
-                        panel_idx,
-                        data: data.to_vec(),
-                    });
-                }
-                ChannelMsg::Eof | ChannelMsg::Close => {
+                Ok(None) => {
+                    // Channel dropped / connection lost.
+                    tracing::warn!(panel_idx, "SSH channel read returned None (connection lost)");
                     let _ = tx_read.send(AppEvent::SshDisconnected {
                         panel_idx,
-                        error: None,
+                        error: Some("SSH connection lost".to_string()),
                     });
                     break;
                 }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    let _ = tx_read.send(AppEvent::SshDisconnected {
+                Err(_elapsed) => {
+                    consecutive_timeouts += 1;
+                    tracing::warn!(
                         panel_idx,
-                        error: if exit_status != 0 {
-                            Some(format!("Remote process exited with status {}", exit_status))
+                        consecutive_timeouts,
+                        timeout_secs = read_timeout.as_secs(),
+                        "SSH channel read timed out"
+                    );
+                    let max_timeouts: u32 = if aggressive_stall_detection { 1 } else { 3 };
+                    if consecutive_timeouts >= max_timeouts {
+                        let msg = if aggressive_stall_detection {
+                            "SSH connection stalled (no data received). Use /reconnect to retry.".to_string()
                         } else {
-                            None
-                        },
-                    });
+                            "SSH channel timed out waiting for data.".to_string()
+                        };
+                        let _ = tx_read.send(AppEvent::SshDisconnected {
+                            panel_idx,
+                            error: Some(msg),
+                        });
+                        break;
+                    }
                 }
-                _ => {}
             }
         }
     });
@@ -840,7 +918,11 @@ pub fn extract_urls_from_screen(screen: &vt100::Screen) -> Vec<String> {
 /// This prevents random URLs printed by agents from spawning browser tabs.
 const AUTH_DOMAINS: &[&str] = &[
     // Claude Code
+    "claude.com",               // Claude Code OAuth authorize (new host)
+    "www.claude.com",           // Claude web redirect/auth host (new host)
     "claude.ai",                // Claude Code CLI (OAuth authorize)
+    "www.claude.ai",            // Claude web redirect/auth host
+    "platform.claude.com",      // Claude OAuth callback/redirect host
     "auth.anthropic.com",       // Claude Code (token refresh)
     "console.anthropic.com",    // Claude Code (console auth)
     // OpenAI Codex CLI
@@ -993,12 +1075,16 @@ pub fn url_dedup_key(url: &str) -> String {
 pub fn open_url_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
+        match std::process::Command::new("open")
             .arg(url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            Ok(_) => tracing::debug!(url = %url, "Spawned browser open command"),
+            Err(e) => tracing::warn!(url = %url, error = %e, "Failed to spawn browser open command"),
+        }
     }
     #[cfg(target_os = "windows")]
     {
@@ -1006,21 +1092,29 @@ pub fn open_url_in_browser(url: &str) {
         // breaks OAuth URLs containing '&' (command separator) and '%' (env var
         // expansion).  The URL is passed as a single process argument, so all
         // special characters are preserved.
-        let _ = std::process::Command::new("rundll32")
+        match std::process::Command::new("rundll32")
             .args(["url.dll,FileProtocolHandler", url])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            Ok(_) => tracing::debug!(url = %url, "Spawned browser open command"),
+            Err(e) => tracing::warn!(url = %url, error = %e, "Failed to spawn browser open command"),
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = std::process::Command::new("xdg-open")
+        match std::process::Command::new("xdg-open")
             .arg(url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            Ok(_) => tracing::debug!(url = %url, "Spawned browser open command"),
+            Err(e) => tracing::warn!(url = %url, error = %e, "Failed to spawn browser open command"),
+        }
     }
 }
 
