@@ -1138,6 +1138,40 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
     }
 
     if should_suspend {
+        // Best-effort flush: ask each guest to sync filesystem buffers before
+        // host-side suspend/auto-commit reads the clone directories.
+        eprintln!("Syncing guest filesystems...");
+        for (panel_idx, panel) in app.panels.iter().enumerate() {
+            let Some(sb_arc) = panel.sandbox.as_ref() else {
+                continue;
+            };
+
+            let sync_result = {
+                let sb = sb_arc.lock().await;
+                match (**sb).gateway() {
+                    Ok(gw) => tokio::time::timeout(Duration::from_secs(4), gw.exec("sync", &[])).await,
+                    Err(_) => continue,
+                }
+            };
+
+            match sync_result {
+                Ok(Ok(result)) if result.exit_code == 0 => {}
+                Ok(Ok(result)) => {
+                    eprintln!(
+                        "Warning: panel {} sync exited with code {}",
+                        panel_idx + 1,
+                        result.exit_code
+                    );
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Warning: panel {} sync failed: {}", panel_idx + 1, e);
+                }
+                Err(_) => {
+                    eprintln!("Warning: panel {} sync timed out", panel_idx + 1);
+                }
+            }
+        }
+
         // Suspend session: auto-commit + sync but keep clones alive.
         eprintln!("Suspending session...");
         for panel in &mut app.panels {
