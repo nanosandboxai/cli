@@ -15,7 +15,7 @@ mod cli {
     use std::time::Duration;
     use tabled::{Table, Tabled};
     use tokio::sync::Mutex;
-    use tracing::{error, info, warn};
+    use tracing::{error, warn};
 
     /// Output format for commands
     #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -352,10 +352,10 @@ mod cli {
                     .ok()
                     .filter(|v| !v.is_empty())
                     .unwrap_or_else(|| default_level.to_string());
-                let file_filter = format!(
-                    "runtime={lvl},nanosb_cli={lvl},nanosb={lvl},sandbox={lvl}",
-                    lvl = file_level
-                );
+                // Use a global default level so that ALL crates (including
+                // nanosb_cli) are captured.  Previous per-crate filters
+                // silently missed the TUI module on Windows.
+                let file_filter = file_level.clone();
                 let file_layer = fmt::layer()
                     .with_writer(file_writer)
                     .with_ansi(false)
