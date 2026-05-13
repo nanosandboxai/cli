@@ -32,6 +32,11 @@ use super::commands::{self, Command};
 use super::event::{spawn_terminal_event_reader, AppEvent};
 use super::renderer;
 
+#[cfg(target_os = "windows")]
+const WINDOWS_PASTE_SUPPRESS_INITIAL_MS: u64 = 450;
+#[cfg(target_os = "windows")]
+const WINDOWS_PASTE_SUPPRESS_SILENCE_MS: u64 = 120;
+
 /// Cross-platform stderr redirection helpers.
 ///
 /// On Unix, native C libraries (libkrun, gvproxy) write to stderr via fprintf()
@@ -436,11 +441,41 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
     terminal.draw(|frame| renderer::render(frame, &mut app))?;
 
     // Main event loop.
+    //
+    // Windows-only: the SSH data reader can flood the channel with
+    // TerminalData events during heavy agent output.  We limit how many
+    // we handle per iteration and yield so keyboard events get through.
+    #[cfg(target_os = "windows")]
+    let mut terminal_data_budget: u32 = 64;
     while let Some(event) = rx.recv().await {
+        #[cfg(target_os = "windows")]
+        if !matches!(&event, AppEvent::TerminalData { .. }) {
+            terminal_data_budget = 64;
+        }
         match event {
             AppEvent::Terminal(crossterm_event) => {
                 match crossterm_event {
                     CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let now = std::time::Instant::now();
+                            if let Some(until) = app.paste_suppress_until {
+                                if now < until {
+                                    app.paste_suppress_until = Some(
+                                        now + Duration::from_millis(WINDOWS_PASTE_SUPPRESS_SILENCE_MS),
+                                    );
+                                    tracing::debug!(
+                                        key_code = ?key.code,
+                                        modifiers = ?key.modifiers,
+                                        suppress_silence_ms = WINDOWS_PASTE_SUPPRESS_SILENCE_MS,
+                                        "Suppressed key event during adaptive Ctrl+V window"
+                                    );
+                                    continue;
+                                }
+                                app.paste_suppress_until = None;
+                            }
+                        }
+
                         // Only handle Press events — on Windows, crossterm fires
                         // both Press and Release for each keystroke.
 
@@ -481,6 +516,31 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         handle_mouse_event(&mut app, mouse);
                     }
                     CrosstermEvent::Paste(text) => {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let now = std::time::Instant::now();
+                            if let Some(until) = app.paste_suppress_until {
+                                if now < until {
+                                    app.paste_suppress_until = Some(
+                                        now + Duration::from_millis(WINDOWS_PASTE_SUPPRESS_SILENCE_MS),
+                                    );
+                                    tracing::debug!(
+                                        text_len = text.len(),
+                                        focused_panel = app.focused_panel,
+                                        suppress_silence_ms = WINDOWS_PASTE_SUPPRESS_SILENCE_MS,
+                                        "Suppressed duplicate Paste event during adaptive Ctrl+V window"
+                                    );
+                                    continue;
+                                }
+                                app.paste_suppress_until = None;
+                            }
+                        }
+
+                        tracing::info!(
+                            text_len = text.len(),
+                            focused_panel = app.focused_panel,
+                            "Received terminal paste event"
+                        );
                         handle_paste_event(&mut app, text, &tx);
                     }
                     CrosstermEvent::Resize(_cols, _rows) => {
@@ -505,9 +565,9 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
             }
             AppEvent::SandboxReady { panel_idx, sandbox, short_id, project_mount } => {
                 // Get SSH info before storing sandbox
-                let ssh_info = {
+                let (ssh_info, ssh_host_override) = {
                     let sb = sandbox.lock().await;
-                    sb.ssh_port().zip(sb.ssh_key_path())
+                    (sb.ssh_port().zip(sb.ssh_key_path()), sb.ssh_host())
                 };
 
                 if let Some(panel) = app.panels.get_mut(panel_idx) {
@@ -522,6 +582,9 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                     // Store SSH info for later port forwarding (ssh -L).
                     if let Some((port, ref key)) = ssh_info {
                         panel.ssh_host_port = Some(port);
+                        panel.ssh_host = Some(
+                            ssh_host_override.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
+                        );
                         panel.ssh_key_path = Some(key.clone());
                     }
                 }
@@ -532,7 +595,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
 
                 if is_auto_mode {
                     // Auto-mode: use gateway exec (same as `nanosb exec`).
-                    // No SSH needed — runs command via HvSocket/HTTP gateway.
+                    // No SSH needed — runs command via the gateway transport.
                     if let Some(panel) = app.panels.get(panel_idx) {
                         let agent_name = panel.agent_name.clone();
                         // Gateway merges secrets automatically — just pass panel env.
@@ -577,11 +640,11 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         let is_resumed = panel.is_resumed;
                         let selected_agent_session_id = panel.selected_agent_session_id.clone();
                         let model = panel.model.clone();
-                        let ssh_host = "127.0.0.1".to_string();
+                        let ssh_host = ssh_host_override.clone().unwrap_or_else(|| "127.0.0.1".to_string());
                         let tx = tx.clone();
                         tokio::spawn(async move {
-                            // Retry SSH connection — on Windows the HvSocket SSH
-                            // proxy chain takes time to be ready after VM boot.
+                            // Retry SSH connection — on Windows the network path can
+                            // take time to be ready after VM boot.
                             let max_attempts = 10;
                             let mut last_err = String::new();
                             for attempt in 1..=max_attempts {
@@ -624,9 +687,18 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
             }
             AppEvent::SshConnected { panel_idx, handle } => {
                 if let Some(panel) = app.panels.get_mut(panel_idx) {
-                    let (cols, rows) = panel.last_terminal_size;
-                    panel.terminal = Some(super::terminal::SshTerminal::new(cols, rows));
-                    panel.terminal_handle = Some(handle);
+                    let was_reconnecting = panel.reconnecting;
+                    if was_reconnecting && panel.terminal.is_some() {
+                        // Reconnect: keep the existing terminal screen intact
+                        // so the user doesn't see any flicker. Only attach
+                        // the new SSH handle.
+                        panel.terminal_handle = Some(handle);
+                    } else {
+                        // Fresh connection: create new terminal.
+                        let (cols, rows) = panel.last_terminal_size;
+                        panel.terminal = Some(super::terminal::SshTerminal::new(cols, rows));
+                        panel.terminal_handle = Some(handle);
+                    }
                     panel.mode = if panel.auto_mode {
                         PanelMode::Headless
                     } else {
@@ -652,6 +724,31 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         // Still feed vt100 for /terminal fallback + URL extraction.
                         if let Some(ref mut term) = panel.terminal {
                             term.process_bytes(&data);
+
+                            let urls =
+                                super::terminal::extract_urls_from_screen(term.screen());
+                            let now = std::time::Instant::now();
+                            for url in urls {
+                                if !super::terminal::is_auth_url(&url) {
+                                    continue;
+                                }
+                                if !url.contains('?') && !super::terminal::is_device_code_url(&url) {
+                                    continue;
+                                }
+                                let key = super::terminal::url_dedup_key(&url);
+                                if panel.opened_urls.contains(&key) {
+                                    continue;
+                                }
+                                panel.pending_urls
+                                    .entry(key)
+                                    .and_modify(|(existing_url, ts)| {
+                                        if url.len() > existing_url.len() {
+                                            *existing_url = url.clone();
+                                            *ts = now;
+                                        }
+                                    })
+                                    .or_insert((url, now));
+                            }
                         }
                     } else if let Some(ref mut term) = panel.terminal {
                         term.process_bytes(&data);
@@ -695,6 +792,22 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                 .or_insert((url, now));
                         }
                     }
+                }
+
+                // Windows-only: prevent SSH data flood from starving
+                // keyboard/tick events during heavy agent output.
+                #[cfg(target_os = "windows")]
+                {
+                    terminal_data_budget = terminal_data_budget.saturating_sub(1);
+                    if terminal_data_budget == 0 {
+                        terminal_data_budget = 64;
+                        // Render so user sees progress during heavy output.
+                        terminal.draw(|frame| renderer::render(frame, &mut app))?;
+                        // Yield to let keyboard events be processed.
+                        tokio::task::yield_now().await;
+                    }
+                    // Skip the per-event render — we batch renders above.
+                    continue;
                 }
             }
             AppEvent::SshDisconnected { panel_idx, error } => {
@@ -785,6 +898,14 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         .collect();
                     for key in ready {
                         if let Some((url, _)) = panel.pending_urls.remove(&key) {
+                            tracing::debug!(
+                                panel = %panel.agent_name,
+                                dedup_key = %key,
+                                url = %url,
+                                ssh_host = ?panel.ssh_host,
+                                ssh_port = ?panel.ssh_host_port,
+                                "Auth URL debounce elapsed; preparing open/forward"
+                            );
                             // Forward OAuth callback port via SSH local-port-forward.
                             // The agent's callback server listens on 127.0.0.1 inside
                             // the VM. gvproxy expose_port sends traffic to the VM's
@@ -801,32 +922,94 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                             "{}:127.0.0.1:{}",
                                             port, port
                                         );
-                                        let ssh_dest = "root@127.0.0.1".to_string();
-                                        if let Ok(child) =
-                                            std::process::Command::new("ssh")
-                                                .args([
-                                                    "-L", &fwd,
-                                                    "-p", &ssh_port.to_string(),
-                                                    "-i",
-                                                    &key_path.to_string_lossy().as_ref(),
-                                                    "-o", "StrictHostKeyChecking=no",
-                                                    "-o", if cfg!(unix) { "UserKnownHostsFile=/dev/null" } else { "UserKnownHostsFile=NUL" },
-                                                    "-o", "LogLevel=ERROR",
-                                                    "-N",
-                                                    &ssh_dest,
-                                                ])
-                                                .stdin(std::process::Stdio::null())
-                                                .stdout(std::process::Stdio::null())
-                                                .stderr(std::process::Stdio::null())
-                                                .spawn()
+                                        let ssh_host = panel
+                                            .ssh_host
+                                            .as_deref()
+                                            .unwrap_or("127.0.0.1");
+                                        let ssh_dest = format!("root@{}", ssh_host);
+                                        match std::process::Command::new("ssh")
+                                            .args([
+                                                "-L", &fwd,
+                                                "-p", &ssh_port.to_string(),
+                                                "-i",
+                                                &key_path.to_string_lossy().as_ref(),
+                                                "-o", "BatchMode=yes",
+                                                "-o", "ExitOnForwardFailure=yes",
+                                                "-o", "StrictHostKeyChecking=no",
+                                                "-o", if cfg!(unix) { "UserKnownHostsFile=/dev/null" } else { "UserKnownHostsFile=NUL" },
+                                                "-o", "LogLevel=ERROR",
+                                                "-N",
+                                                &ssh_dest,
+                                            ])
+                                            .stdin(std::process::Stdio::null())
+                                            .stdout(std::process::Stdio::null())
+                                            .stderr(std::process::Stdio::piped())
+                                            .spawn()
                                         {
-                                            panel.forwarded_ports.insert(port);
-                                            panel.port_forward_children.push(child);
+                                            Ok(mut child) => {
+                                                if let Some(stderr) = child.stderr.take() {
+                                                    let panel_name = panel.agent_name.clone();
+                                                    std::thread::spawn(move || {
+                                                        use std::io::BufRead;
+                                                        let reader = std::io::BufReader::new(stderr);
+                                                        for line in reader.lines() {
+                                                            match line {
+                                                                Ok(line) => tracing::debug!(
+                                                                    panel = %panel_name,
+                                                                    callback_port = port,
+                                                                    line = %line,
+                                                                    "OAuth callback SSH forward stderr"
+                                                                ),
+                                                                Err(e) => {
+                                                                    tracing::debug!(
+                                                                        panel = %panel_name,
+                                                                        callback_port = port,
+                                                                        error = %e,
+                                                                        "OAuth callback SSH forward stderr reader ended"
+                                                                    );
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                }
+
+                                                tracing::debug!(
+                                                    panel = %panel.agent_name,
+                                                    callback_port = port,
+                                                    ssh_dest = %ssh_dest,
+                                                    ssh_port,
+                                                    "Started OAuth callback SSH port-forward"
+                                                );
+                                                panel.forwarded_ports.insert(port);
+                                                panel.port_forward_children.push(child);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    panel = %panel.agent_name,
+                                                    callback_port = port,
+                                                    ssh_dest = %ssh_dest,
+                                                    ssh_port,
+                                                    error = %e,
+                                                    "Failed to start OAuth callback SSH port-forward"
+                                                );
+                                            }
                                         }
                                     }
                                 }
+                            } else {
+                                tracing::debug!(
+                                    panel = %panel.agent_name,
+                                    url = %url,
+                                    "Auth URL does not contain localhost redirect port; skipping callback forward"
+                                );
                             }
                             panel.opened_urls.insert(key);
+                            tracing::debug!(
+                                panel = %panel.agent_name,
+                                url = %url,
+                                "Opening auth URL in host browser"
+                            );
                             super::terminal::open_url_in_browser(&url);
                         }
                     }
@@ -1511,55 +1694,114 @@ async fn handle_key_event(
                     // If no image, forward the keystroke to the terminal.
                     // Note: Cmd+V on macOS is handled by the terminal emulator
                     // and arrives as CrosstermEvent::Paste, handled separately.
-                    KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL)
-                        || key.modifiers.contains(KeyModifiers::SUPER) => {
-                        if let Some((panel_idx, ssh_host, ssh_port, key_path)) = panel_ssh_info(app) {
-                            // Clone the write channel so the async task can forward
-                            // Ctrl+V to the terminal if no clipboard image is found.
-                            let write_tx = app.panels.get(app.focused_panel)
-                                .and_then(|p| p.terminal_handle.as_ref())
-                                .map(|h| h.write_tx.clone());
-                            let tx = tx.clone();
-                            tokio::spawn(async move {
-                                let result = tokio::task::spawn_blocking(
+                    KeyCode::Char(ch)
+                        if ((ch == 'v' || ch == 'V')
+                            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER)))
+                            // Some Windows terminals emit Ctrl+V as SYN (0x16)
+                            // without reporting CONTROL in modifiers.
+                            || (cfg!(target_os = "windows") && ch == '\u{16}') => {
+                        #[cfg(target_os = "windows")]
+                        {
+                            // Windows terminal emulators can inject the clipboard
+                            // payload as raw key events after Ctrl+V. Ignore those
+                            // for a short window to prevent duplicate/interrupted paste.
+                            // While suppressed events keep arriving, we keep extending
+                            // the window until input goes quiet.
+                            app.paste_suppress_until = Some(
+                                std::time::Instant::now()
+                                    + Duration::from_millis(WINDOWS_PASTE_SUPPRESS_INITIAL_MS),
+                            );
+                        }
+
+                        let focused_panel = app.focused_panel;
+                        let panel_mode = app
+                            .panels
+                            .get(focused_panel)
+                            .map(|p| p.mode)
+                            .unwrap_or(PanelMode::Loading);
+                        tracing::info!(
+                            panel_idx = focused_panel,
+                            mode = ?panel_mode,
+                            key_char = ?ch,
+                            modifiers = ?key.modifiers,
+                            "Paste key detected (Ctrl/Cmd+V)"
+                        );
+
+                        // Clone the write channel so the async task can still
+                        // paste text even if SSH metadata is not ready yet.
+                        let write_tx = app.panels.get(app.focused_panel)
+                            .and_then(|p| p.terminal_handle.as_ref())
+                            .map(|h| h.write_tx.clone());
+                        let upload_info = panel_ssh_info(app);
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            tracing::debug!(
+                                has_upload_info = upload_info.is_some(),
+                                has_write_tx = write_tx.is_some(),
+                                "Handling Ctrl/Cmd+V paste"
+                            );
+
+                            // Fast path for Windows: paste text immediately.
+                            // Checking for clipboard image first can add noticeable
+                            // latency before any text appears in the terminal.
+                            let text_result = tokio::task::spawn_blocking(
+                                super::upload::read_clipboard_text,
+                            )
+                            .await;
+
+                            let text = match text_result {
+                                Ok(Ok(text)) => text,
+                                Ok(Err(e)) => {
+                                    tracing::debug!(error = %e, "Clipboard text read failed");
+                                    String::new()
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Clipboard text task failed");
+                                    String::new()
+                                }
+                            };
+
+                            if !text.is_empty() {
+                                if let Some(ref wtx) = write_tx {
+                                    let sent = send_bracketed_paste(wtx, &text);
+                                    tracing::debug!(
+                                        text_len = text.len(),
+                                        sent,
+                                        "Forwarded clipboard text as bracketed paste"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        text_len = text.len(),
+                                        "Clipboard text available but terminal write channel missing"
+                                    );
+                                }
+                                return;
+                            }
+
+                            // Try clipboard image upload first when we have SSH
+                            // metadata for out-of-band upload.
+                            if let Some((panel_idx, ssh_host, ssh_port, key_path)) = upload_info {
+                                let image = tokio::task::spawn_blocking(
                                     super::upload::read_clipboard_image,
                                 )
                                 .await;
-                                match result {
-                                    Ok(Ok((png_bytes, filename))) => {
-                                        super::upload::spawn_bytes_upload(
-                                            ssh_host, ssh_port, key_path, png_bytes, filename,
-                                            panel_idx, tx,
-                                        );
-                                    }
-                                    Ok(Err(_)) | Err(_) => {
-                                        // No image in clipboard — try reading text
-                                        // from clipboard and pasting it (bracketed).
-                                        // On macOS Cmd+V arrives as CrosstermEvent::Paste
-                                        // with the text; on Windows Ctrl+V arrives as a
-                                        // key event so we read the clipboard ourselves.
-                                        let pasted = tokio::task::spawn_blocking(|| {
-                                            arboard::Clipboard::new()
-                                                .and_then(|mut cb| cb.get_text())
-                                                .ok()
-                                        }).await.ok().flatten();
-                                        if let Some(Some(text)) = Some(pasted) {
-                                            if let Some(ref wtx) = write_tx {
-                                                if !text.is_empty() {
-                                                    let mut buf = Vec::with_capacity(text.len() + 12);
-                                                    buf.extend_from_slice(b"\x1b[200~");
-                                                    buf.extend_from_slice(text.as_bytes());
-                                                    buf.extend_from_slice(b"\x1b[201~");
-                                                    let _ = wtx.send(buf);
-                                                }
-                                            }
-                                        } else if let Some(wtx) = write_tx {
-                                            let _ = wtx.send(vec![0x16]); // fallback: Ctrl+V
-                                        }
-                                    }
+                                if let Ok(Ok((png_bytes, filename))) = image {
+                                    tracing::debug!(
+                                        panel_idx,
+                                        filename = %filename,
+                                        bytes = png_bytes.len(),
+                                        "Clipboard image detected; starting upload"
+                                    );
+                                    super::upload::spawn_bytes_upload(
+                                        ssh_host, ssh_port, key_path, png_bytes, filename,
+                                        panel_idx, tx,
+                                    );
+                                    return;
                                 }
-                            });
-                        }
+                            }
+                            tracing::debug!("Clipboard paste produced empty text and no image");
+                        });
                         return;
                     }
                     // Scrollback: Shift+PageUp/PageDown to scroll terminal history.
@@ -2073,9 +2315,10 @@ async fn handle_command(
                     let is_resumed = panel.is_resumed;
                     let selected_agent_session_id = panel.selected_agent_session_id.clone();
                     let model = panel.model.clone();
-                    // Use 127.0.0.1 on all platforms — on Windows, portproxy
-                    // rules route localhost to the guest IP via HCN NAT.
-                    let ssh_host = "127.0.0.1".to_string();
+                    let ssh_host = panel
+                        .ssh_host
+                        .clone()
+                        .unwrap_or_else(|| "127.0.0.1".to_string());
                     let tx = tx.clone();
                     tokio::spawn(async move {
                         match super::terminal::connect_ssh(
@@ -2729,7 +2972,10 @@ fn panel_ssh_info(app: &App) -> Option<(usize, String, u16, std::path::PathBuf)>
     let panel = app.panels.get(idx)?;
     let port = panel.ssh_host_port?;
     let key = panel.ssh_key_path.clone()?;
-    let host = "127.0.0.1".to_string();
+    let host = panel
+        .ssh_host
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     Some((idx, host, port, key))
 }
 
@@ -2851,9 +3097,17 @@ fn handle_paste_event(
     text: String,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
+    tracing::info!(
+        text_len = text.len(),
+        focused_panel = app.focused_panel,
+        input_focus = ?app.input_focus,
+        "Processing paste event"
+    );
+
     // If focus is on the global input bar, insert the text there.
     if app.input_focus == InputFocus::Global {
         app.global_input.insert_str(&text);
+        tracing::debug!(text_len = text.len(), "Inserted paste into global input");
         return;
     }
 
@@ -2863,24 +3117,33 @@ fn handle_paste_event(
         if let Some((panel_idx, ssh_host, ssh_port, key_path)) = panel_ssh_info(app) {
             let tx = tx.clone();
             tokio::spawn(async move {
+                tracing::debug!(panel_idx, "Empty paste; checking clipboard image");
                 let result = tokio::task::spawn_blocking(
                     super::upload::read_clipboard_image,
                 )
                 .await;
                 match result {
                     Ok(Ok((png_bytes, filename))) => {
+                        tracing::debug!(
+                            panel_idx,
+                            filename = %filename,
+                            bytes = png_bytes.len(),
+                            "Empty paste resolved to clipboard image upload"
+                        );
                         super::upload::spawn_bytes_upload(
                             ssh_host, ssh_port, key_path, png_bytes, filename,
                             panel_idx, tx,
                         );
                     }
                     Ok(Err(e)) => {
+                        tracing::debug!(panel_idx, error = %e, "No clipboard image for empty paste");
                         let _ = tx.send(AppEvent::UploadFailed {
                             panel_idx,
                             error: e,
                         });
                     }
                     Err(e) => {
+                        tracing::warn!(panel_idx, error = %e, "Clipboard image task failed for empty paste");
                         let _ = tx.send(AppEvent::UploadFailed {
                             panel_idx,
                             error: format!("Clipboard task panicked: {}", e),
@@ -2888,6 +3151,8 @@ fn handle_paste_event(
                     }
                 }
             });
+        } else {
+            tracing::debug!("Empty paste ignored: no SSH panel info available");
         }
         return;
     }
@@ -2900,14 +3165,24 @@ fn handle_paste_event(
     if let Some(panel) = app.panels.get(app.focused_panel) {
         if panel.mode == PanelMode::Terminal {
             if let Some(ref handle) = panel.terminal_handle {
-                let mut buf = Vec::with_capacity(text.len() + 12);
-                buf.extend_from_slice(b"\x1b[200~");
-                buf.extend_from_slice(text.as_bytes());
-                buf.extend_from_slice(b"\x1b[201~");
-                let _ = handle.write_tx.send(buf);
+                let sent = send_bracketed_paste(&handle.write_tx, &text);
+                tracing::debug!(
+                    panel_idx = app.focused_panel,
+                    text_len = text.len(),
+                    sent,
+                    "Forwarded Crossterm paste to terminal"
+                );
             }
         }
     }
+}
+
+fn send_bracketed_paste(write_tx: &mpsc::UnboundedSender<Vec<u8>>, text: &str) -> bool {
+    let mut buf = Vec::with_capacity(text.len() + 12);
+    buf.extend_from_slice(b"\x1b[200~");
+    buf.extend_from_slice(text.as_bytes());
+    buf.extend_from_slice(b"\x1b[201~");
+    write_tx.send(buf).is_ok()
 }
 
 /// Handle a mouse event for panel-scoped text selection.
