@@ -15,7 +15,7 @@ mod cli {
     use std::time::Duration;
     use tabled::{Table, Tabled};
     use tokio::sync::Mutex;
-    use tracing::{error, info, warn};
+    use tracing::{error, warn};
 
     /// Output format for commands
     #[derive(Debug, Clone, Copy, ValueEnum, Default)]
