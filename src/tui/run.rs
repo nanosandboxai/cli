@@ -4371,19 +4371,26 @@ fn add_agent(
     panel.model = model.map(String::from);
 
     // Build sandbox config.
-    // Agent VMs need enough memory for the agent CLI + runtime overhead.
-    // Claude/Codex (Node.js) working set is ~1.5-2GB; 1024 OOM-killed it.
+    // Compute defaults are loaded from built-in agent profiles (and optional
+    // user overrides in ~/.nanosandbox/agent_defaults.yaml).
     let project_path = project
         .map(std::path::PathBuf::from)
         .or_else(|| app.project_path.clone());
 
+    // Resolve agent-type-aware compute defaults for cpus and memory.
+    let parsed_agent_type = agent.parse::<sandbox::AgentType>().ok();
+    let compute = parsed_agent_type
+        .map(sandbox::agent_compute_for)
+        .unwrap_or(sandbox::AgentComputeDefaults { cpus: 2, memory_mb: 2048 });
+
     let mut builder = SandboxConfig::builder()
         .image(&image_name)
-        .memory_mb(2048)
+        .cpus(compute.cpus)
+        .memory_mb(compute.memory_mb)
         .run_as_root(run_as_root);
 
     // Set agent type on panel (not on SandboxConfig builder).
-    if let Ok(agent_type) = agent.parse::<sandbox::AgentType>() {
+    if let Some(agent_type) = parsed_agent_type {
         panel.agent_type = Some(agent_type);
     }
 
