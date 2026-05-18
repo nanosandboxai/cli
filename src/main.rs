@@ -1272,6 +1272,11 @@ mod cli {
                     ok_message: "running (vmcompute)",
                 },
                 PlatformCheck {
+                    name: "Hyper-V Access",
+                    keyword: "Hyper-V Administrators",
+                    ok_message: "user has Hyper-V access (admin or Hyper-V Administrators)",
+                },
+                PlatformCheck {
                     name: "WSL Kernel",
                     keyword: "WSL kernel",
                     ok_message: "found",

@@ -73,6 +73,57 @@ function Install-NanosandboxCLI {
     # VC++ Redistributable is installed inline (no reboot needed).
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    # Check if the user is in the Hyper-V Administrators group (well-known SID
+    # S-1-5-32-578). HCS APIs require either Admin or Hyper-V Administrators
+    # membership to boot sandboxes.
+    $isHyperVAdmin = $false
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent())
+        $hypervSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-578')
+        $isHyperVAdmin = $principal.IsInRole($hypervSid)
+    } catch {
+        $isHyperVAdmin = $false
+    }
+
+    # Upfront guidance if neither elevated nor a Hyper-V Administrator.
+    # This is the most common cause of confusing "access denied" errors at
+    # sandbox-creation time (runtime issue #133).
+    if (-not $isAdmin -and -not $isHyperVAdmin) {
+        Write-Host ""
+        Write-Warn "You are not running this installer as Administrator."
+        Write-Warn "You are also not a member of the 'Hyper-V Administrators' group."
+        Write-Host ""
+        Write-Warn "Why this matters:"
+        Write-Warn "  - Windows features (Hyper-V, WHPX, WSL, VirtualMachinePlatform)"
+        Write-Warn "    cannot be enabled automatically."
+        Write-Warn "  - Windows Defender exclusions for nanosb.exe cannot be added."
+        Write-Warn "  - Sandbox creation will fail with access-denied errors from the"
+        Write-Warn "    Host Compute Service (vmcompute) even after install completes."
+        Write-Host ""
+        Write-Warn "Recommended:"
+        Write-Warn "  1) Close this window."
+        Write-Warn "  2) Right-click PowerShell and choose 'Run as administrator'."
+        Write-Warn "  3) Re-run the installer command."
+        Write-Host ""
+        Write-Warn "If you cannot run as Administrator, ask an admin to add you to the"
+        Write-Warn "'Hyper-V Administrators' group:"
+        Write-Warn "  Add-LocalGroupMember -Group 'Hyper-V Administrators' -Member <your-user>"
+        Write-Warn "Then log out and back in for the group to take effect."
+        Write-Host ""
+        $answer = Read-Host "  Continue without elevation (the installer will skip feature setup)? [y/N]"
+        if ($answer -notmatch '^[Yy]') {
+            Write-Info "Aborted. Re-run the installer from an elevated terminal."
+            return
+        }
+        Write-Host ""
+    } elseif (-not $isAdmin -and $isHyperVAdmin) {
+        Write-Info "Running without elevation, but the current user is in 'Hyper-V Administrators'."
+        Write-Info "Sandbox creation should still work. Some installer steps (feature enables,"
+        Write-Info "Defender exclusions) require Administrator and will be skipped."
+    }
+
     $rebootNeeded = $false
 
     # -- Hyper-V --
