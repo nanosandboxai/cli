@@ -181,7 +181,8 @@ function Install-NanosandboxCLI {
     # Register a RunOnce key so the installer resumes automatically after reboot.
     if ($rebootNeeded) {
         Write-Host ""
-        Write-Warn "A restart is required to activate the features installed above."
+        Write-Warn "A single restart is required to activate all Windows virtualization features enabled above."
+        Write-Info "The installer will resume automatically after login."
         Write-Host ""
 
         # Build the resume command: re-run this installer with the same version arg

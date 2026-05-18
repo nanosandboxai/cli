@@ -1282,6 +1282,21 @@ mod cli {
                     ok_message: "found",
                 },
                 PlatformCheck {
+                    name: "busybox",
+                    keyword: "busybox not found",
+                    ok_message: "found",
+                },
+                PlatformCheck {
+                    name: "vsock_proxy",
+                    keyword: "vsock_proxy not found",
+                    ok_message: "found",
+                },
+                PlatformCheck {
+                    name: "plan9_mount",
+                    keyword: "plan9_mount not found",
+                    ok_message: "found",
+                },
+                PlatformCheck {
                     name: "Disk",
                     keyword: "No SSD detected",
                     ok_message: "SSD detected",
