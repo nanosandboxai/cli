@@ -2160,7 +2160,7 @@ async fn handle_command(
                 role: MessageRole::System,
                 content: concat!(
                     "Available commands:\n",
-                    "  /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--image <img>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n",
+                    "  /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <img>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n",
                     "                                Add a new agent panel\n",
                     "  /sandboxes                    Toggle sandbox sidebar\n",
                     "  /focus <n>                    Focus panel n (0-indexed)\n",
@@ -2287,8 +2287,8 @@ async fn handle_command(
         Command::McpToggle => {
             app.show_mcp_sidebar = !app.show_mcp_sidebar;
         }
-        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model, use_env } => {
-            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), &use_env, tx);
+        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model, use_env, run_as_root } => {
+            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), &use_env, run_as_root, tx);
         }
         Command::Env { assignment } => {
             handle_env(app, assignment);
@@ -4303,6 +4303,7 @@ fn add_agent(
     prompt: Option<&str>,
     model: Option<&str>,
     use_env_keys: &[String],
+    run_as_root: bool,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
     // Build image reference. --tag overrides the default "latest" tag
@@ -4378,7 +4379,8 @@ fn add_agent(
 
     let mut builder = SandboxConfig::builder()
         .image(&image_name)
-        .memory_mb(2048);
+        .memory_mb(2048)
+        .run_as_root(run_as_root);
 
     // Set agent type on panel (not on SandboxConfig builder).
     if let Ok(agent_type) = agent.parse::<sandbox::AgentType>() {

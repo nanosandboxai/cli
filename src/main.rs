@@ -137,6 +137,10 @@ mod cli {
             #[arg(long, default_value = "600")]
             timeout: u32,
 
+            /// Run agent commands as root inside the sandbox VM
+            #[arg(long)]
+            run_as_root: bool,
+
             /// Buffer output instead of streaming in real-time
             /// (only useful with --format json)
             #[arg(long)]
@@ -521,6 +525,7 @@ mod cli {
                 env_file,
                 ports,
                 timeout,
+                run_as_root,
                 buffered,
                 command,
             }) => {
@@ -534,6 +539,7 @@ mod cli {
                     env_file.as_deref(),
                     &port_pairs,
                     timeout,
+                    run_as_root,
                     buffered,
                     &command,
                     cli.format,
@@ -722,6 +728,7 @@ mod cli {
         env_file: Option<&str>,
         ports: &[(u16, u16)],
         timeout: u32,
+        run_as_root: bool,
         buffered: bool,
         command: &[String],
         format: OutputFormat,
@@ -756,7 +763,8 @@ mod cli {
             .image(&image)
             .cpus(cpus)
             .memory_mb(memory)
-            .timeout_secs(timeout);
+            .timeout_secs(timeout)
+            .run_as_root(run_as_root);
 
         for (key, value) in &env_vars {
             builder = builder.env(key, value);
