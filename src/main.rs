@@ -1280,6 +1280,11 @@ mod cli {
                     ok_message: "running (vmcompute)",
                 },
                 PlatformCheck {
+                    name: "Hyper-V Access",
+                    keyword: "Hyper-V Administrators",
+                    ok_message: "user has Hyper-V access (admin or Hyper-V Administrators)",
+                },
+                PlatformCheck {
                     name: "WSL Kernel",
                     keyword: "WSL kernel",
                     ok_message: "found",
@@ -1287,6 +1292,21 @@ mod cli {
                 PlatformCheck {
                     name: "libkrunfw.dll",
                     keyword: "libkrunfw.dll not found",
+                    ok_message: "found",
+                },
+                PlatformCheck {
+                    name: "busybox",
+                    keyword: "busybox not found",
+                    ok_message: "found",
+                },
+                PlatformCheck {
+                    name: "vsock_proxy",
+                    keyword: "vsock_proxy not found",
+                    ok_message: "found",
+                },
+                PlatformCheck {
+                    name: "fuse_mount",
+                    keyword: "fuse_mount not found",
                     ok_message: "found",
                 },
                 PlatformCheck {

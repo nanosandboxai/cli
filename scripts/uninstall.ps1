@@ -32,6 +32,10 @@ function Uninstall-NanosandboxCLI {
     Write-Host "  ========================================" -ForegroundColor DarkGray
     Write-Host ""
 
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+
     # --- Remove CLI binary ---
     $nanosb = Join-Path $InstallDir "nanosb.exe"
     if (Test-Path $nanosb) {
@@ -39,6 +43,34 @@ function Uninstall-NanosandboxCLI {
         Write-Ok "Removed $nanosb"
     } else {
         Write-Info "nanosb.exe not found at $nanosb"
+    }
+
+    # --- Best-effort cleanup of installer side-effects ---
+    if ($isAdmin) {
+        try {
+            $mp = Get-MpPreference -ErrorAction SilentlyContinue
+            if ($mp) {
+                if ($mp.ExclusionPath -and ($mp.ExclusionPath -contains $InstallDir)) {
+                    Remove-MpPreference -ExclusionPath $InstallDir -ErrorAction SilentlyContinue
+                    Write-Ok "Removed Windows Defender exclusion path: $InstallDir"
+                }
+                if ($mp.ExclusionProcess -and ($mp.ExclusionProcess -contains "nanosb.exe")) {
+                    Remove-MpPreference -ExclusionProcess "nanosb.exe" -ErrorAction SilentlyContinue
+                    Write-Ok "Removed Windows Defender exclusion process: nanosb.exe"
+                }
+            }
+        } catch {
+            Write-Warn "Could not clean Windows Defender exclusions: $_"
+        }
+
+        try {
+            Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" -Name "NanosbInstall" -ErrorAction SilentlyContinue
+            Write-Info "Removed pending installer auto-resume key (if present)."
+        } catch {
+            Write-Warn "Could not clean installer auto-resume key: $_"
+        }
+    } else {
+        Write-Info "Run as Administrator to also clean Defender exclusions and RunOnce auto-resume key."
     }
 
     # --- Remove from PATH ---
