@@ -39,6 +39,8 @@ pub enum Command {
         model: Option<String>,
         /// Runtime env keys to import from nanosb startup env pool.
         use_env: Vec<String>,
+        /// Run agent commands as root inside the sandbox VM.
+        run_as_root: bool,
     },
     /// Switch focus to a specific panel index.
     Focus {
@@ -250,7 +252,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
         Some(a) => *a,
         None => {
             return ParseResult::Err(format!(
-                "Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n\
+                "Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n\
                  Supported agents: {}\n\
                  Example: /add claude\n\
                  With tag: /add claude --tag rc11\n\
@@ -271,6 +273,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
     let mut prompt = None;
     let mut model = None;
     let mut use_env: Vec<String> = Vec::new();
+    let mut run_as_root = false;
     let mut i = 2;
 
     while i < parts.len() {
@@ -375,6 +378,10 @@ fn parse_add(parts: &[&str]) -> ParseResult {
                 auto_mode = true;
                 i += 1;
             }
+            "--run-as-root" => {
+                run_as_root = true;
+                i += 1;
+            }
             "-p" | "--prompt" => {
                 // Consume all remaining tokens as the prompt text.
                 let remaining: Vec<&str> = parts[i + 1..].to_vec();
@@ -394,7 +401,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
             other => {
                 return ParseResult::Err(format!(
                     "Unknown option: {}\n\
-                     Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...",
+                     Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...",
                     other,
                 ));
             }
@@ -431,6 +438,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
         prompt,
         model,
         use_env,
+        run_as_root,
     })
 }
 
@@ -743,6 +751,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -762,6 +771,27 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_add_agent_with_run_as_root() {
+        assert_eq!(
+            parse_command("/add claude --run-as-root"),
+            Some(Command::AddAgent {
+                agent: "claude".to_string(),
+                image: None,
+                tag: None,
+                project: None,
+                branch: None,
+                name: None,
+                auto_mode: false,
+                prompt: None,
+                model: None,
+                use_env: vec![],
+                run_as_root: true,
             })
         );
     }
@@ -861,6 +891,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -1047,6 +1078,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -1066,6 +1098,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -1104,6 +1137,7 @@ mod tests {
                 prompt: Some("list files".to_string()),
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -1124,6 +1158,7 @@ mod tests {
                 prompt: Some("analyse project".to_string()),
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -1154,6 +1189,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec!["OPENAI_API_KEY".to_string(), "GITHUB_TOKEN".to_string()],
+                run_as_root: false,
             })
         );
     }
@@ -1179,6 +1215,7 @@ mod tests {
                 prompt: Some("fix the bug".to_string()),
                 model: None,
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -1406,6 +1443,7 @@ mod tests {
                 prompt: None,
                 model: Some("claude-sonnet-4-5-20250929".to_string()),
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }
@@ -1436,6 +1474,7 @@ mod tests {
                 prompt: Some("do stuff".to_string()),
                 model: Some("claude-opus-4-20250514".to_string()),
                 use_env: vec![],
+                run_as_root: false,
             })
         );
     }

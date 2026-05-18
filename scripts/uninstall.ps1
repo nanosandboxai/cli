@@ -88,13 +88,11 @@ function Uninstall-NanosandboxCLI {
                  (Test-Path (Join-Path $libsDir "busybox")) -or
                  (Test-Path (Join-Path $libsDir "vsock_proxy")) -or
                  (Test-Path (Join-Path $libsDir "fuse_mount")) -or
-                 (Test-Path (Join-Path $libsDir "plan9_mount")) -or
                  # Legacy: old install-deps placed deps at root level
                  (Test-Path (Join-Path $InstallDir "libkrunfw.dll")) -or
                  (Test-Path (Join-Path $InstallDir "busybox")) -or
                  (Test-Path (Join-Path $InstallDir "vsock_proxy")) -or
-                 (Test-Path (Join-Path $InstallDir "fuse_mount")) -or
-                 (Test-Path (Join-Path $InstallDir "plan9_mount"))
+                 (Test-Path (Join-Path $InstallDir "fuse_mount"))
 
     if ($depsExist) {
         Write-Host "  Runtime dependencies found (libkrunfw.dll, busybox, vsock_proxy, fuse_mount)." -ForegroundColor White
@@ -105,8 +103,8 @@ function Uninstall-NanosandboxCLI {
                 Remove-Item $libsDir -Recurse -Force
                 Write-Ok "Removed $libsDir"
             }
-            # Remove legacy root-level deps (plan9_mount kept for upgrade cleanup)
-            foreach ($file in @('libkrunfw.dll', 'busybox', 'vsock_proxy', 'fuse_mount', 'plan9_mount')) {
+            # Remove legacy root-level deps
+            foreach ($file in @('libkrunfw.dll', 'busybox', 'vsock_proxy', 'fuse_mount')) {
                 $path = Join-Path $InstallDir $file
                 if (Test-Path $path) {
                     Remove-Item $path -Force
@@ -124,7 +122,7 @@ function Uninstall-NanosandboxCLI {
         $children = Get-ChildItem $InstallDir -ErrorAction SilentlyContinue
         # Check for cache/logs/data dirs (anything beyond the binary and deps)
         $dataItems = $children | Where-Object {
-            $_.Name -notin @('nanosb.exe', 'libkrunfw.dll', 'busybox', 'vsock_proxy', 'fuse_mount', 'plan9_mount', 'libs')
+            $_.Name -notin @('nanosb.exe', 'libkrunfw.dll', 'busybox', 'vsock_proxy', 'fuse_mount', 'libs')
         }
     }
 
