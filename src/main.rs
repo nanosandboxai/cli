@@ -1292,8 +1292,8 @@ mod cli {
                     ok_message: "found",
                 },
                 PlatformCheck {
-                    name: "plan9_mount",
-                    keyword: "plan9_mount not found",
+                    name: "fuse_mount",
+                    keyword: "fuse_mount not found",
                     ok_message: "found",
                 },
                 PlatformCheck {
