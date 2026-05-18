@@ -3649,6 +3649,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "devices",
  "dirs",
  "docker_credential",
  "env_logger",
