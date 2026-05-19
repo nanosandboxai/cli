@@ -401,6 +401,20 @@ function Install-NanosandboxCLI {
         Write-Warn "You may need to install them manually from: https://github.com/nanosandboxai/install-deps"
     }
 
+    # --- Install default config files ---
+    $configDest = Join-Path $InstallDir "agent_defaults.yaml"
+    if (Test-Path $configDest) {
+        Write-Info "agent_defaults.yaml already exists (keeping user config)"
+    } else {
+        $configUrl = "https://github.com/$releaseRepo/releases/download/$resolvedVersion/agent_defaults.yaml"
+        try {
+            Invoke-WebRequest -Uri $configUrl -OutFile $configDest -UseBasicParsing
+            Write-Ok "Installed agent_defaults.yaml"
+        } catch {
+            Write-Warn "Could not download agent_defaults.yaml -- using built-in defaults"
+        }
+    }
+
     # --- Add to PATH ---
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -notlike "*$InstallDir*") {

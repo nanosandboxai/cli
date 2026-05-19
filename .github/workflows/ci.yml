@@ -383,6 +383,7 @@ jobs:
           cp scripts/uninstall.sh release/uninstall.sh
           cp scripts/install.ps1 release/install.ps1
           cp scripts/uninstall.ps1 release/uninstall.ps1
+          cp config/agent_defaults.yaml release/agent_defaults.yaml
           chmod +x release/install.sh release/uninstall.sh
           # Stamp the release tag into installer example URLs so users always
           # get the correct pinned raw URL for this specific release.

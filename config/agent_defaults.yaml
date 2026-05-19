@@ -1,0 +1,33 @@
+# Default compute resources for each agent type.
+#
+# These values are used when the user does not explicitly set cpus or memory
+# in their sandbox.yml or CLI flags.
+#
+# To override, edit this file at ~/.nanosandbox/agent_defaults.yaml
+# or set values in your sandbox.yml:
+#
+#   defaults:
+#     cpus: 4
+#     memory: 8192
+#
+# Resolution order (last wins):
+#   1. This file (built-in defaults, installed with nanosb)
+#   2. sandbox.yml defaults: block
+#   3. sandbox.yml per-sandbox block
+#   4. CLI flags (--cpus, --memory)
+
+claude:
+  cpus: 2
+  memory_mb: 4096
+
+codex:
+  cpus: 2
+  memory_mb: 2048
+
+goose:
+  cpus: 2
+  memory_mb: 2048
+
+cursor:
+  cpus: 2
+  memory_mb: 2048
