@@ -604,6 +604,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         let permissions = panel.permissions;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
+                        let had_interaction = panel.had_interaction;
                         let selected_agent_session_id = panel.selected_agent_session_id.clone();
                         let model = panel.model.clone();
                         let tx = tx.clone();
@@ -638,6 +639,7 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         let permissions = panel.permissions;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
+                        let had_interaction = panel.had_interaction;
                         let selected_agent_session_id = panel.selected_agent_session_id.clone();
                         let model = panel.model.clone();
                         let ssh_host = ssh_host_override.clone().unwrap_or_else(|| "127.0.0.1".to_string());
@@ -655,7 +657,8 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                                     pty_cols, pty_rows,
                                     &agent_name, &env, workdir.as_deref(),
                                     permissions, false, prompt.as_deref(),
-                                    is_resumed, selected_agent_session_id.as_deref(), model.as_deref(), panel_idx, tx.clone(),
+                                    is_resumed, had_interaction,
+                                    selected_agent_session_id.as_deref(), model.as_deref(), panel_idx, tx.clone(),
                                 ).await {
                                     Ok(handle) => {
                                         let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
@@ -2348,6 +2351,7 @@ async fn handle_command(
                     let auto_mode = panel.auto_mode;
                     let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                     let is_resumed = panel.is_resumed;
+                    let had_interaction = panel.had_interaction;
                     let selected_agent_session_id = panel.selected_agent_session_id.clone();
                     let model = panel.model.clone();
                     let ssh_host = panel
@@ -2360,7 +2364,8 @@ async fn handle_command(
                             ssh_host, ssh_port, key_path, pty_cols, pty_rows,
                             &agent_name, &env, workdir.as_deref(),
                             permissions, auto_mode, prompt.as_deref(),
-                            is_resumed, selected_agent_session_id.as_deref(), model.as_deref(), panel_idx, tx.clone(),
+                            is_resumed, had_interaction,
+                            selected_agent_session_id.as_deref(), model.as_deref(), panel_idx, tx.clone(),
                         ).await {
                             Ok(handle) => {
                                 let _ = tx.send(AppEvent::SshConnected { panel_idx, handle });
@@ -4839,10 +4844,6 @@ fn detect_agent_session_id_from_state(
                     .or_else(|| extract_json_string_field(&content, "session_id"))
                     .or_else(|| extract_json_string_field(&content, "sessionId"))
             }
-            "goose" => {
-                extract_json_string_field(&content, "session_id")
-                    .or_else(|| extract_json_string_field(&content, "sessionId"))
-            }
             _ => {
                 extract_json_string_field(&content, "session_id")
                     .or_else(|| extract_json_string_field(&content, "sessionId"))
@@ -4850,12 +4851,6 @@ fn detect_agent_session_id_from_state(
         };
         if by_json.is_some() {
             return by_json;
-        }
-
-        if normalize_agent_name(agent_name) == "goose" {
-            if let Some(v) = extract_session_token_after("session:", &content) {
-                return Some(v);
-            }
         }
     }
 

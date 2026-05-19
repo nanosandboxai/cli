@@ -183,6 +183,7 @@ pub async fn connect_ssh(
     auto_mode: bool,
     prompt: Option<&str>,
     is_resumed: bool,
+    had_interaction: bool,
     selected_session_id: Option<&str>,
     model: Option<&str>,
     panel_idx: usize,
@@ -263,7 +264,8 @@ pub async fn connect_ssh(
     let has_provider = agent_name != "goose"
         || env.contains_key("GOOSE_PROVIDER")
         || env.contains_key("ANTHROPIC_API_KEY")
-        || env.contains_key("OPENAI_API_KEY");
+        || env.contains_key("OPENAI_API_KEY")
+        || had_interaction;
 
     let agent_cmd = agent_cli_command_with_session(
         agent_name,
