@@ -1292,6 +1292,7 @@ async fn spawn_gateway_exec(
         is_resumed,
         selected_agent_session_id,
         model,
+        true, // auto_mode always has provider context or fails naturally
     );
     let cmd = match agent_cmd {
         Some(c) => c,

@@ -258,6 +258,13 @@ pub async fn connect_ssh(
         env_parts.push(format!("cd '{}'", dir));
     }
 
+    // Check whether a provider is available for the agent. For goose this
+    // determines whether we launch `goose session` or `goose configure`.
+    let has_provider = agent_name != "goose"
+        || env.contains_key("GOOSE_PROVIDER")
+        || env.contains_key("ANTHROPIC_API_KEY")
+        || env.contains_key("OPENAI_API_KEY");
+
     let agent_cmd = agent_cli_command_with_session(
         agent_name,
         permissions,
@@ -265,6 +272,7 @@ pub async fn connect_ssh(
         is_resumed,
         selected_session_id,
         model,
+        has_provider,
     );
 
     let channel = session.channel_open_session().await?;
@@ -515,7 +523,7 @@ pub(super) fn agent_cli_command(
     is_resumed: bool,
     model: Option<&str>,
 ) -> Option<String> {
-    agent_cli_command_with_session(agent_name, permissions, auto_mode, is_resumed, None, model)
+    agent_cli_command_with_session(agent_name, permissions, auto_mode, is_resumed, None, model, true)
 }
 
 pub(super) fn agent_cli_command_with_session(
@@ -525,6 +533,7 @@ pub(super) fn agent_cli_command_with_session(
     is_resumed: bool,
     selected_session_id: Option<&str>,
     model: Option<&str>,
+    has_provider: bool,
 ) -> Option<String> {
     use sandbox::Permissions;
     let effective = permissions.effective(auto_mode);
@@ -589,6 +598,11 @@ pub(super) fn agent_cli_command_with_session(
                 Some(format!("goose session resume {}", session_id))
             } else if is_resumed {
                 Some("goose session -r".to_string())
+            } else if !has_provider {
+                // No provider configured and no existing session — launch the
+                // interactive configuration wizard so the user can set up their
+                // provider/model before starting a session.
+                Some("goose configure".to_string())
             } else {
                 Some("goose session".to_string())
             }
@@ -1310,6 +1324,7 @@ mod tests {
             true,
             Some("sess-claude-123"),
             None,
+            true,
         )
         .unwrap();
         assert!(claude.contains("--resume sess-claude-123"));
@@ -1322,6 +1337,7 @@ mod tests {
             true,
             Some("sess-codex-456"),
             None,
+            true,
         )
         .unwrap();
         assert!(codex.contains("resume sess-codex-456"));
@@ -1355,6 +1371,34 @@ mod tests {
         use sandbox::Permissions;
         let cmd = agent_cli_command("goose", Permissions::Default, false, false, Some("claude-sonnet-4-5-20250929")).unwrap();
         assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn test_agent_cli_command_goose_configure_when_no_provider() {
+        use sandbox::Permissions;
+        let cmd = agent_cli_command_with_session(
+            "goose", Permissions::Default, false, false, None, None, false,
+        ).unwrap();
+        assert_eq!(cmd, "goose configure");
+    }
+
+    #[test]
+    fn test_agent_cli_command_goose_session_when_has_provider() {
+        use sandbox::Permissions;
+        let cmd = agent_cli_command_with_session(
+            "goose", Permissions::Default, false, false, None, None, true,
+        ).unwrap();
+        assert_eq!(cmd, "goose session");
+    }
+
+    #[test]
+    fn test_agent_cli_command_goose_resume_ignores_provider() {
+        // Resume always resumes, regardless of provider status
+        use sandbox::Permissions;
+        let cmd = agent_cli_command_with_session(
+            "goose", Permissions::Default, false, true, Some("sess-123"), None, false,
+        ).unwrap();
+        assert!(cmd.contains("goose session resume sess-123"));
     }
 
     #[test]
