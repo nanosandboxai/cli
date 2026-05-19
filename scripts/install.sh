@@ -167,7 +167,38 @@ download_binary() {
     fi
 }
 
-# ─── Step 3: Codesign (macOS only) ───────────────────────────────────────────
+# ─── Step 3: Install default config files ────────────────────────────────────
+
+install_config() {
+    header "Installing default configuration"
+
+    local config_dir="${NANOSANDBOX_HOME}"
+    mkdir -p "$config_dir"
+
+    local dest="${config_dir}/agent_defaults.yaml"
+
+    # Do not overwrite user-customized config.
+    if [[ -f "$dest" ]]; then
+        success "agent_defaults.yaml already exists (keeping user config)"
+        return 0
+    fi
+
+    local url
+    if [[ "$NANOSB_VERSION" == "latest" ]]; then
+        url="https://github.com/${RELEASE_REPO}/releases/latest/download/agent_defaults.yaml"
+    else
+        url="https://github.com/${RELEASE_REPO}/releases/download/v${NANOSB_VERSION}/agent_defaults.yaml"
+    fi
+
+    info "Downloading agent_defaults.yaml..."
+    if curl -fsSL "$url" -o "$dest"; then
+        success "Installed at ${dest}"
+    else
+        warn "Could not download agent_defaults.yaml — using built-in defaults"
+    fi
+}
+
+# ─── Step 4: Codesign (macOS only) ───────────────────────────────────────────
 
 codesign_binary() {
     local binary_path="${INSTALL_DIR}/nanosb"
@@ -252,6 +283,7 @@ install_symlink() {
 
 install_deps
 download_binary
+install_config
 [[ "$OS" == "Darwin" ]] && { header "Codesigning nanosb"; codesign_binary; }
 install_symlink
 
