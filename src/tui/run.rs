@@ -415,7 +415,9 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
 
     // Either resume a previous session or start fresh sandboxes.
     if let Some(ref session) = resume_session_data {
-        resume_session(&mut app, session, &tx);
+        if let Err(e) = resume_session(&mut app, session, &tx) {
+            eprintln!("Warning: failed to resume session: {}", e);
+        }
     } else {
         // Auto-start sandboxes from config file.
         for (key, config) in resolved_configs {
@@ -604,7 +606,6 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                         let permissions = panel.permissions;
                         let prompt = panel.headless_state.as_ref().map(|h| h.task.clone());
                         let is_resumed = panel.is_resumed;
-                        let had_interaction = panel.had_interaction;
                         let selected_agent_session_id = panel.selected_agent_session_id.clone();
                         let model = panel.model.clone();
                         let tx = tx.clone();
@@ -1189,16 +1190,20 @@ Set NANOSB_REGISTRY_PATH or install the registry at ~/.nanosandbox/agents-regist
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .unwrap_or_default();
 
-            let session = build_session_from_app(&app, project_path, &sandbox_yml_content);
-            match session.save_with_id(resumed_session_id.as_deref()) {
-                Ok(session_id) => {
-                    eprintln!(
-                        "Session saved (id: {}). Use `nanosb -r` to resume latest or `nanosb --session {}`.",
-                        session_id, session_id
-                    );
-                }
+            match build_session_from_app(&app, project_path, &sandbox_yml_content) {
+                Ok(session) => match session.save_with_id(resumed_session_id.as_deref()) {
+                    Ok(session_id) => {
+                        eprintln!(
+                            "Session saved (id: {}). Use `nanosb -r` to resume latest or `nanosb --session {}`.",
+                            session_id, session_id
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: failed to save session: {}", e);
+                    }
+                },
                 Err(e) => {
-                    eprintln!("Warning: failed to save session: {}", e);
+                    eprintln!("Warning: failed to build session state: {}", e);
                 }
             }
         }
@@ -2164,7 +2169,7 @@ async fn handle_command(
                 role: MessageRole::System,
                 content: concat!(
                     "Available commands:\n",
-                    "  /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <img>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n",
+                    "  /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <img>] [--project <path>] [--branch <name>] [--name <name>] [--env-file <path>] [--use-env <KEY>]...\n",
                     "                                Add a new agent panel\n",
                     "  /sandboxes                    Toggle sandbox sidebar\n",
                     "  /focus <n>                    Focus panel n (0-indexed)\n",
@@ -2291,8 +2296,8 @@ async fn handle_command(
         Command::McpToggle => {
             app.show_mcp_sidebar = !app.show_mcp_sidebar;
         }
-        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model, use_env, run_as_root } => {
-            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), &use_env, run_as_root, tx);
+        Command::AddAgent { agent, image, tag, project, branch, name, auto_mode, prompt, model, use_env, env_file, run_as_root } => {
+            add_agent(app, &agent, image.as_deref(), tag.as_deref(), project.as_deref(), branch.as_deref(), name.as_deref(), auto_mode, prompt.as_deref(), model.as_deref(), &use_env, env_file.as_deref(), run_as_root, tx);
         }
         Command::Env { assignment } => {
             handle_env(app, assignment);
@@ -4296,6 +4301,24 @@ fn required_api_keys(agent: &str) -> Vec<(&'static str, bool)> {
     }
 }
 
+fn parse_runtime_env_file(path: &str) -> std::result::Result<Vec<(String, String)>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read env file '{}': {}", path, e))?;
+
+    let mut vars = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            vars.push((key.trim().to_string(), value.trim().to_string()));
+        }
+    }
+
+    Ok(vars)
+}
+
 /// Add a new agent panel, creating and starting a sandbox in the background.
 fn add_agent(
     app: &mut App,
@@ -4309,6 +4332,7 @@ fn add_agent(
     prompt: Option<&str>,
     model: Option<&str>,
     use_env_keys: &[String],
+    env_file: Option<&str>,
     run_as_root: bool,
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
@@ -4333,10 +4357,35 @@ fn add_agent(
         panel.headless_state = Some(super::app::HeadlessState::new(task));
     }
 
+    // Import startup runtime env pool by default (lowest precedence).
+    for (key, value) in &app.runtime_env_pool {
+        panel.env.insert(key.clone(), value.clone());
+        panel.runtime_env_keys.insert(key.clone());
+    }
+
+    // Merge per-panel --env-file values over runtime defaults.
+    if let Some(env_file_path) = env_file {
+        match parse_runtime_env_file(env_file_path) {
+            Ok(file_vars) => {
+                for (key, value) in file_vars {
+                    panel.runtime_env_keys.insert(key.clone());
+                    panel.env.insert(key, value);
+                }
+            }
+            Err(e) => {
+                app.set_system_message(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("Cannot add panel: {}", e),
+                });
+                return;
+            }
+        }
+    }
+
     // Auto-detect API keys from host environment.
     for (key, _is_required) in &required_api_keys(agent) {
         if let Ok(val) = std::env::var(key) {
-            panel.env.insert(key.to_string(), val);
+            panel.env.entry(key.to_string()).or_insert(val);
         }
     }
 
@@ -4349,7 +4398,7 @@ fn add_agent(
         }
     }
 
-    // Selectively import startup runtime env keys into this panel.
+    // Explicit runtime key picks override all inferred/default values.
     if !use_env_keys.is_empty() {
         let mut missing: Vec<String> = Vec::new();
         for key in use_env_keys {
@@ -4715,29 +4764,11 @@ fn add_agent_from_config(
         }
     });
 }
-
-
-fn is_session_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
-}
-
 fn normalize_agent_name(agent_name: &str) -> &str {
     match agent_name {
         "claude-code" => "claude",
         "cursor-agent" => "cursor",
         _ => agent_name,
-    }
-}
-
-fn extract_session_token_after(label: &str, text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let idx = lower.find(&label.to_lowercase())?;
-    let rest = text.get(idx + label.len()..)?.trim_start();
-    let token: String = rest.chars().take_while(|c| is_session_token_char(*c)).collect();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
     }
 }
 
@@ -4806,25 +4837,57 @@ fn collect_state_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
+fn detect_goose_session_id_from_state(
+    clone_path: &std::path::Path,
+) -> std::result::Result<Option<String>, String> {
+    let db_path = clone_path.join(".nanosb-state/.config/goose/data/sessions/sessions.db");
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("failed to open goose sessions DB ({}): {}", db_path.display(), e))?;
+
+    match conn.query_row(
+        "SELECT id FROM sessions ORDER BY created_at DESC LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(id) => Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!(
+            "failed to query goose sessions DB ({}): {}",
+            db_path.display(),
+            e
+        )),
+    }
+}
+
 fn detect_agent_session_id_from_state(
     agent_name: &str,
     clone_path: &std::path::Path,
-) -> Option<String> {
+) -> std::result::Result<Option<String>, String> {
+    if normalize_agent_name(agent_name) == "goose" {
+        return detect_goose_session_id_from_state(clone_path);
+    }
+
     let state_root = clone_path.join(".nanosb-state");
     if !state_root.exists() {
-        return None;
+        return Ok(None);
     }
 
     let agent_dir = match normalize_agent_name(agent_name) {
         "claude" => state_root.join(".claude"),
         "codex" => state_root.join(".codex"),
         "cursor" => state_root.join(".cursor"),
-        "goose" => state_root.join(".config/goose"),
         _ => state_root,
     };
 
     if !agent_dir.exists() {
-        return None;
+        return Ok(None);
     }
 
     let files = collect_state_files(&agent_dir);
@@ -4850,11 +4913,11 @@ fn detect_agent_session_id_from_state(
             }
         };
         if by_json.is_some() {
-            return by_json;
+            return Ok(by_json);
         }
     }
 
-    None
+    Ok(None)
 }
 
 fn should_resume_panel(had_interaction: bool, selected_agent_session_id: Option<&str>) -> bool {
@@ -4870,7 +4933,7 @@ fn resume_session(
     app: &mut App,
     session: &sandbox::session::Session,
     tx: &mpsc::UnboundedSender<AppEvent>,
-) {
+) -> std::result::Result<(), String> {
     for sp in &session.panels {
         let mut config = sp.config.clone();
 
@@ -4961,11 +5024,22 @@ fn resume_session(
             }
         }
 
-        let detected_session_id = panel
+        let detected_session_id = if let Some(clone) = panel
             .project_mount
             .as_ref()
             .and_then(|pm| pm.worktree_base.as_ref())
-            .and_then(|clone| detect_agent_session_id_from_state(&agent_type, clone));
+        {
+            detect_agent_session_id_from_state(&agent_type, clone).map_err(|e| {
+                format!(
+                    "failed to detect session id for agent '{}' from '{}': {}",
+                    agent_type,
+                    clone.display(),
+                    e
+                )
+            })?
+        } else {
+            None
+        };
 
         panel.selected_agent_session_id = sp
             .selected_agent_session_id
@@ -5102,6 +5176,8 @@ fn resume_session(
             }
         });
     }
+
+    Ok(())
 }
 
 /// Handle `/env` — set or list panel environment variables.
@@ -5402,71 +5478,76 @@ fn build_session_from_app(
     app: &super::app::App,
     project_path: &std::path::Path,
     sandbox_config_content: &str,
-) -> sandbox::session::Session {
+) -> std::result::Result<sandbox::session::Session, String> {
     use sandbox::session::{Session, SessionPanel, config_hash, SESSION_VERSION};
     use chrono::Utc;
 
-    let panels: Vec<SessionPanel> = app
-        .panels
-        .iter()
-        .filter_map(|panel| {
-            let config = panel.original_config.clone()?;
+    let mut panels: Vec<SessionPanel> = Vec::new();
+    for panel in &app.panels {
+        let Some(config) = panel.original_config.clone() else {
+            continue;
+        };
 
-            let clone_path = panel
-                .project_mount
-                .as_ref()
-                .and_then(|pm| pm.worktree_base.clone());
+        let clone_path = panel
+            .project_mount
+            .as_ref()
+            .and_then(|pm| pm.worktree_base.clone());
 
-            let branches = panel
-                .project_mount
-                .as_ref()
-                .map(|pm| pm.created_branches.clone())
-                .unwrap_or_default();
+        let branches = panel
+            .project_mount
+            .as_ref()
+            .map(|pm| pm.created_branches.clone())
+            .unwrap_or_default();
 
-            let env_keys: Vec<String> = panel
-                .env
-                .keys()
-                .filter(|k| !panel.runtime_env_keys.contains(*k))
-                .cloned()
-                .collect();
+        let env_keys: Vec<String> = panel
+            .env
+            .keys()
+            .filter(|k| !panel.runtime_env_keys.contains(*k))
+            .cloned()
+            .collect();
 
-            let selected_agent_session_id = panel
-                .selected_agent_session_id
-                .clone()
-                .or_else(|| {
-                    clone_path
-                        .as_ref()
-                        .and_then(|clone| detect_agent_session_id_from_state(&panel.agent_name, clone))
-                });
+        let selected_agent_session_id = if let Some(existing) = panel.selected_agent_session_id.clone() {
+            Some(existing)
+        } else if let Some(ref clone) = clone_path {
+            detect_agent_session_id_from_state(&panel.agent_name, clone).map_err(|e| {
+                format!(
+                    "failed to detect session id for agent '{}' from '{}': {}",
+                    panel.agent_name,
+                    clone.display(),
+                    e
+                )
+            })?
+        } else {
+            None
+        };
 
-            Some(SessionPanel {
-                agent_name: panel.agent_name.clone(),
-                display_name: panel.display_name.clone(),
-                sandbox_short_id: panel.sandbox_id_short.clone(),
-                config,
-                clone_path,
-                branches,
-                auto_mode: panel.auto_mode,
-                permissions: panel.permissions,
-                agent_type: panel.agent_type,
-                model: panel.model.clone(),
-                prompt: panel.headless_state.as_ref().map(|h| h.task.clone()),
-                env_keys,
-                visible: panel.visible,
-                had_interaction: panel.had_interaction,
-                selected_agent_session_id,
-            })
-        })
-        .collect();
+        panels.push(SessionPanel {
+            agent_name: panel.agent_name.clone(),
+            display_name: panel.display_name.clone(),
+            sandbox_short_id: panel.sandbox_id_short.clone(),
+            config,
+            clone_path,
+            branches,
+            auto_mode: panel.auto_mode,
+            permissions: panel.permissions,
+            agent_type: panel.agent_type,
+            model: panel.model.clone(),
+            prompt: panel.headless_state.as_ref().map(|h| h.task.clone()),
+            env_keys,
+            visible: panel.visible,
+            had_interaction: panel.had_interaction,
+            selected_agent_session_id,
+        });
+    }
 
-    Session {
+    Ok(Session {
         version: SESSION_VERSION,
         created_at: Utc::now(),
         updated_at: Utc::now(),
         project_path: project_path.to_path_buf(),
         config_hash: config_hash(sandbox_config_content),
         panels,
-    }
+    })
 }
 
 /// Merge registry resolution (full agent or skills-only) into sandbox config for bootstrap.
@@ -6125,7 +6206,8 @@ mod tests {
         )
         .expect("failed to write session file");
 
-        let detected = detect_agent_session_id_from_state("claude", &clone_dir);
+        let detected = detect_agent_session_id_from_state("claude", &clone_dir)
+            .expect("claude session id detection should not fail");
         assert_eq!(
             detected,
             Some("8df83130-8dbe-4f28-8dff-52e44405e77d".to_string())
@@ -6139,5 +6221,60 @@ mod tests {
         assert!(!should_resume_panel(false, Some("sess-1")));
         assert!(!should_resume_panel(true, None));
         assert!(should_resume_panel(true, Some("sess-1")));
+    }
+
+    #[test]
+    fn test_detect_goose_session_id_from_sqlite_db() {
+        let clone_dir = make_temp_dir("goose-session-db");
+        let db_dir = clone_dir.join(".nanosb-state/.config/goose/data/sessions");
+        fs::create_dir_all(&db_dir).expect("failed to create goose sessions dir");
+        let db_path = db_dir.join("sessions.db");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("failed to open sqlite db");
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                created_at TEXT
+            );
+            INSERT INTO sessions (id, name, created_at) VALUES
+                ('20260520_1', 'older', '2026-05-20T10:00:00Z'),
+                ('20260520_2', 'newer', '2026-05-20T11:00:00Z');
+            ",
+        )
+        .expect("failed to seed sessions db");
+
+        let detected = detect_goose_session_id_from_state(&clone_dir)
+            .expect("goose sqlite detection should not fail");
+        assert_eq!(detected, Some("20260520_2".to_string()));
+
+        let _ = fs::remove_dir_all(&clone_dir);
+    }
+
+    #[test]
+    fn test_detect_goose_session_id_no_db_returns_none() {
+        let clone_dir = make_temp_dir("goose-no-db");
+        let detected = detect_goose_session_id_from_state(&clone_dir)
+            .expect("missing db should not fail");
+        assert_eq!(detected, None);
+        let _ = fs::remove_dir_all(&clone_dir);
+    }
+
+    #[test]
+    fn test_detect_goose_session_id_schema_error_fails() {
+        let clone_dir = make_temp_dir("goose-bad-schema");
+        let db_dir = clone_dir.join(".nanosb-state/.config/goose/data/sessions");
+        fs::create_dir_all(&db_dir).expect("failed to create goose sessions dir");
+        let db_path = db_dir.join("sessions.db");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("failed to open sqlite db");
+        conn.execute_batch("CREATE TABLE not_sessions (id TEXT PRIMARY KEY);")
+            .expect("failed to create incompatible schema");
+
+        let detected = detect_goose_session_id_from_state(&clone_dir);
+        assert!(detected.is_err(), "schema mismatch must fail");
+
+        let _ = fs::remove_dir_all(&clone_dir);
     }
 }

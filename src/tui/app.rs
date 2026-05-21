@@ -475,7 +475,7 @@ pub struct App {
     /// Pending confirmation prompt: message + list of panel indices to reconnect on 'y'.
     /// Shown as a system popup; 'y' triggers reconnect, 'n'/Esc dismisses.
     pub pending_reconnect: Option<Vec<usize>>,
-    /// Startup runtime env pool (`--env`, `--env-file`, optional auto `.env` in no-config mode).
+    /// Startup runtime env pool (`.env`, `--env-file`, `--env`).
     /// This is in-memory only for the current process.
     pub runtime_env_pool: HashMap<String, String>,
     /// Windows-only key suppression window after Ctrl+V to ignore
