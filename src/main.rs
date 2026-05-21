@@ -430,18 +430,16 @@ mod cli {
                 };
 
                 // Build runtime-only env pool for this invocation.
-                // Source order: optional auto .env (no-config mode only), then --env-file, then --env.
+                // Source order: auto .env, then --env-file, then --env.
                 let mut runtime_env: Vec<(String, String)> = Vec::new();
 
-                // Auto-load .env only when no sandbox config is active.
-                if sandbox_configs.is_empty() {
-                    if let Ok(cwd) = std::env::current_dir() {
-                        let env_path = cwd.join(".env");
-                        if env_path.exists() {
-                            let auto_env_files = vec![env_path.to_string_lossy().to_string()];
-                            let auto_env = parse_env_vars(&[], &auto_env_files)?;
-                            runtime_env.extend(auto_env);
-                        }
+                // Auto-load .env from CWD when present.
+                if let Ok(cwd) = std::env::current_dir() {
+                    let env_path = cwd.join(".env");
+                    if env_path.exists() {
+                        let auto_env_files = vec![env_path.to_string_lossy().to_string()];
+                        let auto_env = parse_env_vars(&[], &auto_env_files)?;
+                        runtime_env.extend(auto_env);
                     }
                 }
 

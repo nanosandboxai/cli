@@ -55,6 +55,7 @@ async-trait = "0.1"
 sha2 = "0.10"
 env_logger = "0.11"
 log = "0.4"
+rusqlite = { version = "0.33", features = ["bundled"] }
 
 # Platform-specific (TUI terminal handling)
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]

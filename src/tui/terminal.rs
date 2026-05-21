@@ -493,6 +493,7 @@ pub(super) fn agent_env_vars(
         };
         vars.insert("GOOSE_MODE".to_string(), goose_mode.to_string());
         if let Some(m) = model {
+            vars.insert("GOOSE_MODEL".to_string(), m.to_string());
             vars.insert("GOOSE_DEFAULT_MODEL".to_string(), m.to_string());
         }
     }
@@ -597,7 +598,7 @@ pub(super) fn agent_cli_command_with_session(
             if auto_mode {
                 Some("goose run --output-format stream-json --no-session -t \"$NANOSB_PROMPT\"".to_string())
             } else if let Some(session_id) = selected_session_id {
-                Some(format!("goose session resume {}", session_id))
+                Some(format!("goose session --resume --session-id {}", session_id))
             } else if is_resumed {
                 Some("goose session -r".to_string())
             } else if !has_provider {
@@ -1400,7 +1401,7 @@ mod tests {
         let cmd = agent_cli_command_with_session(
             "goose", Permissions::Default, false, true, Some("sess-123"), None, false,
         ).unwrap();
-        assert!(cmd.contains("goose session resume sess-123"));
+        assert!(cmd.contains("goose session --resume --session-id sess-123"));
     }
 
     #[test]

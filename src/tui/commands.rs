@@ -39,6 +39,8 @@ pub enum Command {
         model: Option<String>,
         /// Runtime env keys to import from nanosb startup env pool.
         use_env: Vec<String>,
+        /// Optional env file path to merge into this panel's runtime env.
+        env_file: Option<String>,
         /// Run agent commands as root inside the sandbox VM.
         run_as_root: bool,
     },
@@ -252,12 +254,13 @@ fn parse_add(parts: &[&str]) -> ParseResult {
         Some(a) => *a,
         None => {
             return ParseResult::Err(format!(
-                "Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...\n\
+                "Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--env-file <path>] [--use-env <KEY>]...\n\
                  Supported agents: {}\n\
                  Example: /add claude\n\
                  With tag: /add claude --tag rc11\n\
                  With model: /add claude --model claude-sonnet-4-5-20250929\n\
                  Headless: /add claude --auto-mode -p \"list files\"\n\
+                 With env file: /add claude --env-file .env.local\n\
                  With runtime env: /add claude --use-env OPENAI_API_KEY",
                 SUPPORTED_AGENTS.join(", "),
             ));
@@ -273,6 +276,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
     let mut prompt = None;
     let mut model = None;
     let mut use_env: Vec<String> = Vec::new();
+    let mut env_file = None;
     let mut run_as_root = false;
     let mut i = 2;
 
@@ -374,6 +378,21 @@ fn parse_add(parts: &[&str]) -> ParseResult {
                     }
                 }
             }
+            "--env-file" => {
+                match parts.get(i + 1) {
+                    Some(v) => {
+                        env_file = Some(v.to_string());
+                        i += 2;
+                    }
+                    None => {
+                        return ParseResult::Err(
+                            "--env-file requires a path\n\
+                             Usage: /add <agent> --env-file <path>"
+                                .to_string(),
+                        )
+                    }
+                }
+            }
             "--auto-mode" => {
                 auto_mode = true;
                 i += 1;
@@ -401,7 +420,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
             other => {
                 return ParseResult::Err(format!(
                     "Unknown option: {}\n\
-                     Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--use-env <KEY>]...",
+                     Usage: /add <agent> [--tag <version>] [--model <model>] [--auto-mode -p <prompt>] [--run-as-root] [--image <image>] [--project <path>] [--branch <name>] [--name <name>] [--env-file <path>] [--use-env <KEY>]...",
                     other,
                 ));
             }
@@ -438,6 +457,7 @@ fn parse_add(parts: &[&str]) -> ParseResult {
         prompt,
         model,
         use_env,
+        env_file,
         run_as_root,
     })
 }
@@ -751,6 +771,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -771,6 +792,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -791,6 +813,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: true,
             })
         );
@@ -891,6 +914,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1078,6 +1102,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1098,6 +1123,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1137,6 +1163,7 @@ mod tests {
                 prompt: Some("list files".to_string()),
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1158,6 +1185,7 @@ mod tests {
                 prompt: Some("analyse project".to_string()),
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1189,6 +1217,7 @@ mod tests {
                 prompt: None,
                 model: None,
                 use_env: vec!["OPENAI_API_KEY".to_string(), "GITHUB_TOKEN".to_string()],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1198,6 +1227,33 @@ mod tests {
     fn test_parse_add_use_env_missing_value() {
         let result = parse_command_verbose("/add claude --use-env");
         assert!(matches!(result, ParseResult::Err(msg) if msg.contains("--use-env requires a key name")));
+    }
+
+    #[test]
+    fn test_parse_add_with_env_file() {
+        assert_eq!(
+            parse_command_verbose("/add claude --env-file .env.local"),
+            ParseResult::Ok(Command::AddAgent {
+                agent: "claude".to_string(),
+                image: None,
+                tag: None,
+                project: None,
+                branch: None,
+                name: None,
+                auto_mode: false,
+                prompt: None,
+                model: None,
+                use_env: vec![],
+                env_file: Some(".env.local".to_string()),
+                run_as_root: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_add_env_file_missing_value() {
+        let result = parse_command_verbose("/add claude --env-file");
+        assert!(matches!(result, ParseResult::Err(msg) if msg.contains("--env-file requires a path")));
     }
 
     #[test]
@@ -1215,6 +1271,7 @@ mod tests {
                 prompt: Some("fix the bug".to_string()),
                 model: None,
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1443,6 +1500,7 @@ mod tests {
                 prompt: None,
                 model: Some("claude-sonnet-4-5-20250929".to_string()),
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
@@ -1474,6 +1532,7 @@ mod tests {
                 prompt: Some("do stuff".to_string()),
                 model: Some("claude-opus-4-20250514".to_string()),
                 use_env: vec![],
+                env_file: None,
                 run_as_root: false,
             })
         );
