@@ -6,6 +6,9 @@ members = [
     # Agent-aware sandbox SDK and its gateway client.
     "sandbox/crates/sandbox",
     "sandbox/crates/gateway",
+    # Protocol-first SDK substrate: versioned NDJSON protocol + SandboxClient.
+    "crates/protocol",
+    "crates/client",
 ]
 resolver = "2"
 
