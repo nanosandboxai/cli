@@ -22,6 +22,7 @@
 //! See the plan §5 for verb definitions.
 
 pub mod client;
+pub mod proto;
 
 use runtime::config::{ConsoleSpec, ExtraMount};
 use runtime::Sandbox as RuntimeSandbox;
@@ -841,6 +842,7 @@ fn handle_connection(
     };
     let mut reader = BufReader::new(read_stream);
     let mut line = String::new();
+    let mut first = true;
 
     loop {
         line.clear();
@@ -850,6 +852,29 @@ fn handle_connection(
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+
+                if first {
+                    first = false;
+                    if let Ok(nanosb_protocol::Request::Hello(hello)) =
+                        serde_json::from_str::<nanosb_protocol::Request>(trimmed)
+                    {
+                        let ctx = proto::Ctx {
+                            sandbox_dir,
+                            sandbox_name: _sandbox_name,
+                            started_at: _started_at,
+                            config_hash: _config_hash,
+                            scrollback,
+                            subscribers: &subscribers,
+                            stdin_writer: stdin_writer.clone(),
+                            stop_requested,
+                            force_stop,
+                            running: _running,
+                            next_subscriber_id: &next_subscriber_id,
+                        };
+                        proto::serve(stream, reader, &ctx, hello);
+                        return;
+                    }
                 }
 
                 let request: ControlRequest = match serde_json::from_str(trimmed) {

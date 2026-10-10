@@ -42,9 +42,21 @@ authors = ["DevDone Labs"]
 name = "nanosb"
 path = "src/main.rs"
 
+[[bin]]
+name = "nanosb-runtime"
+path = "src/bin/nanosb_runtime.rs"
+
+[features]
+default = []
+# The slim helper profile (WS1). Selects the supervisor + protocol substrate
+# without pulling in TUI-only functionality at runtime.
+runtime-host = []
+
 [dependencies]
 sandbox = { path = "sandbox/crates/sandbox" }
 runtime = { path = "runtime/crates/runtime" }
+nanosb-protocol = { path = "crates/protocol" }
+nanosb-client = { path = "crates/client" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

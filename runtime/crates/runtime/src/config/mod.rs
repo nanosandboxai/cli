@@ -205,6 +205,14 @@ pub struct SandboxConfig {
     /// Guest vsock port the host socket is bridged to.
     #[serde(default)]
     pub vsock_port: Option<u32>,
+
+    /// Arbitrary key/value labels for attribution and filtering.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
+    /// Ephemeral sandboxes are removed automatically once they stop.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 fn default_cpus() -> u32 {
@@ -252,6 +260,8 @@ impl Default for SandboxConfig {
             extra_mounts: Vec::new(),
             vsock_socket: None,
             vsock_port: None,
+            labels: HashMap::new(),
+            ephemeral: false,
         }
     }
 }

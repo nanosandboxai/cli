@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use nanosb_protocol::{FsEntry, FsRequest, FsResponse, FsStat};
+
 /// Which output stream a chunk came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stream {
@@ -402,12 +404,151 @@ fn read_len(stream: &mut UnixStream) -> ExecResultT<Option<usize>> {
     Ok(Some(u32::from_le_bytes(len_buf) as usize))
 }
 
+impl ExecClient {
+    fn simple_call(&self, request: &FsRequest) -> ExecResultT<FsResponse> {
+        let mut stream = self.connect()?;
+        let body = serde_json::to_vec(request)
+            .map_err(|e| ExecError::Protocol(format!("serialize fs request: {}", e)))?;
+        let len = (body.len() as u32).to_le_bytes();
+        stream.write_all(&len)?;
+        stream.write_all(&body)?;
+        stream.flush()?;
+        let len = read_len(&mut stream)?
+            .ok_or_else(|| ExecError::Protocol("connection closed before fs response".into()))?;
+        let mut buf = vec![0u8; len];
+        stream.read_exact(&mut buf)?;
+        serde_json::from_slice(&buf)
+            .map_err(|e| ExecError::Protocol(format!("decode fs response: {}", e)))
+    }
+
+    fn fs_ok(resp: FsResponse) -> ExecResultT<()> {
+        match resp {
+            FsResponse::Ok => Ok(()),
+            FsResponse::Error { message } => Err(ExecError::Agent(message)),
+            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+        }
+    }
+
+    /// Read a file's contents (optionally a byte range).
+    pub fn fs_read(
+        &self,
+        path: &str,
+        offset: Option<u64>,
+        length: Option<u64>,
+    ) -> ExecResultT<Vec<u8>> {
+        match self.simple_call(&FsRequest::FsRead {
+            path: path.to_string(),
+            offset,
+            length,
+        })? {
+            FsResponse::FsData { data_base64 } => nanosb_protocol::base64_decode(&data_base64)
+                .ok_or_else(|| ExecError::Protocol("invalid base64 from guest".into())),
+            FsResponse::Error { message } => Err(ExecError::Agent(message)),
+            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+        }
+    }
+
+    /// Read a file as UTF-8 text (lossy on invalid sequences).
+    pub fn fs_read_to_string(&self, path: &str) -> ExecResultT<String> {
+        Ok(String::from_utf8_lossy(&self.fs_read(path, None, None)?).to_string())
+    }
+
+    /// Write bytes to a file.
+    pub fn fs_write(
+        &self,
+        path: &str,
+        data: &[u8],
+        append: bool,
+        mode: Option<u32>,
+    ) -> ExecResultT<()> {
+        Self::fs_ok(self.simple_call(&FsRequest::FsWrite {
+            path: path.to_string(),
+            data_base64: nanosb_protocol::base64_encode(data),
+            append,
+            mode,
+        })?)
+    }
+
+    /// List a directory.
+    pub fn fs_list(&self, path: &str) -> ExecResultT<Vec<FsEntry>> {
+        match self.simple_call(&FsRequest::FsList {
+            path: path.to_string(),
+        })? {
+            FsResponse::FsEntries { entries } => Ok(entries),
+            FsResponse::Error { message } => Err(ExecError::Agent(message)),
+            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+        }
+    }
+
+    /// Stat a path.
+    pub fn fs_stat(&self, path: &str) -> ExecResultT<FsStat> {
+        match self.simple_call(&FsRequest::FsStat {
+            path: path.to_string(),
+        })? {
+            FsResponse::FsStat { stat } => Ok(stat),
+            FsResponse::Error { message } => Err(ExecError::Agent(message)),
+            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+        }
+    }
+
+    /// Whether a path exists.
+    pub fn fs_exists(&self, path: &str) -> ExecResultT<bool> {
+        match self.simple_call(&FsRequest::FsExists {
+            path: path.to_string(),
+        })? {
+            FsResponse::FsExists { exists } => Ok(exists),
+            FsResponse::Error { message } => Err(ExecError::Agent(message)),
+            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+        }
+    }
+
+    /// Create a directory.
+    pub fn fs_mkdir(&self, path: &str, recursive: bool, mode: Option<u32>) -> ExecResultT<()> {
+        Self::fs_ok(self.simple_call(&FsRequest::FsMkdir {
+            path: path.to_string(),
+            recursive,
+            mode,
+        })?)
+    }
+
+    /// Remove a file.
+    pub fn fs_remove(&self, path: &str) -> ExecResultT<()> {
+        Self::fs_ok(self.simple_call(&FsRequest::FsRemove {
+            path: path.to_string(),
+        })?)
+    }
+
+    /// Remove a directory.
+    pub fn fs_remove_dir(&self, path: &str, recursive: bool) -> ExecResultT<()> {
+        Self::fs_ok(self.simple_call(&FsRequest::FsRemoveDir {
+            path: path.to_string(),
+            recursive,
+        })?)
+    }
+
+    /// Copy a path inside the guest.
+    pub fn fs_copy(&self, from: &str, to: &str) -> ExecResultT<()> {
+        Self::fs_ok(self.simple_call(&FsRequest::FsCopy {
+            from: from.to_string(),
+            to: to.to_string(),
+        })?)
+    }
+
+    /// Rename a path inside the guest.
+    pub fn fs_rename(&self, from: &str, to: &str) -> ExecResultT<()> {
+        Self::fs_ok(self.simple_call(&FsRequest::FsRename {
+            from: from.to_string(),
+            to: to.to_string(),
+        })?)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::net::UnixListener;
-
     /// Spawn a fake agent on a temp socket; returns (path, join-handle).
     fn fake_agent<F>(handler: F) -> (PathBuf, std::thread::JoinHandle<()>)
     where

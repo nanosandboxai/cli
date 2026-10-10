@@ -19,12 +19,14 @@
 pub mod base64;
 pub mod error;
 pub mod frame;
+pub mod guest_fs;
 pub mod hello;
 pub mod types;
 pub mod verbs;
 
 pub use base64::{decode as base64_decode, encode as base64_encode};
 pub use error::{ErrorCode, ProtocolError};
+pub use guest_fs::{FsRequest, FsResponse};
 pub use frame::{read_message, write_message};
 pub use hello::{cmp_version, version_in_range, Capability, HelloRequest, HelloResponse};
 pub use types::*;

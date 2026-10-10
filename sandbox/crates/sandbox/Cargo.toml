@@ -10,11 +10,10 @@ keywords = ["sandbox", "agent", "mcp", "skills"]
 categories = ["development-tools"]
 
 [lib]
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [features]
 default = []
-ffi = []
 
 [dependencies]
 # Runtime (VM engine) — local path inside the monorepo workspace.
