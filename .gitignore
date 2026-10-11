@@ -30,3 +30,7 @@ desktop/
 
 # Cross-compiled guest binaries (built on demand)
 guest/crates/exec-agent/target/
+
+# Python
+__pycache__/
+*.pyc
