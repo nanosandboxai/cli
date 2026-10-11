@@ -34,3 +34,9 @@ guest/crates/exec-agent/target/
 # Python
 __pycache__/
 *.pyc
+
+# SDK build output (Maven / .NET)
+sdks/java/target/
+sdks/dotnet/**/bin/
+sdks/dotnet/**/obj/
+sdks/dotnet/**/TestResults/
