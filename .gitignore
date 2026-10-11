@@ -40,3 +40,7 @@ sdks/java/target/
 sdks/dotnet/**/bin/
 sdks/dotnet/**/obj/
 sdks/dotnet/**/TestResults/
+
+# Kotlin build output
+sdks/kotlin/classes/
+sdks/kotlin/*.jar
