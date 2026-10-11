@@ -1,0 +1,36 @@
+{
+  "id": "volumes_crud",
+  "description": "create, list, get and remove a named volume",
+  "capabilities": ["lifecycle", "volumes"],
+  "steps": [
+    {
+      "expect": {
+        "type": "volume_create",
+        "name": "box",
+        "volume": { "name": "data", "dir": "/host/volumes/data" }
+      },
+      "respond": { "type": "volume", "name": "data", "dir": "/host/volumes/data", "used_bytes": 0 }
+    },
+    {
+      "expect": { "type": "volume_list", "name": "box" },
+      "respond": {
+        "type": "volumes",
+        "volumes": [{ "name": "data", "dir": "/host/volumes/data", "used_bytes": 0 }]
+      }
+    },
+    {
+      "expect": { "type": "volume_get", "name": "box", "volume": "data" },
+      "respond": { "type": "volume", "name": "data", "dir": "/host/volumes/data", "used_bytes": 0 }
+    },
+    {
+      "expect": { "type": "volume_remove", "name": "box", "volume": "data" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "volume_created": "data",
+    "volumes_contain": ["data"],
+    "volume_get_name": "data",
+    "remove_acked": true
+  }
+}

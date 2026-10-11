@@ -1,0 +1,44 @@
+{
+  "id": "lifecycle_full_flow",
+  "description": "create, start, exec, stop, remove — proves steps are consumed in order",
+  "capabilities": ["lifecycle", "exec"],
+  "steps": [
+    {
+      "expect": {
+        "type": "create",
+        "spec": { "name": "box", "image": "alpine:latest" }
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "start", "name": "box" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "exec", "name": "box", "command": "echo" },
+      "respond": {
+        "type": "exec_result",
+        "exit_code": 0,
+        "stdout": "hi\n",
+        "stderr": "",
+        "duration_ms": 1
+      }
+    },
+    {
+      "expect": { "type": "stop", "name": "box", "force": false },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "remove", "name": "box", "force": false },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "create_acked": true,
+    "start_acked": true,
+    "exec_exit_code": 0,
+    "exec_stdout": "hi\n",
+    "stop_acked": true,
+    "remove_acked": true
+  }
+}

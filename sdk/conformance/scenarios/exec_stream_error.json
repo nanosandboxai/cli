@@ -1,0 +1,19 @@
+{
+  "id": "exec_stream_error",
+  "description": "streamed exec surfaces stderr and a non-zero exit",
+  "capabilities": ["lifecycle", "exec"],
+  "steps": [
+    {
+      "expect": { "type": "exec_stream", "name": "box", "command": "false" },
+      "respond": [
+        { "type": "ok", "version": "1.0.0" },
+        { "type": "guest", "event": "stderr", "data": "boom\n" },
+        { "type": "guest", "event": "exit", "code": 1 }
+      ]
+    }
+  ],
+  "assert": {
+    "exit_code": 1,
+    "stderr_contains": ["boom"]
+  }
+}

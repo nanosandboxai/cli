@@ -4,15 +4,17 @@
 
 ## Overview
 
-Wraps the [nanosandbox](https://github.com/nanosandboxai/runtime) runtime crate with agent-specific functionality. This is the SDK interface that other language SDKs bind to via C FFI. It provides sandbox lifecycle management, `sandbox.yml` configuration, and host-side config delivery (MCP servers, skills, agent commands) via the `deploy` module.
+Wraps the [nanosandbox](https://github.com/nanosandboxai/runtime) runtime crate with agent-specific functionality. Language SDKs talk to the `nanosb-runtime` helper over the versioned NDJSON protocol (`nanosb-protocol` / `nanosb-client`) rather than a C ABI. It provides sandbox lifecycle management, `sandbox.yml` configuration, and host-side config delivery (MCP servers, skills, agent commands) via the `deploy` module.
 
 ## Architecture
 
 ```
-Language SDKs (Python, Node, Go)
-       | (C FFI bindings)
-   Sandbox SDK (this repo)
+Language SDKs (Rust, Python, Node, Go, Ruby, Java, C#)
+       | (NDJSON protocol over a local socket)
+   nanosb-runtime helper  (nanosb-protocol + nanosb-client)
        | (Rust dependency)
+   Sandbox SDK (this crate)  -- agent-aware planning (MCP/skills/deploy)
+       |
    Nanosandbox Runtime
        |
    libkrun (microVM)
@@ -41,12 +43,17 @@ All agent configuration is delivered at deploy time via the `deploy` module:
 
 No in-VM CRUD APIs remain. Config is regenerated host-side on every deploy and merged into the agent state mounts.
 
-## FFI Bindings
+## Protocol SDKs
 
-The sandbox crate exposes C ABI functions for multi-language SDK support:
+The C FFI is retired (Epic 1, WS8). Multi-language support is protocol-first:
 
-- Build with `cargo build --release --features ffi` to produce `libnanosandbox_sdk.so` (Linux) or `libnanosandbox_sdk.dylib` (macOS).
-- Language SDKs in Python, Node, and Go bind to these exported functions.
+- **`nanosb-protocol`** (`crates/protocol`) — the versioned NDJSON control
+  protocol: wire types, a `hello` version + capability handshake, and the full
+  verb set (lifecycle, exec, fs, logs, metrics, volumes, secrets, snapshots).
+- **`nanosb-client`** (`crates/client`) — `SandboxClient`, the reference
+  protocol client, with a `Local` backend (implemented) and `Cloud` stub.
+- **`nanosb-runtime`** — the slim helper binary that serves the protocol on a
+  local socket.
 
 ## Crate Structure
 
@@ -73,7 +80,6 @@ sandbox/
 │           ├── settings.rs         # User settings
 │           └── error.rs            # Error types
 └── docs/
-    └── sdk-bindings.md             # FFI documentation
 ```
 
 ## Build Instructions
@@ -85,8 +91,8 @@ cargo build -p sandbox
 # Run tests
 cargo test -p sandbox
 
-# Build as shared library (for FFI)
-cargo build --release -p sandbox --features ffi
+# Build the slim protocol helper (from the workspace root)
+cargo build --release -p nanosb-cli --bin nanosb-runtime
 ```
 
 ## Supported Agent Types

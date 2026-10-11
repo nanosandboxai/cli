@@ -1,0 +1,23 @@
+# Protocol Documentation
+
+The wire contract between the `nanosb-runtime` helper and every language SDK,
+published for Epic 1 (Multi-language Sandbox SDK). The authoritative
+implementation is the frozen `crates/protocol` crate; these documents mirror it.
+
+## Documents
+
+- **[`protocol.md`](protocol.md)** — the protocol specification: the
+  helper-based substrate (no C FFI), the Unix-socket NDJSON transport, the
+  hello/version/capability handshake, every request verb and response variant,
+  the shared message types, streaming semantics, error codes, and the guest
+  filesystem frames.
+- **[`conformance.md`](conformance.md)** — the conformance harness: the scenario
+  schema, the per-SDK driver contract, and the `expect.type` → SDK-operation
+  mapping. The authoritative contract is
+  [`sdk/conformance/SPEC.md`](../../sdk/conformance/SPEC.md).
+
+## Related
+
+- Epic: [`docs/epics/epic-1-multi-language-sdk.md`](../epics/epic-1-multi-language-sdk.md)
+- Conformance corpus: [`sdk/conformance/`](../../sdk/conformance/)
+- Protocol crate: [`crates/protocol/`](../../crates/protocol/)

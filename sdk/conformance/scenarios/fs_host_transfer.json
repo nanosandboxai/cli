@@ -1,0 +1,29 @@
+{
+  "id": "fs_host_transfer",
+  "description": "copy a file from the host into the guest and back out",
+  "capabilities": ["lifecycle", "fs"],
+  "steps": [
+    {
+      "expect": {
+        "type": "fs_copy_from_host",
+        "name": "box",
+        "host_path": "/host/in.txt",
+        "guest_path": "/tmp/in.txt"
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": {
+        "type": "fs_copy_to_host",
+        "name": "box",
+        "host_path": "/host/out.txt",
+        "guest_path": "/tmp/out.txt"
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "copy_from_host_acked": true,
+    "copy_to_host_acked": true
+  }
+}

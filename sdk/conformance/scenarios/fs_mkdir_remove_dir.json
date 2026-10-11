@@ -1,0 +1,19 @@
+{
+  "id": "fs_mkdir_remove_dir",
+  "description": "create a directory tree then remove it recursively",
+  "capabilities": ["lifecycle", "fs"],
+  "steps": [
+    {
+      "expect": { "type": "fs_mkdir", "name": "box", "path": "/tmp/a/b", "recursive": true },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "fs_remove_dir", "name": "box", "path": "/tmp/a", "recursive": true },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "mkdir_acked": true,
+    "remove_dir_acked": true
+  }
+}

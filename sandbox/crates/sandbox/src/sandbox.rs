@@ -252,6 +252,7 @@ impl Sandbox {
                         host_port,
                         container_port: 8080,
                         protocol: "tcp".to_string(),
+                        bind_address: None,
                     });
             }
             if needs_22 {
@@ -265,6 +266,7 @@ impl Sandbox {
                         host_port,
                         container_port: 22,
                         protocol: "tcp".to_string(),
+                        bind_address: None,
                     });
             }
 

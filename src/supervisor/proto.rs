@@ -1,0 +1,1275 @@
+//! Serves the `nanosb-protocol` verb set on a supervisor control connection.
+//!
+//! A connection is served in "new" mode only when its opening frame is a
+//! `hello`; a connection that opens with a legacy `ControlRequest` keeps the
+//! original framing. This keeps the CLI/TUI wire-compatible while letting SDK
+//! clients speak the versioned protocol.
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use nanosb_protocol::{
+    base64_encode, Capability, ExecResult, FsWriteStreamSpec, GuestEvent, HelloRequest,
+    HelloResponse, LogLine, LogSource, Metrics, ModifySpec, Request, Response, SandboxInfo,
+    SecretRef, SecretSetSpec, StreamEvent, PROTOCOL_VERSION,
+};
+use runtime::exec::{ExecClient, ExecHandle, ExecOptions};
+
+use crate::supervisor::secrets::SecretStore;
+use crate::supervisor::volumes::{VolumeError, VolumeRegistry};
+use crate::supervisor::{read_current_state, ScrollbackRing, Subscribers};
+
+fn map_state(s: crate::supervisor::SandboxState) -> nanosb_protocol::SandboxState {
+    use crate::supervisor::SandboxState as S;
+    use nanosb_protocol::SandboxState as P;
+    match s {
+        S::Starting => P::Starting,
+        S::Running => P::Running,
+        S::Stopped => P::Stopped,
+        S::Error => P::Error,
+    }
+}
+
+/// Per-connection context borrowed from the supervisor.
+pub struct Ctx<'a> {
+    pub sandbox_dir: &'a std::path::Path,
+    pub sandbox_name: &'a str,
+    pub started_at: &'a str,
+    pub config_hash: &'a str,
+    pub scrollback: &'a Arc<Mutex<ScrollbackRing>>,
+    pub subscribers: &'a Subscribers,
+    pub stdin_writer: Arc<Mutex<std::io::PipeWriter>>,
+    pub stop_requested: &'a AtomicBool,
+    pub force_stop: &'a AtomicBool,
+    pub running: &'a AtomicBool,
+    pub next_subscriber_id: &'a Arc<AtomicU64>,
+    pub secrets: &'a SecretStore,
+    pub volumes: &'a VolumeRegistry,
+    pub exec_session: &'a Mutex<Option<ExecHandle>>,
+}
+
+const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn capabilities() -> Vec<Capability> {
+    vec![
+        Capability::Lifecycle,
+        Capability::Exec,
+        Capability::Fs,
+        Capability::Logs,
+        Capability::Metrics,
+        Capability::Networking,
+        Capability::Handles,
+        Capability::Ephemeral,
+        Capability::Secrets,
+        Capability::Volumes,
+    ]
+}
+
+/// Serve a "new mode" connection: `hello` already parsed from the first frame.
+pub fn serve(
+    mut stream: UnixStream,
+    mut reader: BufReader<UnixStream>,
+    ctx: &Ctx,
+    hello: HelloRequest,
+) {
+    let _ = stream.set_nonblocking(false);
+
+    if !hello.accepts(PROTOCOL_VERSION) {
+        let err = Response::Error(nanosb_protocol::ProtocolError::new(
+            nanosb_protocol::ErrorCode::IncompatibleVersion,
+            format!(
+                "helper speaks {} but client range is {}..{}",
+                PROTOCOL_VERSION, hello.protocol_min, hello.protocol_max
+            ),
+        ));
+        let _ = send(&mut stream, &err);
+        return;
+    }
+    let hello_ok = Response::HelloOk(HelloResponse {
+        protocol: PROTOCOL_VERSION.to_string(),
+        helper_version: HELPER_VERSION.to_string(),
+        capabilities: capabilities(),
+    });
+    if send(&mut stream, &hello_ok).is_err() {
+        return;
+    }
+
+    let mut scratch = String::new();
+    loop {
+        scratch.clear();
+        match reader.read_line(&mut scratch) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = scratch.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let req: Request = match serde_json::from_str(trimmed) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = send(
+                            &mut stream,
+                            &Response::Error(nanosb_protocol::ProtocolError::bad_request(format!(
+                                "invalid request: {e}"
+                            ))),
+                        );
+                        continue;
+                    }
+                };
+                if handle(&mut stream, &mut reader, ctx, req).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn send(stream: &mut UnixStream, resp: &Response) -> std::io::Result<()> {
+    let line = serde_json::to_string(resp).unwrap_or_default();
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()
+}
+
+fn send_error(stream: &mut UnixStream, code: nanosb_protocol::ErrorCode, msg: impl Into<String>) {
+    let _ = send(
+        stream,
+        &Response::Error(nanosb_protocol::ProtocolError::new(code, msg)),
+    );
+}
+
+fn unsupported(stream: &mut UnixStream, msg: impl Into<String>) -> std::io::Result<()> {
+    send_error(stream, nanosb_protocol::ErrorCode::Unsupported, msg);
+    Ok(())
+}
+
+fn exec_client(ctx: &Ctx) -> ExecClient {
+    ExecClient::new(ctx.sandbox_dir.join("exec.sock"))
+}
+
+fn handle(
+    stream: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    ctx: &Ctx,
+    req: Request,
+) -> std::io::Result<()> {
+    use nanosb_protocol::ErrorCode;
+    match req {
+        Request::Hello(_) => {
+            let resp = Response::HelloOk(HelloResponse {
+                protocol: PROTOCOL_VERSION.to_string(),
+                helper_version: HELPER_VERSION.to_string(),
+                capabilities: capabilities(),
+            });
+            send(stream, &resp)
+        }
+        Request::Ping => send(
+            stream,
+            &Response::Pong {
+                version: HELPER_VERSION.to_string(),
+            },
+        ),
+        Request::Status { .. } => {
+            let state = read_current_state(ctx.sandbox_dir);
+            send(
+                stream,
+                &Response::Status {
+                    state: map_state(state.state),
+                    pid: state.pid,
+                    exit_code: state.exit_code,
+                    started_at: Some(state.started_at),
+                    config_hash: Some(state.config_hash),
+                },
+            )
+        }
+        Request::Get { .. } => {
+            let info = sandbox_info(ctx);
+            send(stream, &Response::Sandbox(info))
+        }
+        Request::List { .. } => send(
+            stream,
+            &Response::List(nanosb_protocol::SandboxList {
+                sandboxes: vec![sandbox_info(ctx)],
+                next_cursor: None,
+            }),
+        ),
+        Request::Stop { force, .. } => ack_stop(stream, ctx, force),
+        Request::Kill { .. } => ack_stop(stream, ctx, true),
+        Request::Remove { force, .. } => ack_stop(stream, ctx, force),
+        Request::Drain { .. } => ack_stop(stream, ctx, false),
+        Request::Touch { .. } => send(
+            stream,
+            &Response::Ok {
+                version: HELPER_VERSION.to_string(),
+            },
+        ),
+        Request::Pause { .. } => signal_vm(stream, ctx, libc::SIGSTOP),
+        Request::Resume { .. } => signal_vm(stream, ctx, libc::SIGCONT),
+        Request::Exec(spec) => exec_buffered(stream, ctx, spec.command, spec.args, spec.cwd, spec.env, spec.shell, spec.timeout_secs),
+        Request::Shell(spec) => {
+            exec_buffered(stream, ctx, spec.script, Vec::new(), spec.cwd, spec.env, true, spec.timeout_secs)
+        }
+        Request::ExecStream(spec) => {
+            let opts = ExecOptions {
+                workdir: spec.cwd.clone(),
+                env: spec.env.clone(),
+                shell: spec.shell,
+                timeout_secs: spec.timeout_secs,
+                ..ExecOptions::default()
+            };
+            let args: Vec<String> = spec.args.clone();
+            let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+            stream_exec_stream(stream, ctx, &spec.command, &argrefs, opts)
+        }
+        Request::Attach { .. } => stream_attach(stream, reader, ctx),
+        Request::Logs(spec) => handle_logs(stream, ctx, spec),
+        Request::Metrics { .. } => send(stream, &Response::Metrics(sample_metrics(ctx))),
+        Request::FsRead(p) => {
+            let c = exec_client(ctx);
+            match c.fs_read(&p.path, p.offset, p.length) {
+                Ok(bytes) => send(
+                    stream,
+                    &Response::FsData {
+                        data_base64: base64_encode(&bytes),
+                        eof: true,
+                    },
+                ),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsReadToString(p) => {
+            let c = exec_client(ctx);
+            match c.fs_read_to_string(&p.path) {
+                Ok(content) => send(stream, &Response::FsContent { content }),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsWrite(w) => {
+            let data = match nanosb_protocol::base64_decode(&w.data_base64) {
+                Some(d) => d,
+                None => {
+                    send_error(stream, ErrorCode::BadRequest, "invalid base64 payload");
+                    return Ok(());
+                }
+            };
+            let c = exec_client(ctx);
+            match c.fs_write(&w.path, &data, w.append, w.mode) {
+                Ok(()) => ack_ok(stream),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsWriteStream(spec) => fs_write_stream(stream, reader, ctx, spec),
+        Request::FsData { .. } => {
+            send_error(
+                stream,
+                ErrorCode::InvalidState,
+                "fs_data frame without an open fs_write_stream",
+            );
+            Ok(())
+        }
+        Request::FsList(p) => {
+            let c = exec_client(ctx);
+            match c.fs_list(&p.path) {
+                Ok(entries) => send(stream, &Response::FsEntries { entries }),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsStat(p) => {
+            let c = exec_client(ctx);
+            match c.fs_stat(&p.path) {
+                Ok(stat) => send(stream, &Response::FsStat(stat)),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsExists(p) => {
+            let c = exec_client(ctx);
+            match c.fs_exists(&p.path) {
+                Ok(exists) => send(stream, &Response::FsExists { exists }),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsMkdir(p) => {
+            let c = exec_client(ctx);
+            match c.fs_mkdir(&p.path, p.recursive, p.mode) {
+                Ok(()) => ack_ok(stream),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsRemove(p) => {
+            let c = exec_client(ctx);
+            match c.fs_remove(&p.path) {
+                Ok(()) => ack_ok(stream),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsRemoveDir(p) => {
+            let c = exec_client(ctx);
+            match c.fs_remove_dir(&p.path, p.recursive) {
+                Ok(()) => ack_ok(stream),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsCopy(p) => {
+            let c = exec_client(ctx);
+            match c.fs_copy(&p.from, &p.to) {
+                Ok(()) => ack_ok(stream),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsRename(p) => {
+            let c = exec_client(ctx);
+            match c.fs_rename(&p.from, &p.to) {
+                Ok(()) => ack_ok(stream),
+                Err(e) => Err(send_agent_error(stream, e)),
+            }
+        }
+        Request::FsCopyFromHost(p) => fs_copy_from_host(stream, ctx, &p.host_path, &p.guest_path),
+        Request::FsCopyToHost(p) => fs_copy_to_host(stream, ctx, &p.guest_path, &p.host_path),
+        Request::Create(_) => unsupported(stream, "verb is served by the helper daemon"),
+        Request::Start { .. } => handle_start(stream, ctx),
+        Request::Modify { spec, .. } => handle_modify(stream, ctx, spec),
+        Request::VolumeCreate(spec) => handle_volume_create(stream, ctx, spec),
+        Request::VolumeList { .. } => send(
+            stream,
+            &Response::Volumes {
+                volumes: ctx.volumes.list(),
+            },
+        ),
+        Request::VolumeGet(r) => match ctx.volumes.get(&r.volume) {
+            Ok(v) => send(stream, &Response::Volume(v)),
+            Err(e) => send_volume_error(stream, e),
+        },
+        Request::VolumeRemove(r) => match ctx.volumes.remove(&r.volume) {
+            Ok(()) => ack_ok(stream),
+            Err(e) => send_volume_error(stream, e),
+        },
+        Request::MountAdd(_) => unsupported(
+            stream,
+            "live mounts are not supported by this engine; declare mounts at create time",
+        ),
+        Request::SecretSet(spec) => handle_secret_set(stream, ctx, spec),
+        Request::SecretList { .. } => {
+            let secrets = ctx.secrets.list();
+            send(stream, &Response::Secrets { secrets })
+        }
+        Request::SecretRemove(spec) => handle_secret_remove(stream, ctx, spec),
+        Request::SnapshotCreate(_)
+        | Request::SnapshotRestore(_)
+        | Request::SnapshotFork(_)
+        | Request::SnapshotRemove { .. } => {
+            unsupported(stream, "snapshots are not available in this build")
+        }
+        Request::SnapshotList => send(
+            stream,
+            &Response::Snapshots {
+                snapshots: Vec::new(),
+            },
+        ),
+        Request::MetricsStream { interval_ms, .. } => stream_metrics(stream, ctx, interval_ms),
+        Request::AttachInput { data } => attach_input(stream, ctx, data),
+        Request::AttachResize { cols, rows } => attach_resize(stream, ctx, cols, rows),
+    }
+}
+
+fn ack_ok(stream: &mut UnixStream) -> std::io::Result<()> {
+    send(
+        stream,
+        &Response::Ok {
+            version: HELPER_VERSION.to_string(),
+        },
+    )
+}
+
+fn ack_stop(stream: &mut UnixStream, ctx: &Ctx, force: bool) -> std::io::Result<()> {
+    if force {
+        ctx.force_stop.store(true, Ordering::SeqCst);
+    }
+    ctx.stop_requested.store(true, Ordering::SeqCst);
+    ack_ok(stream)
+}
+
+fn signal_vm(stream: &mut UnixStream, ctx: &Ctx, sig: i32) -> std::io::Result<()> {
+    let state = read_current_state(ctx.sandbox_dir);
+    match state.pid {
+        Some(pid) if pid > 0 => {
+            unsafe {
+                libc::kill(pid, sig);
+            }
+            ack_ok(stream)
+        }
+        _ => {
+            send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "sandbox has no running VM");
+            Ok(())
+        }
+    }
+}
+
+fn handle_start(stream: &mut UnixStream, ctx: &Ctx) -> std::io::Result<()> {
+    let state = read_current_state(ctx.sandbox_dir);
+    match state.state {
+        crate::supervisor::SandboxState::Running | crate::supervisor::SandboxState::Starting => {
+            ack_ok(stream)
+        }
+        _ => {
+            send_error(
+                stream,
+                nanosb_protocol::ErrorCode::InvalidState,
+                "sandbox is not running and cannot be restarted by this engine",
+            );
+            Ok(())
+        }
+    }
+}
+
+fn handle_modify(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    spec: ModifySpec,
+) -> std::io::Result<()> {
+    match apply_modify(ctx.sandbox_dir, &spec) {
+        Ok(()) => ack_ok(stream),
+        Err(e) => {
+            send_error(stream, nanosb_protocol::ErrorCode::Internal, format!("modify failed: {e}"));
+            Ok(())
+        }
+    }
+}
+
+fn apply_modify(sandbox_dir: &std::path::Path, spec: &ModifySpec) -> std::io::Result<()> {
+    let path = sandbox_dir.join("config.json");
+    let mut cfg: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(v) = spec.idle_timeout_secs {
+        cfg["idle_timeout_secs"] = serde_json::json!(v);
+    }
+    if let Some(v) = spec.max_duration_secs {
+        cfg["max_duration_secs"] = serde_json::json!(v);
+    }
+    if !spec.labels.is_empty() {
+        let labels = cfg
+            .as_object_mut()
+            .map(|o| o.entry("labels").or_insert_with(|| serde_json::json!({})));
+        if let Some(serde_json::Value::Object(map)) = labels {
+            for (k, v) in &spec.labels {
+                map.insert(k.clone(), serde_json::json!(v));
+            }
+        }
+    }
+    let json = serde_json::to_string_pretty(&cfg)?;
+    std::fs::write(&path, json)
+}
+
+fn handle_secret_set(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    spec: SecretSetSpec,
+) -> std::io::Result<()> {
+    ctx.secrets.set(spec.key, spec.value);
+    ack_ok(stream)
+}
+
+fn handle_volume_create(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    spec: nanosb_protocol::VolumeCreateSpec,
+) -> std::io::Result<()> {
+    match ctx.volumes.create(&spec.volume) {
+        Ok(v) => send(stream, &Response::Volume(v)),
+        Err(e) => send_volume_error(stream, e),
+    }
+}
+
+fn send_volume_error(stream: &mut UnixStream, e: VolumeError) -> std::io::Result<()> {
+    send(stream, &Response::Error(e.to_protocol()))
+}
+
+fn handle_secret_remove(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    spec: SecretRef,
+) -> std::io::Result<()> {
+    ctx.secrets.remove(&spec.key);
+    ack_ok(stream)
+}
+
+fn ensure_exec_session(ctx: &Ctx) -> Result<(), String> {
+    let c = exec_client(ctx);
+    if !c.is_available() {
+        return Err("exec channel is not available".to_string());
+    }
+    let mut session = ctx
+        .exec_session
+        .lock()
+        .map_err(|_| "interactive session lock poisoned".to_string())?;
+    if session.is_none() {
+        let handle = c
+            .start("/bin/sh", &[], ExecOptions::default().tty(true))
+            .map_err(|e| format!("cannot start interactive session: {e}"))?;
+        *session = Some(handle);
+    }
+    Ok(())
+}
+
+fn drain_session(h: &mut ExecHandle) {
+    loop {
+        match h.next_event(Some(Duration::ZERO)) {
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+}
+
+fn attach_input(stream: &mut UnixStream, ctx: &Ctx, data: String) -> std::io::Result<()> {
+    if let Err(msg) = ensure_exec_session(ctx) {
+        send_error(stream, nanosb_protocol::ErrorCode::InvalidState, msg);
+        return Ok(());
+    }
+    let write_result = {
+        let mut session = match ctx.exec_session.lock() {
+            Ok(s) => s,
+            Err(_) => {
+                send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session lock poisoned");
+                return Ok(());
+            }
+        };
+        let Some(h) = session.as_mut() else {
+            send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session unavailable");
+            return Ok(());
+        };
+        let r = h.write_stdin(&data);
+        drain_session(h);
+        r
+    };
+    if let Err(e) = write_result {
+        send_error(stream, nanosb_protocol::ErrorCode::InvalidState, format!("stdin write failed: {e}"));
+        return Ok(());
+    }
+    ack_ok(stream)
+}
+
+fn attach_resize(stream: &mut UnixStream, ctx: &Ctx, cols: u16, rows: u16) -> std::io::Result<()> {
+    if let Err(msg) = ensure_exec_session(ctx) {
+        send_error(stream, nanosb_protocol::ErrorCode::InvalidState, msg);
+        return Ok(());
+    }
+    let resize_result = {
+        let mut session = match ctx.exec_session.lock() {
+            Ok(s) => s,
+            Err(_) => {
+                send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session lock poisoned");
+                return Ok(());
+            }
+        };
+        let Some(h) = session.as_mut() else {
+            send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session unavailable");
+            return Ok(());
+        };
+        h.resize(cols, rows)
+    };
+    if let Err(e) = resize_result {
+        send_error(stream, nanosb_protocol::ErrorCode::InvalidState, format!("resize failed: {e}"));
+        return Ok(());
+    }
+    ack_ok(stream)
+}
+
+fn sandbox_info(ctx: &Ctx) -> SandboxInfo {
+    let state = read_current_state(ctx.sandbox_dir);
+    let config: serde_json::Value = std::fs::read_to_string(ctx.sandbox_dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    SandboxInfo {
+        name: ctx.sandbox_name.to_string(),
+        state: map_state(state.state),
+        image: config
+            .get("image")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        pid: state.pid,
+        exit_code: state.exit_code,
+        started_at: Some(state.started_at),
+        config_hash: Some(state.config_hash),
+        detached: true,
+        ephemeral: config
+            .get("ephemeral")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        labels: std::collections::HashMap::new(),
+    }
+}
+
+fn exec_buffered(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: std::collections::HashMap<String, String>,
+    shell: bool,
+    timeout_secs: Option<u64>,
+) -> std::io::Result<()> {
+    let c = exec_client(ctx);
+    if !c.is_available() {
+        send_error(
+            stream,
+            nanosb_protocol::ErrorCode::InvalidState,
+            "exec channel is not available (start the sandbox with --exec)",
+        );
+        return Ok(());
+    }
+    let opts = ExecOptions {
+        workdir: cwd,
+        env,
+        shell,
+        timeout_secs,
+        ..ExecOptions::default()
+    };
+    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+    match c.exec_with(&command, &argrefs, opts) {
+        Ok(r) => send(
+            stream,
+            &Response::ExecResult(ExecResult {
+                exit_code: r.exit_code,
+                stdout: r.stdout,
+                stderr: r.stderr,
+                duration_ms: r.duration_ms,
+            }),
+        ),
+        Err(e) => Err(send_agent_error(stream, e)),
+    }
+}
+
+fn stream_exec_stream(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    command: &str,
+    args: &[&str],
+    opts: ExecOptions,
+) -> std::io::Result<()> {
+    let c = exec_client(ctx);
+    if !c.is_available() {
+        send_error(
+            stream,
+            nanosb_protocol::ErrorCode::InvalidState,
+            "exec channel is not available",
+        );
+        return Ok(());
+    }
+    ack_ok(stream)?;
+    let writer = stream.try_clone()?;
+    let mut writer = writer;
+    let code = c.exec_stream(command, args, opts, |chunk| {
+        let ev = match chunk.stream {
+            runtime::exec::Stream::Stdout => GuestEvent::Stdout { data: chunk.data },
+            runtime::exec::Stream::Stderr => GuestEvent::Stderr { data: chunk.data },
+        };
+        let _ = send(&mut writer, &Response::Guest(ev));
+    });
+    let exit = match code {
+        Ok(c) => GuestEvent::Exit { code: c },
+        Err(e) => GuestEvent::Error {
+            message: e.to_string(),
+        },
+    };
+    send(stream, &Response::Guest(exit))
+}
+
+fn stream_attach(
+    stream: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    ctx: &Ctx,
+) -> std::io::Result<()> {
+    ack_ok(stream)?;
+    if let Ok(sb) = ctx.scrollback.lock() {
+        let data = sb.read_all();
+        if !data.is_empty() {
+            send(
+                stream,
+                &Response::Guest(GuestEvent::Stdout {
+                    data: String::from_utf8_lossy(&data).to_string(),
+                }),
+            )?;
+        }
+    }
+    let subscriber_id = ctx.next_subscriber_id.fetch_add(1, Ordering::SeqCst);
+    let mut registered = false;
+    if let Ok(clone) = stream.try_clone() {
+        let _ = clone.set_write_timeout(Some(Duration::from_secs(5)));
+        if let Ok(mut subs) = ctx.subscribers.lock() {
+            subs.push((subscriber_id, Arc::new(Mutex::new(clone))));
+            registered = true;
+        }
+    }
+    let mut input = String::new();
+    loop {
+        input.clear();
+        match reader.read_line(&mut input) {
+            Ok(0) => break,
+            Ok(_) => {
+                if let Ok(parsed) = serde_json::from_str::<nanosb_protocol::Request>(input.trim()) {
+                    match parsed {
+                        Request::AttachInput { data } => {
+                            if let Ok(mut w) = ctx.stdin_writer.lock() {
+                                let _ = w.write_all(data.as_bytes());
+                                let _ = w.flush();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if registered {
+        if let Ok(mut subs) = ctx.subscribers.lock() {
+            subs.retain(|(id, _)| *id != subscriber_id);
+        }
+    }
+    Ok(())
+}
+
+fn handle_logs(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    spec: nanosb_protocol::LogsSpec,
+) -> std::io::Result<()> {
+    let log_path = ctx.sandbox_dir.join("logs").join("console.log");
+    let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let all: Vec<&str> = content.lines().collect();
+    let start = match spec.tail {
+        Some(n) if all.len() > n => all.len() - n,
+        _ => 0,
+    };
+    let start = spec
+        .cursor
+        .map(|c| (c as usize).min(all.len()))
+        .unwrap_or(start);
+    let lines: Vec<LogLine> = all[start..]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| LogLine {
+            cursor: (start + i) as u64,
+            timestamp_ms: 0,
+            source: LogSource::Stdout,
+            data: (*l).to_string(),
+        })
+        .collect();
+    if !spec.follow {
+        return send(
+            stream,
+            &Response::Logs {
+                next_cursor: Some(all.len() as u64),
+                lines,
+            },
+        );
+    }
+    ack_ok(stream)?;
+    for line in lines {
+        send(stream, &Response::Event(StreamEvent::Log(line)))?;
+    }
+    let mut cursor = all.len();
+    let mut last_len = content.len();
+    while ctx.running.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(200));
+        let Ok(new_content) = std::fs::read_to_string(&log_path) else {
+            continue;
+        };
+        if new_content.len() > last_len {
+            let tail = &new_content[last_len..];
+            for l in tail.lines() {
+                cursor += 1;
+                send(
+                    stream,
+                    &Response::Event(StreamEvent::Log(LogLine {
+                        cursor: (cursor - 1) as u64,
+                        timestamp_ms: 0,
+                        source: LogSource::Stdout,
+                        data: l.to_string(),
+                    })),
+                )?;
+            }
+            last_len = new_content.len();
+        }
+    }
+    send(stream, &Response::Event(StreamEvent::Done))
+}
+
+fn stream_metrics(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    interval_ms: Option<u64>,
+) -> std::io::Result<()> {
+    ack_ok(stream)?;
+    let interval = Duration::from_millis(interval_ms.unwrap_or(1000).max(100));
+    while ctx.running.load(Ordering::SeqCst) {
+        send(stream, &Response::Event(StreamEvent::Metrics(sample_metrics(ctx))))?;
+        std::thread::sleep(interval);
+    }
+    send(stream, &Response::Event(StreamEvent::Done))
+}
+
+fn sample_metrics(ctx: &Ctx) -> Metrics {
+    let state = read_current_state(ctx.sandbox_dir);
+    let (rss_bytes, cpu_percent) = match state.pid {
+        Some(pid) if pid > 0 => sample_process(pid),
+        _ => (0, 0.0),
+    };
+    Metrics {
+        cpu_percent,
+        memory_used_bytes: rss_bytes,
+        memory_total_bytes: 0,
+        disk_used_bytes: dir_size(ctx.sandbox_dir),
+        disk_total_bytes: 0,
+        net_rx_bytes: 0,
+        net_tx_bytes: 0,
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    }
+}
+
+fn sample_process(pid: i32) -> (u64, f64) {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=,%cpu=", "-p", &pid.to_string()])
+        .output();
+    if let Ok(out) = out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut parts = text.split_whitespace();
+        let rss_kb: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let cpu: f64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        return (rss_kb * 1024, cpu);
+    }
+    (0, 0.0)
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    total += dir_size(&p);
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+fn fs_copy_from_host(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    host_path: &str,
+    guest_path: &str,
+) -> std::io::Result<()> {
+    let c = exec_client(ctx);
+    let host = std::path::Path::new(host_path);
+    if !host.exists() {
+        send_error(stream, nanosb_protocol::ErrorCode::NotFound, format!("host path {host_path} does not exist"));
+        return Ok(());
+    }
+    if host.is_dir() {
+        if let Err(e) = c.fs_mkdir(guest_path, true, None) {
+            return Err(send_agent_error(stream, e));
+        }
+        for entry in walk(host) {
+            let rel = entry.strip_prefix(host).unwrap_or(&entry);
+            let target = std::path::Path::new(guest_path).join(rel);
+            let target_str = target.to_string_lossy().to_string();
+            if entry.is_dir() {
+                let _ = c.fs_mkdir(&target_str, true, None);
+            } else if let Ok(data) = std::fs::read(&entry) {
+                if let Err(e) = c.fs_write(&target_str, &data, false, None) {
+                    return Err(send_agent_error(stream, e));
+                }
+            }
+        }
+    } else {
+        let data = std::fs::read(host).map_err(std::io::Error::other)?;
+        if let Err(e) = c.fs_write(guest_path, &data, false, None) {
+            return Err(send_agent_error(stream, e));
+        }
+    }
+    ack_ok(stream)
+}
+
+fn fs_copy_to_host(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    guest_path: &str,
+    host_path: &str,
+) -> std::io::Result<()> {
+    let c = exec_client(ctx);
+    match c.fs_stat(guest_path) {
+        Ok(stat) if stat.is_dir => {
+            let _ = std::fs::create_dir_all(host_path);
+            if let Ok(entries) = c.fs_list(guest_path) {
+                for e in entries {
+                    if e.is_dir {
+                        let _ = std::fs::create_dir_all(std::path::Path::new(host_path).join(&e.name));
+                    } else if !e.is_symlink {
+                        if let Ok(data) = c.fs_read(&e.path, None, None) {
+                            let _ = std::fs::write(std::path::Path::new(host_path).join(&e.name), data);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(_) => {
+            let data = c.fs_read(guest_path, None, None).map_err(std::io::Error::other)?;
+            std::fs::write(host_path, data).map_err(std::io::Error::other)?;
+        }
+        Err(e) => return Err(send_agent_error(stream, e)),
+    }
+    ack_ok(stream)
+}
+
+/// Serve a streamed fs write: open the guest stream, then read `FsData`
+/// frames from the connection until `eof`, acking each chunk.
+fn fs_write_stream(
+    stream: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    ctx: &Ctx,
+    spec: FsWriteStreamSpec,
+) -> std::io::Result<()> {
+    let c = exec_client(ctx);
+    if !c.is_available() {
+        send_error(
+            stream,
+            nanosb_protocol::ErrorCode::InvalidState,
+            "exec channel is not available",
+        );
+        return Ok(());
+    }
+    let mut ws = match c.fs_write_stream_open(&spec.path, spec.append, spec.mode) {
+        Ok(ws) => ws,
+        Err(e) => return Err(send_agent_error(stream, e)),
+    };
+    ack_ok(stream)?;
+    let mut input = String::new();
+    loop {
+        input.clear();
+        match reader.read_line(&mut input) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let req: Request = match serde_json::from_str(trimmed) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        send_error(
+                            stream,
+                            nanosb_protocol::ErrorCode::BadRequest,
+                            format!("invalid request during fs_write_stream: {e}"),
+                        );
+                        break;
+                    }
+                };
+                match req {
+                    Request::FsData { data_base64, eof } => {
+                        let bytes = match nanosb_protocol::base64_decode(&data_base64) {
+                            Some(d) => d,
+                            None => {
+                                send_error(
+                                    stream,
+                                    nanosb_protocol::ErrorCode::BadRequest,
+                                    "invalid base64 payload",
+                                );
+                                break;
+                            }
+                        };
+                        if let Err(e) = ws.write_chunk(&bytes) {
+                            return Err(send_agent_error(stream, e));
+                        }
+                        if eof {
+                            if let Err(e) = ws.close() {
+                                return Err(send_agent_error(stream, e));
+                            }
+                            return ack_ok(stream);
+                        }
+                        ack_ok(stream)?;
+                    }
+                    other => {
+                        send_error(
+                            stream,
+                            nanosb_protocol::ErrorCode::InvalidState,
+                            format!(
+                                "expected fs_data frame during fs_write_stream, got {}",
+                                serde_json::to_string(&other).unwrap_or_default()
+                            ),
+                        );
+                        break;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                out.push(p.clone());
+                if p.is_dir() {
+                    stack.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn send_agent_error(stream: &mut UnixStream, e: runtime::exec::ExecError) -> std::io::Error {
+    let msg = e.to_string();
+    let _ = send(
+        stream,
+        &Response::Error(nanosb_protocol::ProtocolError::io(msg)),
+    );
+    std::io::Error::other("guest agent error")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_modify_writes_mutable_fields() {
+        let dir = std::env::temp_dir().join(format!("nsb-modify-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"name":"t","image":"alpine","labels":{"a":"1"}}"#,
+        )
+        .unwrap();
+
+        let mut spec = ModifySpec::default();
+        spec.idle_timeout_secs = Some(120);
+        spec.max_duration_secs = Some(3600);
+        spec.labels.insert("b".to_string(), "2".to_string());
+        apply_modify(&dir, &spec).unwrap();
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(cfg["idle_timeout_secs"], 120);
+        assert_eq!(cfg["max_duration_secs"], 3600);
+        assert_eq!(cfg["labels"]["a"], "1");
+        assert_eq!(cfg["labels"]["b"], "2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_modify_preserves_other_fields() {
+        let dir = std::env::temp_dir().join(format!("nsb-modify2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"name":"t","image":"alpine","cpus":2}"#,
+        )
+        .unwrap();
+
+        let mut spec = ModifySpec::default();
+        spec.labels.insert("env".to_string(), "prod".to_string());
+        apply_modify(&dir, &spec).unwrap();
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(cfg["name"], "t");
+        assert_eq!(cfg["image"], "alpine");
+        assert_eq!(cfg["cpus"], 2);
+        assert_eq!(cfg["labels"]["env"], "prod");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_write_stream_streams_chunks_to_guest() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("nsb-fsws-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Fake guest exec agent on the sandbox's exec socket.
+        let exec_sock = dir.join("exec.sock");
+        let listener = UnixListener::bind(&exec_sock).unwrap();
+        let agent = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+            s.read_exact(&mut buf).unwrap();
+            let open: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(open["type"], "fs_write_stream_open");
+            assert_eq!(open["path"], "/tmp/guest.bin");
+            let resp = serde_json::to_vec(&serde_json::json!({"type":"ok"})).unwrap();
+            s.write_all(&(resp.len() as u32).to_le_bytes()).unwrap();
+            s.write_all(&resp).unwrap();
+            s.flush().unwrap();
+
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+            s.read_exact(&mut buf).unwrap();
+            let chunk: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(chunk["type"], "fs_write_chunk");
+            let data =
+                nanosb_protocol::base64_decode(chunk["data_base64"].as_str().unwrap()).unwrap();
+            assert_eq!(data, b"hello ");
+            let resp = serde_json::to_vec(&serde_json::json!({"type":"ok"})).unwrap();
+            s.write_all(&(resp.len() as u32).to_le_bytes()).unwrap();
+            s.write_all(&resp).unwrap();
+            s.flush().unwrap();
+
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+            s.read_exact(&mut buf).unwrap();
+            let chunk: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(chunk["type"], "fs_write_chunk");
+            let data =
+                nanosb_protocol::base64_decode(chunk["data_base64"].as_str().unwrap()).unwrap();
+            assert_eq!(data, b"world");
+            let resp = serde_json::to_vec(&serde_json::json!({"type":"ok"})).unwrap();
+            s.write_all(&(resp.len() as u32).to_le_bytes()).unwrap();
+            s.write_all(&resp).unwrap();
+            s.flush().unwrap();
+
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+            s.read_exact(&mut buf).unwrap();
+            let close: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(close["type"], "fs_write_close");
+            let resp = serde_json::to_vec(&serde_json::json!({"type":"ok"})).unwrap();
+            s.write_all(&(resp.len() as u32).to_le_bytes()).unwrap();
+            s.write_all(&resp).unwrap();
+            s.flush().unwrap();
+        });
+
+        let scrollback = Arc::new(Mutex::new(ScrollbackRing::new(1024)));
+        let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+        let (_, stdin_writer) = std::io::pipe().unwrap();
+        let stop_requested = AtomicBool::new(false);
+        let force_stop = AtomicBool::new(false);
+        let running = AtomicBool::new(true);
+        let next_subscriber_id = Arc::new(AtomicU64::new(0));
+        let secrets = SecretStore::new();
+        let volumes = VolumeRegistry::with_root(dir.join("volumes"));
+        let exec_session = Mutex::new(None::<ExecHandle>);
+        let ctx = Ctx {
+            sandbox_dir: &dir,
+            sandbox_name: "t",
+            started_at: "now",
+            config_hash: "hash",
+            scrollback: &scrollback,
+            subscribers: &subscribers,
+            stdin_writer: Arc::new(Mutex::new(stdin_writer)),
+            stop_requested: &stop_requested,
+            force_stop: &force_stop,
+            running: &running,
+            next_subscriber_id: &next_subscriber_id,
+            secrets: &secrets,
+            volumes: &volumes,
+            exec_session: &exec_session,
+        };
+
+        let (server, client) = UnixStream::pair().unwrap();
+        let server_clone = server.try_clone().unwrap();
+        let reader = BufReader::new(server_clone);
+        let hello_server = HelloRequest::new("test", PROTOCOL_VERSION);
+
+        let mut client = client;
+        let mut client_reader = BufReader::new(client.try_clone().unwrap());
+        let mut line = String::new();
+        let send_req = |client: &mut UnixStream, req: &Request| {
+            client
+                .write_all(serde_json::to_string(req).unwrap().as_bytes())
+                .unwrap();
+            client.write_all(b"\n").unwrap();
+            client.flush().unwrap();
+        };
+        let recv_resp = |client_reader: &mut BufReader<UnixStream>, line: &mut String| -> Response {
+            line.clear();
+            client_reader.read_line(line).unwrap();
+            serde_json::from_str(line.trim()).unwrap()
+        };
+
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                serve(server, reader, &ctx, hello_server);
+            });
+
+            // `serve` answers the handshake immediately (the caller consumed
+            // the hello frame), so the client only reads the HelloOk.
+            assert!(matches!(
+                recv_resp(&mut client_reader, &mut line),
+                Response::HelloOk(_)
+            ));
+
+            send_req(
+                &mut client,
+                &Request::FsWriteStream(FsWriteStreamSpec {
+                    name: None,
+                    path: "/tmp/guest.bin".to_string(),
+                    append: false,
+                    mode: None,
+                }),
+            );
+            assert!(matches!(
+                recv_resp(&mut client_reader, &mut line),
+                Response::Ok { .. }
+            ));
+
+            send_req(
+                &mut client,
+                &Request::FsData {
+                    data_base64: nanosb_protocol::base64_encode(b"hello "),
+                    eof: false,
+                },
+            );
+            assert!(matches!(
+                recv_resp(&mut client_reader, &mut line),
+                Response::Ok { .. }
+            ));
+
+            send_req(
+                &mut client,
+                &Request::FsData {
+                    data_base64: nanosb_protocol::base64_encode(b"world"),
+                    eof: true,
+                },
+            );
+            assert!(matches!(
+                recv_resp(&mut client_reader, &mut line),
+                Response::Ok { .. }
+            ));
+
+            drop(client);
+            drop(client_reader);
+        });
+        agent.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

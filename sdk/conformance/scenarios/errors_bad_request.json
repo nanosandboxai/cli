@@ -1,0 +1,27 @@
+{
+  "id": "errors_bad_request",
+  "description": "malformed requests and unsupported verbs surface typed errors",
+  "capabilities": ["lifecycle", "fs", "snapshots"],
+  "steps": [
+    {
+      "expect": { "type": "fs_read", "name": "box", "path": "/bad" },
+      "respond": {
+        "type": "error",
+        "code": "bad_request",
+        "message": "invalid path"
+      }
+    },
+    {
+      "expect": { "type": "snapshot_create", "name": "box" },
+      "respond": {
+        "type": "error",
+        "code": "unsupported",
+        "message": "snapshots are not enabled in this build"
+      }
+    }
+  ],
+  "assert": {
+    "error_code": "bad_request",
+    "second_error_code": "unsupported"
+  }
+}

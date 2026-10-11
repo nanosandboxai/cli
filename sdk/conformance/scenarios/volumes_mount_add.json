@@ -1,0 +1,18 @@
+{
+  "id": "volumes_mount_add",
+  "description": "mount a volume into a running sandbox",
+  "capabilities": ["lifecycle", "volumes"],
+  "steps": [
+    {
+      "expect": {
+        "type": "mount_add",
+        "name": "box",
+        "mount": { "host_path": "data", "guest_path": "/mnt/data", "mount_type": "bind" }
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "mount_add_acked": true
+  }
+}

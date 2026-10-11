@@ -1,0 +1,33 @@
+{
+  "id": "logs_tail_cursor",
+  "description": "fetch buffered logs with a tail limit then resume from a cursor",
+  "capabilities": ["lifecycle", "logs"],
+  "steps": [
+    {
+      "expect": { "type": "logs", "name": "box", "follow": false, "tail": 10 },
+      "respond": {
+        "type": "logs",
+        "lines": [
+          { "cursor": 0, "timestamp_ms": 1000, "source": "stdout", "data": "line one" },
+          { "cursor": 1, "timestamp_ms": 1001, "source": "stderr", "data": "line two" }
+        ],
+        "next_cursor": 2
+      }
+    },
+    {
+      "expect": { "type": "logs", "name": "box", "follow": false, "cursor": 2 },
+      "respond": {
+        "type": "logs",
+        "lines": [
+          { "cursor": 2, "timestamp_ms": 1002, "source": "stdout", "data": "line three" }
+        ],
+        "next_cursor": 3
+      }
+    }
+  ],
+  "assert": {
+    "lines_contain": ["line one", "line two"],
+    "next_cursor": 2,
+    "resume_lines_contain": ["line three"]
+  }
+}

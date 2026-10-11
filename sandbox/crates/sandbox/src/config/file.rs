@@ -238,6 +238,7 @@ fn parse_port(s: &str) -> Result<PortMapping, String> {
         host_port,
         container_port,
         protocol: proto,
+        bind_address: None,
     })
 }
 

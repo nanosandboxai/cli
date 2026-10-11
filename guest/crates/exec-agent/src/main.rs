@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 mod proto;
 mod vsock;
 
+use nanosb_protocol::{FsEntry, FsRequest, FsResponse, FsStat};
 use proto::{ExecControl, ExecEvent, ExecRequest};
 
 fn main() {
@@ -62,14 +63,18 @@ struct Writer {
 }
 
 impl Writer {
-    fn event(&self, event: &ExecEvent) -> Result<(), String> {
-        let json = serde_json::to_vec(event).map_err(|e| format!("serialize: {}", e))?;
+    fn send<T: serde::Serialize>(&self, value: &T) -> Result<(), String> {
+        let json = serde_json::to_vec(value).map_err(|e| format!("serialize: {}", e))?;
         let len = (json.len() as u32).to_le_bytes();
         let mut s = self.stream.lock().unwrap();
         s.write_all(&len)
             .and_then(|_| s.write_all(&json))
             .and_then(|_| s.flush())
             .map_err(|e| format!("write: {}", e))
+    }
+
+    fn event(&self, event: &ExecEvent) -> Result<(), String> {
+        self.send(event)
     }
 }
 
@@ -82,6 +87,8 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
 
     // The currently running session, if any.
     let mut active: Option<Session> = None;
+    // An open streamed fs write, if any.
+    let mut fs_stream: Option<FsStreamState> = None;
 
     loop {
         let frame = read_frame(&mut reader)?;
@@ -89,6 +96,7 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
             if let Some(mut s) = active.take() {
                 let _ = s.kill();
             }
+            fs_stream.take();
             return Ok(());
         };
 
@@ -98,6 +106,13 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
                 if let Err(e) = s.apply(ctl) {
                     writer.event(&ExecEvent::Error { message: e })?;
                 }
+            }
+            continue;
+        }
+
+        if let Ok(fs) = serde_json::from_slice::<FsRequest>(&bytes) {
+            if let Err(e) = handle_fs(fs, &mut fs_stream, &writer) {
+                writer.send(&FsResponse::error(e))?;
             }
             continue;
         }
@@ -129,6 +144,178 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
                 writer.event(&ExecEvent::Exit { code: 127 })?;
             }
         }
+    }
+}
+
+/// An open streamed fs write: the file handle is kept across `FsWriteChunk`
+/// frames until `FsWriteClose`.
+struct FsStreamState {
+    file: std::fs::File,
+    path: String,
+}
+
+fn handle_fs(req: FsRequest, fs_stream: &mut Option<FsStreamState>, w: &Writer) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    match req {
+        FsRequest::FsRead { path, offset, length } => {
+            let data = std::fs::read(&path).map_err(|e| format!("read {}: {}", path, e))?;
+            let start = offset.unwrap_or(0) as usize;
+            let end = match length {
+                Some(l) => start.saturating_add(l as usize),
+                None => data.len(),
+            };
+            let slice = data.get(start..end).unwrap_or(&[]);
+            w.send(&FsResponse::FsData {
+                data_base64: nanosb_protocol::base64_encode(slice),
+            })
+        }
+        FsRequest::FsWrite { path, data_base64, append, mode } => {
+            let bytes = nanosb_protocol::base64_decode(&data_base64)
+                .ok_or_else(|| "invalid base64 payload".to_string())?;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true);
+            if append {
+                opts.append(true);
+            } else {
+                opts.truncate(true);
+            }
+            let mut file = opts.open(&path).map_err(|e| format!("write {}: {}", path, e))?;
+            file.write_all(&bytes).map_err(|e| format!("write {}: {}", path, e))?;
+            if let Some(m) = mode {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m));
+            }
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsWriteStreamOpen { path, append, mode } => {
+            if fs_stream.is_some() {
+                return Err("a streamed write is already open".to_string());
+            }
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true);
+            if append {
+                opts.append(true);
+            } else {
+                opts.truncate(true);
+            }
+            let file = opts
+                .open(&path)
+                .map_err(|e| format!("open stream {}: {}", path, e))?;
+            if let Some(m) = mode {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m));
+            }
+            *fs_stream = Some(FsStreamState { file, path });
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsWriteChunk { data_base64 } => {
+            let bytes = nanosb_protocol::base64_decode(&data_base64)
+                .ok_or_else(|| "invalid base64 payload".to_string())?;
+            let st = fs_stream
+                .as_mut()
+                .ok_or_else(|| "no open streamed write".to_string())?;
+            st.file
+                .write_all(&bytes)
+                .map_err(|e| format!("stream write {}: {}", st.path, e))?;
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsWriteClose => {
+            let mut st = fs_stream
+                .take()
+                .ok_or_else(|| "no open streamed write".to_string())?;
+            st.file
+                .flush()
+                .map_err(|e| format!("flush {}: {}", st.path, e))?;
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsList { path } => {
+            let mut entries = Vec::new();
+            let dir = std::fs::read_dir(&path).map_err(|e| format!("list {}: {}", path, e))?;
+            for entry in dir {
+                let entry = entry.map_err(|e| format!("list {}: {}", path, e))?;
+                let p = entry.path();
+                let meta = entry.metadata().map_err(|e| format!("stat {}: {}", p.display(), e))?;
+                let sym = std::fs::symlink_metadata(&p).ok();
+                entries.push(FsEntry {
+                    name: entry.file_name().to_string_lossy().to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    is_dir: meta.is_dir(),
+                    is_symlink: sym.map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                    size: meta.len(),
+                    mode: Some(meta.permissions().mode()),
+                });
+            }
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            w.send(&FsResponse::FsEntries { entries })
+        }
+        FsRequest::FsStat { path } => {
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {}", path, e))?;
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            w.send(&FsResponse::FsStat {
+                stat: FsStat {
+                    path,
+                    is_dir: meta.is_dir(),
+                    is_symlink: meta.file_type().is_symlink(),
+                    size: meta.len(),
+                    mode: Some(meta.permissions().mode()),
+                    modified_ms,
+                },
+            })
+        }
+        FsRequest::FsExists { path } => w.send(&FsResponse::FsExists {
+            exists: Path::new(&path).exists(),
+        }),
+        FsRequest::FsMkdir { path, recursive, mode } => {
+            if recursive {
+                std::fs::create_dir_all(&path).map_err(|e| format!("mkdir {}: {}", path, e))?;
+            } else {
+                std::fs::create_dir(&path).map_err(|e| format!("mkdir {}: {}", path, e))?;
+            }
+            if let Some(m) = mode {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m));
+            }
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsRemove { path } => {
+            std::fs::remove_file(&path).map_err(|e| format!("remove {}: {}", path, e))?;
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsRemoveDir { path, recursive } => {
+            if recursive {
+                std::fs::remove_dir_all(&path).map_err(|e| format!("rmdir {}: {}", path, e))?;
+            } else {
+                std::fs::remove_dir(&path).map_err(|e| format!("rmdir {}: {}", path, e))?;
+            }
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsCopy { from, to } => {
+            copy_path(std::path::PathBuf::from(&from), std::path::PathBuf::from(&to))?;
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsRename { from, to } => {
+            std::fs::rename(&from, &to).map_err(|e| format!("rename {}: {}", from, e))?;
+            w.send(&FsResponse::Ok)
+        }
+    }
+}
+
+fn copy_path(from: std::path::PathBuf, to: std::path::PathBuf) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(&from).map_err(|e| format!("copy {}: {}", from.display(), e))?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(&to).map_err(|e| format!("copy dir {}: {}", to.display(), e))?;
+        for entry in std::fs::read_dir(&from).map_err(|e| format!("copy {}: {}", from.display(), e))? {
+            let entry = entry.map_err(|e| format!("copy {}: {}", from.display(), e))?;
+            copy_path(entry.path(), to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(&from, &to)
+            .map(|_| ())
+            .map_err(|e| format!("copy {}: {}", from.display(), e))
     }
 }
 

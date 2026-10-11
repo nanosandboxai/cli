@@ -1,0 +1,22 @@
+{
+  "id": "lifecycle_list",
+  "description": "list sandboxes and verify the returned page",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": { "type": "list", "all": false },
+      "respond": {
+        "type": "list",
+        "sandboxes": [
+          { "name": "box", "state": "running", "image": "alpine:latest", "pid": 4242, "labels": {} },
+          { "name": "idle", "state": "stopped", "image": "debian:latest", "labels": {} }
+        ],
+        "next_cursor": null
+      }
+    }
+  ],
+  "assert": {
+    "list_names": ["box", "idle"],
+    "list_states": ["running", "stopped"]
+  }
+}

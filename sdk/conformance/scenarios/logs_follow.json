@@ -1,0 +1,19 @@
+{
+  "id": "logs_follow",
+  "description": "follow logs as a stream of event frames terminated by done",
+  "capabilities": ["lifecycle", "logs"],
+  "steps": [
+    {
+      "expect": { "type": "logs", "name": "box", "follow": true },
+      "respond": [
+        { "type": "ok", "version": "1.0.0" },
+        { "type": "event", "event": "log", "cursor": 0, "timestamp_ms": 1000, "source": "stdout", "data": "boot" },
+        { "type": "event", "event": "log", "cursor": 1, "timestamp_ms": 1001, "source": "system", "data": "ready" },
+        { "type": "event", "event": "done" }
+      ]
+    }
+  ],
+  "assert": {
+    "follow_lines_contain": ["boot", "ready"]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "id": "exec_basic",
+  "description": "buffered exec returns exit code, stdout and stderr",
+  "capabilities": ["lifecycle", "exec"],
+  "steps": [
+    {
+      "expect": {
+        "type": "exec",
+        "name": "box",
+        "command": "sh",
+        "args": ["-c", "echo out; echo err >&2; exit 3"]
+      },
+      "respond": {
+        "type": "exec_result",
+        "exit_code": 3,
+        "stdout": "out\n",
+        "stderr": "err\n",
+        "duration_ms": 12
+      }
+    }
+  ],
+  "assert": {
+    "exit_code": 3,
+    "stdout_equals": "out\n",
+    "stderr_equals": "err\n"
+  }
+}

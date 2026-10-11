@@ -1,0 +1,42 @@
+{
+  "id": "metrics_stream",
+  "description": "stream metrics snapshots until the done event",
+  "capabilities": ["lifecycle", "metrics"],
+  "steps": [
+    {
+      "expect": { "type": "metrics_stream", "name": "box", "interval_ms": 100 },
+      "respond": [
+        { "type": "ok", "version": "1.0.0" },
+        {
+          "type": "event",
+          "event": "metrics",
+          "cpu_percent": 1.0,
+          "memory_used_bytes": 100,
+          "memory_total_bytes": 200,
+          "disk_used_bytes": 300,
+          "disk_total_bytes": 400,
+          "net_rx_bytes": 5,
+          "net_tx_bytes": 6,
+          "timestamp_ms": 1000
+        },
+        {
+          "type": "event",
+          "event": "metrics",
+          "cpu_percent": 2.0,
+          "memory_used_bytes": 110,
+          "memory_total_bytes": 200,
+          "disk_used_bytes": 300,
+          "disk_total_bytes": 400,
+          "net_rx_bytes": 5,
+          "net_tx_bytes": 6,
+          "timestamp_ms": 1100
+        },
+        { "type": "event", "event": "done" }
+      ]
+    }
+  ],
+  "assert": {
+    "stream_samples": 2,
+    "first_cpu_percent": 1.0
+  }
+}

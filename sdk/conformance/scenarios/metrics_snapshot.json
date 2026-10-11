@@ -1,0 +1,35 @@
+{
+  "id": "metrics_snapshot",
+  "description": "fetch a single metrics snapshot",
+  "capabilities": ["lifecycle", "metrics"],
+  "steps": [
+    {
+      "expect": { "type": "metrics", "name": "box" },
+      "respond": {
+        "type": "metrics",
+        "cpu_percent": 12.5,
+        "memory_used_bytes": 1048576,
+        "memory_total_bytes": 2097152,
+        "disk_used_bytes": 10485760,
+        "disk_total_bytes": 20971520,
+        "net_rx_bytes": 1024,
+        "net_tx_bytes": 2048,
+        "timestamp_ms": 1000
+      }
+    }
+  ],
+  "assert": {
+    "cpu_percent": 12.5,
+    "memory_used_bytes": 1048576,
+    "has_fields": [
+      "cpu_percent",
+      "memory_used_bytes",
+      "memory_total_bytes",
+      "disk_used_bytes",
+      "disk_total_bytes",
+      "net_rx_bytes",
+      "net_tx_bytes",
+      "timestamp_ms"
+    ]
+  }
+}

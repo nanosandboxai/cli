@@ -205,6 +205,14 @@ pub struct SandboxConfig {
     /// Guest vsock port the host socket is bridged to.
     #[serde(default)]
     pub vsock_port: Option<u32>,
+
+    /// Arbitrary key/value labels for attribution and filtering.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
+    /// Ephemeral sandboxes are removed automatically once they stop.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 fn default_cpus() -> u32 {
@@ -252,6 +260,8 @@ impl Default for SandboxConfig {
             extra_mounts: Vec::new(),
             vsock_socket: None,
             vsock_port: None,
+            labels: HashMap::new(),
+            ephemeral: false,
         }
     }
 }
@@ -544,6 +554,10 @@ pub struct PortMapping {
     /// Protocol (tcp/udp)
     #[serde(default = "default_protocol")]
     pub protocol: String,
+    /// Explicit host bind address; loopback by default. Config surface only —
+    /// enforcement is Epic 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
 }
 
 fn default_protocol() -> String {
@@ -557,6 +571,7 @@ impl PortMapping {
             host_port: host,
             container_port: container,
             protocol: "tcp".to_string(),
+            bind_address: None,
         }
     }
 
@@ -566,6 +581,7 @@ impl PortMapping {
             host_port: host,
             container_port: container,
             protocol: "udp".to_string(),
+            bind_address: None,
         }
     }
 }
@@ -1009,6 +1025,31 @@ mod tests {
         assert_eq!(config.extra_mounts[1].tag, "workspace");
         assert_eq!(config.extra_mounts[1].host_path, "/host/workspace");
         assert!(!config.extra_mounts[1].readonly);
+    }
+
+    #[test]
+    fn test_port_mapping_bind_address_roundtrip() {
+        let m = PortMapping {
+            host_port: 8080,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+            bind_address: Some("127.0.0.1".to_string()),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""bind_address":"127.0.0.1""#));
+        let back: PortMapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.bind_address.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_port_mapping_bind_address_defaults_none() {
+        let json = r#"{"host_port": 8080, "container_port": 80, "protocol": "tcp"}"#;
+        let m: PortMapping = serde_json::from_str(json).unwrap();
+        assert!(m.bind_address.is_none());
+        let tcp = PortMapping::tcp(8080, 80);
+        assert!(tcp.bind_address.is_none());
+        let udp = PortMapping::udp(53, 53);
+        assert!(udp.bind_address.is_none());
     }
 
     #[test]

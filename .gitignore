@@ -30,3 +30,20 @@ desktop/
 
 # Cross-compiled guest binaries (built on demand)
 guest/crates/exec-agent/target/
+
+# Python
+__pycache__/
+*.pyc
+
+# SDK build output (Maven / .NET)
+sdk/java/target/
+sdk/dotnet/**/bin/
+sdk/dotnet/**/obj/
+sdk/dotnet/**/TestResults/
+
+# Kotlin build output
+sdk/kotlin/classes/
+sdk/kotlin/*.jar
+
+# packaging output
+dist/

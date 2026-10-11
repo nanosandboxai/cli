@@ -1,0 +1,21 @@
+{
+  "id": "shell_basic",
+  "description": "shell runs a multi-line script and returns the buffered result",
+  "capabilities": ["lifecycle", "exec"],
+  "steps": [
+    {
+      "expect": { "type": "shell", "name": "box", "script": "echo one\necho two" },
+      "respond": {
+        "type": "exec_result",
+        "exit_code": 0,
+        "stdout": "one\ntwo\n",
+        "stderr": "",
+        "duration_ms": 3
+      }
+    }
+  ],
+  "assert": {
+    "exit_code": 0,
+    "stdout_contains": ["one", "two"]
+  }
+}
