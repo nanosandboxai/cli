@@ -97,6 +97,7 @@ fn capabilities() -> Vec<Capability> {
         Capability::Handles,
         Capability::Ephemeral,
         Capability::Secrets,
+        Capability::Volumes,
     ]
 }
 
@@ -331,6 +332,29 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             let n = require_name(s.name.clone())?;
             s.name = None;
             proxy(writer, n, Request::SecretRemove(s))
+        }
+        Request::VolumeCreate(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::VolumeCreate(s))
+        }
+        Request::VolumeList { name } => {
+            proxy(writer, require_name(name)?, Request::VolumeList { name: None })
+        }
+        Request::VolumeGet(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::VolumeGet(s))
+        }
+        Request::VolumeRemove(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::VolumeRemove(s))
+        }
+        Request::MountAdd(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::MountAdd(s))
         }
         other => send(writer, &Response::Error(ProtocolError::unsupported(format!(
                 "helper does not serve {other:?}"
