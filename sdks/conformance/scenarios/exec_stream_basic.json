@@ -1,0 +1,20 @@
+{
+  "id": "exec_stream_basic",
+  "description": "streamed exec emits stdout chunks then an exit event",
+  "capabilities": ["lifecycle", "exec"],
+  "steps": [
+    {
+      "expect": { "type": "exec_stream", "name": "box", "command": "echo" },
+      "respond": [
+        { "type": "ok", "version": "1.0.0" },
+        { "type": "guest", "event": "stdout", "data": "hello " },
+        { "type": "guest", "event": "stdout", "data": "world\n" },
+        { "type": "guest", "event": "exit", "code": 0 }
+      ]
+    }
+  ],
+  "assert": {
+    "exit_code": 0,
+    "stdout_contains": ["hello world"]
+  }
+}

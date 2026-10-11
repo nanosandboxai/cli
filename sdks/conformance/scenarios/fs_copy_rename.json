@@ -1,0 +1,19 @@
+{
+  "id": "fs_copy_rename",
+  "description": "copy a file inside the guest then rename it",
+  "capabilities": ["lifecycle", "fs"],
+  "steps": [
+    {
+      "expect": { "type": "fs_copy", "name": "box", "from": "/tmp/a", "to": "/tmp/b" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "fs_rename", "name": "box", "from": "/tmp/b", "to": "/tmp/c" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "copy_acked": true,
+    "rename_acked": true
+  }
+}

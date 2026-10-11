@@ -1,0 +1,30 @@
+{
+  "id": "fs_list_stat_exists",
+  "description": "list a directory, stat a path, and check existence",
+  "capabilities": ["lifecycle", "fs"],
+  "steps": [
+    {
+      "expect": { "type": "fs_list", "name": "box", "path": "/etc" },
+      "respond": {
+        "type": "fs_entries",
+        "entries": [
+          { "name": "hostname", "path": "/etc/hostname", "is_dir": false, "size": 4 },
+          { "name": "passwd", "path": "/etc/passwd", "is_dir": false, "size": 1024 }
+        ]
+      }
+    },
+    {
+      "expect": { "type": "fs_stat", "name": "box", "path": "/etc" },
+      "respond": { "type": "fs_stat", "path": "/etc", "is_dir": true, "size": 0 }
+    },
+    {
+      "expect": { "type": "fs_exists", "name": "box", "path": "/etc/passwd" },
+      "respond": { "type": "fs_exists", "exists": true }
+    }
+  ],
+  "assert": {
+    "entries_contain": ["hostname", "passwd"],
+    "stat_is_dir": true,
+    "exists": true
+  }
+}

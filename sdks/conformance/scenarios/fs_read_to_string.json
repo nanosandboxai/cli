@@ -1,0 +1,14 @@
+{
+  "id": "fs_read_to_string",
+  "description": "read a file as UTF-8 text",
+  "capabilities": ["lifecycle", "fs"],
+  "steps": [
+    {
+      "expect": { "type": "fs_read_to_string", "name": "box", "path": "/etc/hostname" },
+      "respond": { "type": "fs_content", "content": "box\n" }
+    }
+  ],
+  "assert": {
+    "content_equals": "box\n"
+  }
+}

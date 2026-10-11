@@ -1,0 +1,21 @@
+{
+  "id": "logs_source",
+  "description": "filter buffered logs by source",
+  "capabilities": ["lifecycle", "logs"],
+  "steps": [
+    {
+      "expect": { "type": "logs", "name": "box", "follow": false, "source": "stderr" },
+      "respond": {
+        "type": "logs",
+        "lines": [
+          { "cursor": 0, "timestamp_ms": 1000, "source": "stderr", "data": "warn: disk low" }
+        ],
+        "next_cursor": 1
+      }
+    }
+  ],
+  "assert": {
+    "lines_contain": ["warn: disk low"],
+    "all_source": "stderr"
+  }
+}

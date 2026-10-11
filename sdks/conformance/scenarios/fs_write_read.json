@@ -1,0 +1,25 @@
+{
+  "id": "fs_write_read",
+  "description": "write bytes to a file then read them back",
+  "capabilities": ["lifecycle", "fs"],
+  "steps": [
+    {
+      "expect": {
+        "type": "fs_write",
+        "name": "box",
+        "path": "/tmp/hello.txt",
+        "data_base64": "aGVsbG8gd29ybGQ=",
+        "append": false
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "fs_read", "name": "box", "path": "/tmp/hello.txt" },
+      "respond": { "type": "fs_data", "data_base64": "aGVsbG8gd29ybGQ=", "eof": true }
+    }
+  ],
+  "assert": {
+    "write_acked": true,
+    "read_bytes_base64": "aGVsbG8gd29ybGQ="
+  }
+}

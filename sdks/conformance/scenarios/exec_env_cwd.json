@@ -1,0 +1,28 @@
+{
+  "id": "exec_env_cwd",
+  "description": "exec passes env, cwd and user through the request",
+  "capabilities": ["lifecycle", "exec"],
+  "steps": [
+    {
+      "expect": {
+        "type": "exec",
+        "name": "box",
+        "command": "pwd",
+        "cwd": "/work",
+        "env": { "FOO": "bar" },
+        "user": "nobody"
+      },
+      "respond": {
+        "type": "exec_result",
+        "exit_code": 0,
+        "stdout": "/work\n",
+        "stderr": "",
+        "duration_ms": 2
+      }
+    }
+  ],
+  "assert": {
+    "exit_code": 0,
+    "stdout_equals": "/work\n"
+  }
+}

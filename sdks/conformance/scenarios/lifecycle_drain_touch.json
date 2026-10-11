@@ -1,0 +1,19 @@
+{
+  "id": "lifecycle_drain_touch",
+  "description": "drain then touch a sandbox",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": { "type": "drain", "name": "box" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "touch", "name": "box" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "drain_acked": true,
+    "touch_acked": true
+  }
+}

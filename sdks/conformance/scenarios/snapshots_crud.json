@@ -1,0 +1,46 @@
+{
+  "id": "snapshots_crud",
+  "description": "create, list, restore, fork and remove a snapshot",
+  "capabilities": ["lifecycle", "snapshots"],
+  "steps": [
+    {
+      "expect": { "type": "snapshot_create", "name": "box", "include_memory": false },
+      "respond": {
+        "type": "snapshot",
+        "id": "snap-1",
+        "sandbox": "box",
+        "image": "alpine:latest",
+        "created_at_ms": 1000,
+        "includes_memory": false
+      }
+    },
+    {
+      "expect": { "type": "snapshot_list" },
+      "respond": {
+        "type": "snapshots",
+        "snapshots": [
+          { "id": "snap-1", "sandbox": "box", "created_at_ms": 1000, "includes_memory": false }
+        ]
+      }
+    },
+    {
+      "expect": { "type": "snapshot_restore", "snapshot": "snap-1", "name": "box" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "snapshot_fork", "snapshot": "snap-1", "name": "forked" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "snapshot_remove", "snapshot": "snap-1" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "snapshot_created": "snap-1",
+    "snapshots_contain": ["snap-1"],
+    "restore_acked": true,
+    "fork_acked": true,
+    "remove_acked": true
+  }
+}

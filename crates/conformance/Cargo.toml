@@ -1,0 +1,13 @@
+[package]
+name = "nanosb-conformance"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CI-safe protocol conformance harness for the nanosandbox SDK drivers"
+
+[dependencies]
+nanosb-protocol = { path = "../protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

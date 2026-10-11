@@ -1,0 +1,28 @@
+{
+  "id": "lifecycle_create_rich_spec",
+  "description": "create a sandbox with network publish, labels, ephemeral and hostname options",
+  "capabilities": ["lifecycle", "networking", "handles", "ephemeral"],
+  "steps": [
+    {
+      "expect": {
+        "type": "create",
+        "spec": {
+          "name": "rich",
+          "image": "alpine:latest",
+          "network": {
+            "enabled": true,
+            "publish": [{ "host_port": 8080, "container_port": 80, "protocol": "tcp" }]
+          },
+          "labels": { "team": "sdk", "tier": "test" },
+          "ephemeral": true,
+          "hostname": "rich-box"
+        }
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "create_acked": true,
+    "note": "the driver must send exactly one publish entry with the values above"
+  }
+}

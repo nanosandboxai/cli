@@ -9,6 +9,10 @@ members = [
     # Protocol-first SDK substrate: versioned NDJSON protocol + SandboxClient.
     "crates/protocol",
     "crates/client",
+    # CI-safe protocol conformance harness for every SDK driver.
+    "crates/conformance",
+    # Language SDKs.
+    "sdks/rust",
 ]
 resolver = "2"
 

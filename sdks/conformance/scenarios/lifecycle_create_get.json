@@ -1,0 +1,31 @@
+{
+  "id": "lifecycle_create_get",
+  "description": "create a sandbox then fetch its info by name",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": {
+        "type": "create",
+        "spec": { "name": "box", "image": "alpine:latest" }
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "get", "name": "box" },
+      "respond": {
+        "type": "sandbox",
+        "name": "box",
+        "state": "running",
+        "image": "alpine:latest",
+        "pid": 4242,
+        "labels": {}
+      }
+    }
+  ],
+  "assert": {
+    "create_acked": true,
+    "get_name": "box",
+    "get_state": "running",
+    "get_image": "alpine:latest"
+  }
+}

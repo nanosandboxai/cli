@@ -1,0 +1,11 @@
+{
+  "id": "capability_gating",
+  "description": "a verb whose capability is not advertised is rejected as unsupported",
+  "capabilities": ["lifecycle"],
+  "steps": [],
+  "assert": {
+    "expects_unsupported": true,
+    "unsupported_verb": "exec",
+    "note": "the driver must verify supports('exec') is false after the handshake, then invoke exec and expect an unsupported error"
+  }
+}

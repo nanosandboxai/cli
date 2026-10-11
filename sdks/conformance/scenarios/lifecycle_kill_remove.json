@@ -1,0 +1,19 @@
+{
+  "id": "lifecycle_kill_remove",
+  "description": "kill then force-remove a sandbox",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": { "type": "kill", "name": "box" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "remove", "name": "box", "force": true },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "kill_acked": true,
+    "remove_acked": true
+  }
+}

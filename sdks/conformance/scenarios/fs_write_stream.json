@@ -1,0 +1,23 @@
+{
+  "id": "fs_write_stream",
+  "description": "stream a file write in chunks via fs_data frames",
+  "capabilities": ["lifecycle", "fs"],
+  "steps": [
+    {
+      "expect": { "type": "fs_write_stream", "name": "box", "path": "/tmp/big.bin" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "fs_data", "data_base64": "Y2h1bmsx", "eof": false },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "fs_data", "data_base64": "Y2h1bmsy", "eof": true },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "write_stream_acked": true,
+    "chunks_acked": 2
+  }
+}

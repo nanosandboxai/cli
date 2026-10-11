@@ -1,0 +1,22 @@
+{
+  "id": "timeout_step",
+  "description": "a step whose expected request never arrives answers a timeout error",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": { "type": "ping" },
+      "respond": { "type": "pong", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "status", "name": "box" },
+      "respond": { "type": "status", "state": "running", "pid": 4242 },
+      "timeout_ms": 300
+    }
+  ],
+  "assert": {
+    "ping_ok": true,
+    "expects_timeout": true,
+    "timeout_code": "timeout",
+    "note": "the driver must NOT send the status request; the server answers a timeout error after 300ms"
+  }
+}

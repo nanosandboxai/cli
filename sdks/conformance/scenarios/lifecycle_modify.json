@@ -1,0 +1,18 @@
+{
+  "id": "lifecycle_modify",
+  "description": "modify a live sandbox's idle timeout and labels",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": {
+        "type": "modify",
+        "name": "box",
+        "spec": { "idle_timeout_secs": 300, "labels": { "team": "sdk" } }
+      },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "modify_acked": true
+  }
+}

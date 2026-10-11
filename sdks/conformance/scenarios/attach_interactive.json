@@ -1,0 +1,29 @@
+{
+  "id": "attach_interactive",
+  "description": "attach to a console, send input, resize, and read the exit event",
+  "capabilities": ["lifecycle", "exec"],
+  "steps": [
+    {
+      "expect": { "type": "attach", "name": "box" },
+      "respond": [
+        { "type": "ok", "version": "1.0.0" },
+        { "type": "guest", "event": "stdout", "data": "welcome\n" },
+        { "type": "guest", "event": "exit", "code": 0 }
+      ]
+    },
+    {
+      "expect": { "type": "attach_input", "data": "ls\n" },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    },
+    {
+      "expect": { "type": "attach_resize", "cols": 120, "rows": 40 },
+      "respond": { "type": "ok", "version": "1.0.0" }
+    }
+  ],
+  "assert": {
+    "attach_events": ["stdout", "exit"],
+    "attach_exit_code": 0,
+    "input_acked": true,
+    "resize_acked": true
+  }
+}

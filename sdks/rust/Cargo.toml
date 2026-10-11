@@ -1,0 +1,11 @@
+[package]
+name = "nanosandbox"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust SDK for the nanosandbox protocol helper (re-exports nanosb-client)"
+
+[dependencies]
+nanosb-client = { path = "../../crates/client" }

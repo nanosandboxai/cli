@@ -2145,6 +2145,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanosandbox"
+version = "0.1.0"
+dependencies = [
+ "nanosb-client",
+]
+
+[[package]]
 name = "nanosb-cli"
 version = "0.2.0"
 dependencies = [
@@ -2191,6 +2198,15 @@ dependencies = [
  "nanosb-protocol",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "nanosb-conformance"
+version = "0.1.0"
+dependencies = [
+ "nanosb-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

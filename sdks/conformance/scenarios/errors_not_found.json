@@ -1,0 +1,28 @@
+{
+  "id": "errors_not_found",
+  "description": "get on a missing sandbox and start on a stopped one surface typed errors",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": { "type": "get", "name": "missing" },
+      "respond": {
+        "type": "error",
+        "code": "not_found",
+        "message": "sandbox `missing` does not exist"
+      }
+    },
+    {
+      "expect": { "type": "start", "name": "box" },
+      "respond": {
+        "type": "error",
+        "code": "invalid_state",
+        "message": "sandbox `box` is stopped"
+      }
+    }
+  ],
+  "assert": {
+    "error_code": "not_found",
+    "error_message_contains": "does not exist",
+    "second_error_code": "invalid_state"
+  }
+}
