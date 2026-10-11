@@ -76,6 +76,31 @@ leftover volumes.
 | Pause / resume (AC6) | `pause` (SIGSTOP) → state still `Running` → `resume` (SIGCONT) → `exec` succeeds | ✅ |
 | Volumes (AC5) | `volume_create` / `volume_list` / `volume_get` / `volume_remove` **via the sandbox control socket** | ✅ |
 
+## Per-SDK live E2E
+
+Every language SDK ships a `ManagedRuntime` (locate + spawn `nanosb-runtime
+serve` on a private socket) and an opt-in live test that drives a **real
+microVM** — the same operations as the Rust reference above. Requires macOS
+arm64 + libkrun/gvproxy + a cached image; each test is skipped with a clear
+reason otherwise.
+
+| SDK | Command | Result |
+|---|---|---|
+| Rust (reference) | `cargo test -p nanosb-client --test live_conformance -- --ignored` | ✅ PASS |
+| Python | `NANOSB_E2E=1 python3 sdk/python/tests/test_e2e.py` | ✅ PASS |
+| TypeScript/Node | `NANOSB_E2E=1 node --test sdk/typescript/tests/e2e.test.mjs` | ✅ PASS |
+| Go | `NANOSB_E2E=1 go test ./sdk/go/e2e -run TestLiveMicroVMSmoke` | ✅ PASS |
+| Ruby | `NANOSB_E2E=1 ruby -I sdk/ruby/lib sdk/ruby/test/test_e2e.rb` | ✅ PASS |
+| Java | `NANOSB_E2E=1 mvn -f sdk/java/pom.xml test -Dtest=E2ETest` | ✅ PASS |
+| Kotlin | `NANOSB_E2E=1 java -cp sdk/kotlin/nanosandbox-kotlin.jar nanosandbox.kt.E2EKt` | ✅ PASS |
+| C#/.NET | `NANOSB_E2E=1 dotnet test sdk/dotnet --filter E2ETest` | ✅ PASS |
+
+Each test boots a real microVM and asserts: create→running, get, exec stdout,
+fs write/read/exists/mkdir/stat, logs non-empty, metrics disk>0, list contains,
+secret set/list (value redacted)/remove, pause→running→resume→exec, volume
+create/list/remove, snapshot create/list/restore/remove, stop, remove. See
+`docs/plans/2026-10-11-sdk-live-e2e-plan.md`.
+
 ## Blockers (precise)
 
 ### 1. Volumes — FIXED

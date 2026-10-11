@@ -445,7 +445,9 @@ class Sandbox {
 
     public JsonValue snapshotCreate(String dest) {
         JsonValue req = verb("snapshot_create");
-        req.put("dest", JsonValue.of(dest));
+        if (dest != null) {
+            req.put("dest", JsonValue.of(dest));
+        }
         req.put("include_memory", JsonValue.of(false));
         return client.call(req);
     }

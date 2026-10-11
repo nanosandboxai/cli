@@ -106,6 +106,8 @@ class KotlinSandbox {
     }
 
     /** Streams log lines to {@code onLine} until the done event. */
+    fun logs(tail: Int): List<Json> = delegate.logs(tail)
+
     fun logsFollowWith(onLine: (Json) -> Unit, tail: Int, cursor: Int, source: String?) {
         delegate.logsFollowWith(Consumer { line -> onLine(line) }, tail, cursor, source)
     }

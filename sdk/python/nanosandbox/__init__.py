@@ -18,6 +18,7 @@ from .client import (
     VolumeBuilder,
     PROTOCOL_VERSION,
 )
+from .runtime import ManagedRuntime, find_runtime_bin
 
 __all__ = [
     "NanosbError",
@@ -25,5 +26,7 @@ __all__ = [
     "SandboxBuilder",
     "SandboxClient",
     "VolumeBuilder",
+    "ManagedRuntime",
+    "find_runtime_bin",
     "PROTOCOL_VERSION",
 ]

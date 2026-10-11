@@ -26,6 +26,7 @@ mkdir -p classes
 "$KOTLINC" -cp classes \
   src/nanosandbox/*.kt \
   conformance/Run.kt \
+  e2e/E2E.kt \
   src/test/nanosandbox/SmokeTest.kt \
   -include-runtime -d nanosandbox-kotlin.jar
 
