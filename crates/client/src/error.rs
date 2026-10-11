@@ -16,6 +16,8 @@ pub enum Error {
     Unexpected(String),
     /// A required capability is missing on this helper build.
     Unsupported(String),
+    /// A client-side wait/poll deadline elapsed.
+    Timeout(String),
 }
 
 impl Error {
@@ -50,6 +52,7 @@ impl fmt::Display for Error {
             Error::Protocol(p) => write!(f, "{p}"),
             Error::Unexpected(m) => write!(f, "unexpected response: {m}"),
             Error::Unsupported(m) => write!(f, "unsupported: {m}"),
+            Error::Timeout(m) => write!(f, "timed out: {m}"),
         }
     }
 }

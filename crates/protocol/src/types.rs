@@ -5,7 +5,7 @@
 //! that `nanosb-protocol` stays a leaf dependency.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Sandbox lifecycle state as reported by the helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,6 +390,12 @@ pub struct SandboxSpec {
     /// Replace an existing sandbox of the same name.
     #[serde(default)]
     pub replace: bool,
+    /// Guest hostname override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// Env keys sourced from the secret store (`env key` -> `secret key`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_env: BTreeMap<String, String>,
 }
 
 impl SandboxSpec {
@@ -415,6 +421,8 @@ impl SandboxSpec {
             scripts: HashMap::new(),
             detached: true,
             replace: false,
+            hostname: None,
+            secret_env: BTreeMap::new(),
         }
     }
 }
@@ -436,4 +444,29 @@ pub enum GuestEvent {
     Stderr { data: String },
     Exit { code: i32 },
     Error { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_spec_new_fields_roundtrip() {
+        let mut spec = SandboxSpec::new("alpine");
+        spec.hostname = Some("box".into());
+        spec.secret_env.insert("API_KEY".into(), "api-key".into());
+        let s = serde_json::to_string(&spec).unwrap();
+        let back: SandboxSpec = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.hostname.as_deref(), Some("box"));
+        assert_eq!(back.secret_env.get("API_KEY").map(String::as_str), Some("api-key"));
+    }
+
+    #[test]
+    fn sandbox_spec_legacy_json_still_parses() {
+        // A create frame written before the additive fields must still decode.
+        let legacy = r#"{"name":"a","image":"alpine","detached":true,"replace":false}"#;
+        let spec: SandboxSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(spec.hostname, None);
+        assert!(spec.secret_env.is_empty());
+    }
 }

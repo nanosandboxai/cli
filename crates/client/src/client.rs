@@ -2,12 +2,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use nanosb_protocol::{
     Capability, ExecRequest, ExecResult, FsEntry, FsMkdirSpec, FsPathSpec, FsStat,
-    FsTransferSpec, FsWriteSpec, FsWriteStreamSpec, GuestEvent, LogLine, LogsSpec, Metrics,
-    ModifySpec, MountSpec, Response, SandboxInfo, SandboxSpec, SandboxState, SecretEntry,
-    SnapshotInfo, StreamEvent, VolumeInfo, VolumeSpec,
+    FsTransferSpec, FsWriteSpec, FsWriteStreamSpec, GuestEvent, LogLine, LogSource, LogsSpec,
+    Metrics, ModifySpec, MountSpec, Response, SandboxInfo, SandboxList, SandboxSpec,
+    SandboxState, SecretEntry, SnapshotInfo, StreamEvent, VolumeInfo, VolumeSpec,
     Request::{self, *},
 };
 
@@ -187,6 +188,25 @@ impl SandboxClient {
         }
     }
 
+    /// List one page of sandboxes with `limit`/`cursor`/`label`; returns the
+    /// page plus the `next_cursor` for the following page.
+    pub fn list_page(
+        &self,
+        limit: Option<usize>,
+        cursor: Option<String>,
+        label: Option<&str>,
+    ) -> Result<SandboxList> {
+        match self.call(&List {
+            all: true,
+            limit,
+            cursor,
+            label: label.map(String::from),
+        })? {
+            Response::List(l) => Ok(l),
+            other => Err(Error::unexpected(format!("{other:?}"))),
+        }
+    }
+
     /// Get a sandbox's info.
     pub fn get(&self, name: &str) -> Result<SandboxInfo> {
         match self.call(&Get {
@@ -315,6 +335,28 @@ impl Sandbox {
         })
     }
 
+    /// Poll `state()` until the sandbox is `Stopped`, or return `Timeout` once
+    /// `timeout` elapses. An `Error` state is surfaced immediately.
+    pub fn wait_until_stopped(&self, timeout: Duration) -> Result<SandboxState> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.state()? {
+                SandboxState::Stopped => return Ok(SandboxState::Stopped),
+                SandboxState::Error => {
+                    return Err(Error::unexpected("sandbox entered error state while waiting"))
+                }
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "sandbox '{}' did not stop within {timeout:?}",
+                    self.name
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn ack(&self, req: Request) -> Result<()> {
         match self.client.call(&req)? {
             Response::Ok { .. } => Ok(()),
@@ -354,6 +396,18 @@ impl Sandbox {
             Response::ExecResult(r) => Ok(r),
             other => Err(Error::unexpected(format!("{other:?}"))),
         }
+    }
+
+    /// Run a script through the guest shell, streaming events via `exec_stream`
+    /// with the `shell` flag set.
+    pub fn shell_stream<F>(&self, script: &str, on_event: F) -> Result<i32>
+    where
+        F: FnMut(GuestEvent),
+    {
+        let mut req = ExecRequest::new(script);
+        req.name = self.name_arg()?;
+        req.shell = true;
+        self.exec_stream(req, on_event)
     }
 
     /// Run a command, invoking `on_event` for each streamed guest event and
@@ -416,6 +470,17 @@ impl Sandbox {
         Ok(())
     }
 
+    /// Open a live attach session, returning a handle that can drive input and
+    /// resize on the same connection while reading console events.
+    pub fn attach_session(&self) -> Result<AttachSession> {
+        let mut conn = self.client.open()?;
+        conn.clear_read_timeout()?;
+        conn.call_stream(&Attach {
+            name: self.name_arg()?,
+        })?;
+        Ok(AttachSession { conn })
+    }
+
     // ── observability ──────────────────────────────────────────────────
 
     /// Fetch the current metrics snapshot.
@@ -426,6 +491,28 @@ impl Sandbox {
             Response::Metrics(m) => Ok(m),
             other => Err(Error::unexpected(format!("{other:?}"))),
         }
+    }
+
+    /// Stream metrics snapshots, invoking `on_event` until the stream ends.
+    pub fn metrics_stream<F>(&self, interval_ms: Option<u64>, mut on_event: F) -> Result<()>
+    where
+        F: FnMut(Metrics),
+    {
+        let mut conn = self.client.open()?;
+        conn.clear_read_timeout()?;
+        conn.call_stream(&MetricsStream {
+            name: self.name_arg()?,
+            interval_ms,
+        })?;
+        while let Some(resp) = conn.next_response()? {
+            match resp {
+                Response::Event(StreamEvent::Metrics(m)) => on_event(m),
+                Response::Event(StreamEvent::Done) => break,
+                Response::Error(e) => return Err(Error::Protocol(e)),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Read buffered log lines (respecting `tail`/`cursor`).
@@ -456,6 +543,58 @@ impl Sandbox {
             tail,
             cursor: None,
             source: None,
+        }))?;
+        while let Some(resp) = conn.next_response()? {
+            match resp {
+                Response::Event(StreamEvent::Log(line)) => on_line(line),
+                Response::Event(StreamEvent::Done) => break,
+                Response::Error(e) => return Err(Error::Protocol(e)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Read buffered log lines with `tail`/`cursor`/`source` filters.
+    pub fn logs_with(
+        &self,
+        tail: Option<usize>,
+        cursor: Option<u64>,
+        source: Option<LogSource>,
+    ) -> Result<Vec<LogLine>> {
+        let req = LogsSpec {
+            name: self.name_arg()?,
+            follow: false,
+            tail,
+            cursor,
+            source,
+        };
+        match self.client.call(&Logs(req))? {
+            Response::Logs { lines, .. } => Ok(lines),
+            other => Err(Error::unexpected(format!("{other:?}"))),
+        }
+    }
+
+    /// Follow logs with `tail`/`cursor`/`source` filters, invoking `on_line`
+    /// until the stream ends.
+    pub fn logs_follow_with<F>(
+        &self,
+        tail: Option<usize>,
+        cursor: Option<u64>,
+        source: Option<LogSource>,
+        mut on_line: F,
+    ) -> Result<()>
+    where
+        F: FnMut(LogLine),
+    {
+        let mut conn = self.client.open()?;
+        conn.clear_read_timeout()?;
+        conn.call_stream(&Logs(LogsSpec {
+            name: self.name_arg()?,
+            follow: true,
+            tail,
+            cursor,
+            source,
         }))?;
         while let Some(resp) = conn.next_response()? {
             match resp {
@@ -501,6 +640,28 @@ impl Sandbox {
                 .ok_or_else(|| Error::unexpected("invalid base64 from helper")),
             other => Err(Error::unexpected(format!("{other:?}"))),
         }
+    }
+
+    /// Read a file in `chunk_size`-byte chunks via `FsRead` offset/length,
+    /// invoking `on_chunk` for each chunk until the file is exhausted.
+    pub fn fs_read_stream<F>(&self, path: &str, chunk_size: usize, mut on_chunk: F) -> Result<()>
+    where
+        F: FnMut(&[u8]),
+    {
+        let chunk_size = chunk_size.max(1) as u64;
+        let mut offset = 0u64;
+        loop {
+            let chunk = self.fs_read_range(path, offset, chunk_size)?;
+            if chunk.is_empty() {
+                break;
+            }
+            on_chunk(&chunk);
+            if (chunk.len() as u64) < chunk_size {
+                break;
+            }
+            offset += chunk.len() as u64;
+        }
+        Ok(())
     }
 
     /// Read a file as UTF-8 text.
@@ -679,6 +840,16 @@ impl Sandbox {
         }
     }
 
+    /// The host directory backing a volume: `VolumeInfo.dir` when the helper
+    /// reports one, else the resolved `$NANOSB_HOME/volumes/<name>` path.
+    pub fn volume_fs(&self, name: &str) -> Result<PathBuf> {
+        let info = self.volume_get(name)?;
+        if let Some(dir) = info.dir {
+            return Ok(PathBuf::from(dir));
+        }
+        Ok(nanosb_home().join("volumes").join(name))
+    }
+
     pub fn volume_remove(&self, volume: &str) -> Result<()> {
         self.ack(VolumeRemove(nanosb_protocol::VolumeRef {
             name: self.name_arg()?,
@@ -751,6 +922,48 @@ impl Sandbox {
         self.ack(SnapshotRemove {
             snapshot: snapshot.to_string(),
         })
+    }
+}
+
+/// A live attach session: drive console input/resize and read guest events on
+/// the same connection. `read_events` returns `None` once the stream ends.
+pub struct AttachSession {
+    conn: Connection,
+}
+
+impl AttachSession {
+    /// Send raw bytes to the guest console.
+    pub fn send_input(&mut self, bytes: &[u8]) -> Result<()> {
+        let data = String::from_utf8_lossy(bytes).into_owned();
+        match self.conn.call(&AttachInput { data })? {
+            Response::Ok { .. } => Ok(()),
+            other => Err(Error::unexpected(format!("{other:?}"))),
+        }
+    }
+
+    /// Resize the attached PTY.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        match self.conn.call(&AttachResize { cols, rows })? {
+            Response::Ok { .. } => Ok(()),
+            other => Err(Error::unexpected(format!("{other:?}"))),
+        }
+    }
+
+    /// Read the next guest event, or `None` when the attach stream has ended.
+    pub fn read_events(&mut self) -> Result<Option<GuestEvent>> {
+        while let Some(resp) = self.conn.next_response()? {
+            match resp {
+                Response::Guest(ev) => {
+                    if is_stream_end(&ev) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(ev));
+                }
+                Response::Error(e) => return Err(Error::Protocol(e)),
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -828,5 +1041,151 @@ mod tests {
             .unwrap();
         assert_eq!(code, 0);
         assert_eq!(out, "a");
+    }
+
+    #[test]
+    fn metrics_stream_collects_snapshots() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"ok","version":"1"}"#);
+        h.push_script(r#"{"type":"event","event":"metrics","cpu_percent":1.5,"memory_used_bytes":10,"memory_total_bytes":100,"disk_used_bytes":0,"disk_total_bytes":0,"net_rx_bytes":0,"net_tx_bytes":0,"timestamp_ms":0}"#);
+        h.push_script(r#"{"type":"event","event":"done"}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let mut count = 0;
+        sb.metrics_stream(Some(100), |m| {
+            if m.cpu_percent > 0.0 {
+                count += 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn attach_session_drives_input_resize_and_reads_events() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"ok","version":"1"}"#); // attach ack
+        h.push_script(r#"{"type":"ok","version":"1"}"#); // send_input ack
+        h.push_script(r#"{"type":"ok","version":"1"}"#); // resize ack
+        h.push_script(r#"{"type":"guest","event":"stdout","data":"hi"}"#);
+        h.push_script(r#"{"type":"guest","event":"exit","code":0}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let mut session = sb.attach_session().unwrap();
+        session.send_input(b"x").unwrap();
+        session.resize(80, 24).unwrap();
+        let mut out = String::new();
+        while let Some(ev) = session.read_events().unwrap() {
+            if let GuestEvent::Stdout { data } = ev {
+                out.push_str(&data);
+            }
+        }
+        assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn logs_with_cursor_and_source() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"logs","lines":[{"cursor":5,"timestamp_ms":0,"source":"stdout","data":"x"}],"next_cursor":6}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let lines = sb
+            .logs_with(Some(10), Some(5), Some(LogSource::Stdout))
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].cursor, 5);
+    }
+
+    #[test]
+    fn logs_follow_with_cursor_and_source() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"ok","version":"1"}"#);
+        h.push_script(r#"{"type":"event","event":"log","cursor":5,"timestamp_ms":0,"source":"stdout","data":"x"}"#);
+        h.push_script(r#"{"type":"event","event":"done"}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let mut out = String::new();
+        sb.logs_follow_with(Some(10), Some(5), Some(LogSource::Stdout), |l| {
+            out.push_str(&l.data)
+        })
+        .unwrap();
+        assert_eq!(out, "x");
+    }
+
+    #[test]
+    fn list_page_returns_next_cursor() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"list","sandboxes":[{"name":"a","state":"running","image":"alpine","detached":false,"ephemeral":false,"labels":{}}],"next_cursor":"abc"}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let page = c
+            .list_page(Some(10), Some("prev".into()), Some("team=sdk"))
+            .unwrap();
+        assert_eq!(page.sandboxes.len(), 1);
+        assert_eq!(page.next_cursor.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn wait_until_stopped_polls_until_stopped() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"status","state":"running"}"#);
+        h.push_script(r#"{"type":"status","state":"stopped"}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let state = sb.wait_until_stopped(Duration::from_secs(5)).unwrap();
+        assert_eq!(state, SandboxState::Stopped);
+    }
+
+    #[test]
+    fn shell_stream_runs_script() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"ok","version":"1"}"#);
+        h.push_script(r#"{"type":"guest","event":"stdout","data":"hi"}"#);
+        h.push_script(r#"{"type":"guest","event":"exit","code":0}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let mut out = String::new();
+        let code = sb
+            .shell_stream("echo hi", |ev| {
+                if let GuestEvent::Stdout { data } = ev {
+                    out.push_str(&data);
+                }
+            })
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn fs_read_stream_chunks() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"fs_data","data_base64":"aGVsbG8=","eof":true}"#);
+        h.push_script(r#"{"type":"fs_data","data_base64":"","eof":true}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let mut out = Vec::new();
+        sb.fs_read_stream("/tmp/x", 3, |chunk| out.extend_from_slice(chunk))
+            .unwrap();
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn volume_fs_returns_host_dir() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"volume","name":"data","dir":"/tmp/vol-data","used_bytes":0}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        assert_eq!(sb.volume_fs("data").unwrap(), PathBuf::from("/tmp/vol-data"));
+    }
+
+    #[test]
+    fn volume_fs_falls_back_to_home() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"volume","name":"data","used_bytes":0}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        assert_eq!(
+            sb.volume_fs("data").unwrap(),
+            nanosb_home().join("volumes").join("data")
+        );
     }
 }
