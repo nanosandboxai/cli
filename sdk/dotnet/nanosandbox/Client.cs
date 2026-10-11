@@ -6,7 +6,7 @@ using System.Collections.Generic;
 using System;
 
 /// A protocol client bound to one helper socket.
-class SandboxClient {
+public class SandboxClient {
     private String socketPath;
     private List<String> caps;
 

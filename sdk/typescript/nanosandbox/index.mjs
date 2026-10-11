@@ -9,3 +9,4 @@ export {
   VolumeBuilder,
 } from "./client.mjs";
 export { Conn } from "./conn.mjs";
+export { ManagedRuntime, findRuntimeBin } from "./runtime.mjs";

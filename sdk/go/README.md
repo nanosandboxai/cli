@@ -2,17 +2,18 @@
 
 A **stdlib-only** Go protocol client for the nanosandbox helper
 (`nanosb-protocol` v1.0.0). It speaks NDJSON over a Unix stream socket using
-only the Go standard library (`net`, `os`, `encoding/base64`, `fmt`) — no
-third-party modules. The Go 1.27 standard library has no `json` package, so the
-SDK ships a minimal RFC 8259 JSON value type (`nanosandbox/json.go`).
+only the Go standard library (`net`, `os`, `encoding/base64`, `fmt`, `errors`) —
+no third-party modules. The SDK ships its own minimal RFC 8259 JSON value type
+(`nanosandbox/json.go`) rather than `encoding/json`, so the exact wire shape
+(ordered keys, explicit `null`, integral numbers) stays under the SDK's control.
 
 The client surface mirrors the Python SDK (`sdk/python/nanosandbox/client.py`)
 and the driver contract in `sdk/conformance/SPEC.md`.
 
 ## Requirements
 
-- Go ≥ 1.27 (uses `net.Dial("unix", ...)`, `os.StartProcess`, and the
-  `go test` runner).
+- Go ≥ 1.27 (uses `net.Dial("unix", ...)`, `os/exec` for `ManagedRuntime`, and
+  the `go test` runner).
 
 ## Layout
 
@@ -123,6 +124,26 @@ Every call dials a fresh connection and re-negotiates the `hello` handshake
 connection for the duration of the stream: an opening `ok` ack, then frames
 until the terminal frame (`guest exit/error` or `event done`).
 
+## Managing a real sandbox (`ManagedRuntime`)
+
+`StartRuntime` locates and starts the real `nanosb-runtime` helper so you can
+boot and manage microVMs without launching it yourself:
+
+```go
+rt, err := nanosandbox.StartRuntime(15 * time.Second)
+if err != nil {
+    log.Fatal(err)
+}
+defer rt.Close()
+
+client, err := nanosandbox.Connect(rt.Socket)
+box, err := client.CreateWith(nanosandbox.NewSandboxBuilder("library/alpine:latest").WithName("demo"))
+out, _ := box.Exec("echo", []string{"hello from a microVM"})
+```
+
+The helper is found via `NANOSB_RUNTIME_BIN` → `$NANOSB_HOME/bin/nanosb-runtime`
+→ `PATH` → the repo `target/debug/nanosb-runtime`.
+
 ## Testing
 
 Unit tests exercise the client against an in-process fake NDJSON helper on a
@@ -141,3 +162,9 @@ go run ./sdk/go/conformance/run.go
 ```
 
 Expected output: `35 passed, 0 failed`, exit code 0.
+
+Live microVM E2E (opt-in; needs the helper + libkrun/gvproxy + a cached image):
+
+```bash
+NANOSB_E2E=1 go test ./sdk/go/e2e -run TestLiveMicroVMSmoke
+```

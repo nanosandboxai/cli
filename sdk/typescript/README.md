@@ -104,6 +104,27 @@ Every call dials a fresh connection and re-negotiates the `hello` handshake
 connection for the duration of the stream: an opening `ok` ack, then frames
 until the terminal frame (`guest exit/error` or `event done`).
 
+## Managing a real sandbox (`ManagedRuntime`)
+
+`ManagedRuntime.start()` locates and starts the real `nanosb-runtime` helper so
+you can boot and manage microVMs without launching it yourself:
+
+```js
+import { ManagedRuntime, SandboxClient } from "nanosandbox";
+
+const rt = await ManagedRuntime.start();
+try {
+  const client = await SandboxClient.connect(rt.socket);
+  const box = await client.create({ image: "library/alpine:latest", name: "demo" });
+  console.log((await box.exec("echo", ["hello from a microVM"])).stdout);
+} finally {
+  await rt.close();
+}
+```
+
+The helper is found via `NANOSB_RUNTIME_BIN` → `$NANOSB_HOME/bin/nanosb-runtime`
+→ `PATH` → the repo `target/debug/nanosb-runtime`.
+
 ## Testing
 
 Unit tests exercise the client against an in-process fake NDJSON helper on a
@@ -122,6 +143,12 @@ node sdk/typescript/conformance/run.mjs
 ```
 
 Expected output: `35 passed, 0 failed`, exit code 0.
+
+Live microVM E2E (opt-in; needs the helper + libkrun/gvproxy + a cached image):
+
+```bash
+NANOSB_E2E=1 node --test sdk/typescript/tests/e2e.test.mjs
+```
 
 ## Layout
 

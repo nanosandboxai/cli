@@ -112,6 +112,22 @@ Every call dials a fresh connection and re-negotiates the `hello` handshake
 connection for the duration of the stream: an opening `ok` ack, then frames
 until the terminal frame (`guest exit/error` or `event done`).
 
+## Managing a real sandbox (`ManagedRuntime`)
+
+`ManagedRuntime.start()` locates and starts the real `nanosb-runtime` helper so
+you can boot and manage microVMs without launching it yourself:
+
+```java
+try (ManagedRuntime rt = ManagedRuntime.start()) {
+    SandboxClient client = SandboxClient.connect(rt.socket.toString());
+    Sandbox box = client.createWith(new SandboxBuilder("library/alpine:latest").withName("demo"));
+    System.out.println(box.exec("echo", new String[]{"hello from a microVM"}).getStr("stdout"));
+}
+```
+
+The helper is found via `NANOSB_RUNTIME_BIN` → `$NANOSB_HOME/bin/nanosb-runtime`
+→ `PATH` → the repo `target/debug/nanosb-runtime`.
+
 ## Testing
 
 Unit tests exercise the client against an in-process fake NDJSON helper on a
@@ -134,3 +150,9 @@ java -cp sdk/java/target/classes sdk/java/conformance/Run.java
 Run from the repository root (the driver resolves `sdk/conformance/scenarios`
 and `target/debug/nanosb-conformance` relative to the working directory).
 Expected output: `35 passed, 0 failed`, exit code 0.
+
+Live microVM E2E (opt-in; needs the helper + libkrun/gvproxy + a cached image):
+
+```bash
+NANOSB_E2E=1 mvn -f sdk/java/pom.xml test -Dtest=E2ETest
+```

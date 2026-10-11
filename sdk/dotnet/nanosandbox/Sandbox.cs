@@ -8,7 +8,7 @@ using System.Text;
 using System;
 
 /// A handle bound to one named sandbox.
-class Sandbox {
+public class Sandbox {
     private SandboxClient client;
     private String name;
 
@@ -503,7 +503,7 @@ class Sandbox {
 
 /// A live attach session: drive console input/resize and read guest events on
 /// the same connection. `readEvents` returns null once the stream ends.
-class AttachSession {
+public class AttachSession {
     private Conn conn;
 
     public AttachSession(Conn conn) {
