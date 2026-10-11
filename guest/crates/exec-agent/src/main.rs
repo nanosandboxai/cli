@@ -87,6 +87,8 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
 
     // The currently running session, if any.
     let mut active: Option<Session> = None;
+    // An open streamed fs write, if any.
+    let mut fs_stream: Option<FsStreamState> = None;
 
     loop {
         let frame = read_frame(&mut reader)?;
@@ -94,6 +96,7 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
             if let Some(mut s) = active.take() {
                 let _ = s.kill();
             }
+            fs_stream.take();
             return Ok(());
         };
 
@@ -108,7 +111,7 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
         }
 
         if let Ok(fs) = serde_json::from_slice::<FsRequest>(&bytes) {
-            if let Err(e) = handle_fs(fs, &writer) {
+            if let Err(e) = handle_fs(fs, &mut fs_stream, &writer) {
                 writer.send(&FsResponse::error(e))?;
             }
             continue;
@@ -144,7 +147,14 @@ fn serve(stream: vsock::VsockStream) -> Result<(), String> {
     }
 }
 
-fn handle_fs(req: FsRequest, w: &Writer) -> Result<(), String> {
+/// An open streamed fs write: the file handle is kept across `FsWriteChunk`
+/// frames until `FsWriteClose`.
+struct FsStreamState {
+    file: std::fs::File,
+    path: String,
+}
+
+fn handle_fs(req: FsRequest, fs_stream: &mut Option<FsStreamState>, w: &Writer) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
@@ -176,6 +186,46 @@ fn handle_fs(req: FsRequest, w: &Writer) -> Result<(), String> {
             if let Some(m) = mode {
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m));
             }
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsWriteStreamOpen { path, append, mode } => {
+            if fs_stream.is_some() {
+                return Err("a streamed write is already open".to_string());
+            }
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true);
+            if append {
+                opts.append(true);
+            } else {
+                opts.truncate(true);
+            }
+            let file = opts
+                .open(&path)
+                .map_err(|e| format!("open stream {}: {}", path, e))?;
+            if let Some(m) = mode {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m));
+            }
+            *fs_stream = Some(FsStreamState { file, path });
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsWriteChunk { data_base64 } => {
+            let bytes = nanosb_protocol::base64_decode(&data_base64)
+                .ok_or_else(|| "invalid base64 payload".to_string())?;
+            let st = fs_stream
+                .as_mut()
+                .ok_or_else(|| "no open streamed write".to_string())?;
+            st.file
+                .write_all(&bytes)
+                .map_err(|e| format!("stream write {}: {}", st.path, e))?;
+            w.send(&FsResponse::Ok)
+        }
+        FsRequest::FsWriteClose => {
+            let mut st = fs_stream
+                .take()
+                .ok_or_else(|| "no open streamed write".to_string())?;
+            st.file
+                .flush()
+                .map_err(|e| format!("flush {}: {}", st.path, e))?;
             w.send(&FsResponse::Ok)
         }
         FsRequest::FsList { path } => {

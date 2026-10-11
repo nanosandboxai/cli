@@ -404,21 +404,26 @@ fn read_len(stream: &mut UnixStream) -> ExecResultT<Option<usize>> {
     Ok(Some(u32::from_le_bytes(len_buf) as usize))
 }
 
+/// Send one fs request on an already-open connection and read its response.
+fn fs_call_on(stream: &mut UnixStream, request: &FsRequest) -> ExecResultT<FsResponse> {
+    let body = serde_json::to_vec(request)
+        .map_err(|e| ExecError::Protocol(format!("serialize fs request: {}", e)))?;
+    let len = (body.len() as u32).to_le_bytes();
+    stream.write_all(&len)?;
+    stream.write_all(&body)?;
+    stream.flush()?;
+    let len = read_len(stream)?
+        .ok_or_else(|| ExecError::Protocol("connection closed before fs response".into()))?;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    serde_json::from_slice(&buf)
+        .map_err(|e| ExecError::Protocol(format!("decode fs response: {}", e)))
+}
+
 impl ExecClient {
     fn simple_call(&self, request: &FsRequest) -> ExecResultT<FsResponse> {
         let mut stream = self.connect()?;
-        let body = serde_json::to_vec(request)
-            .map_err(|e| ExecError::Protocol(format!("serialize fs request: {}", e)))?;
-        let len = (body.len() as u32).to_le_bytes();
-        stream.write_all(&len)?;
-        stream.write_all(&body)?;
-        stream.flush()?;
-        let len = read_len(&mut stream)?
-            .ok_or_else(|| ExecError::Protocol("connection closed before fs response".into()))?;
-        let mut buf = vec![0u8; len];
-        stream.read_exact(&mut buf)?;
-        serde_json::from_slice(&buf)
-            .map_err(|e| ExecError::Protocol(format!("decode fs response: {}", e)))
+        fs_call_on(&mut stream, request)
     }
 
     fn fs_ok(resp: FsResponse) -> ExecResultT<()> {
@@ -467,6 +472,39 @@ impl ExecClient {
             append,
             mode,
         })?)
+    }
+
+    /// Open a streamed write to `path`; feed chunks with
+    /// [`FsWriteStream::write_chunk`] and finish with [`FsWriteStream::close`].
+    pub fn fs_write_stream_open(
+        &self,
+        path: &str,
+        append: bool,
+        mode: Option<u32>,
+    ) -> ExecResultT<FsWriteStream> {
+        let mut stream = self.connect()?;
+        Self::fs_ok(fs_call_on(
+            &mut stream,
+            &FsRequest::FsWriteStreamOpen {
+                path: path.to_string(),
+                append,
+                mode,
+            },
+        )?)?;
+        Ok(FsWriteStream { stream })
+    }
+
+    /// Write a stream of chunks to a file: open, send each chunk, close.
+    pub fn fs_write_stream(
+        &self,
+        path: &str,
+        chunks: impl IntoIterator<Item = Vec<u8>>,
+    ) -> ExecResultT<()> {
+        let mut ws = self.fs_write_stream_open(path, false, None)?;
+        for chunk in chunks {
+            ws.write_chunk(&chunk)?;
+        }
+        ws.close()
     }
 
     /// List a directory.
@@ -540,6 +578,29 @@ impl ExecClient {
             from: from.to_string(),
             to: to.to_string(),
         })?)
+    }
+}
+
+/// A live streamed fs write to the guest, opened by
+/// [`ExecClient::fs_write_stream_open`].
+pub struct FsWriteStream {
+    stream: UnixStream,
+}
+
+impl FsWriteStream {
+    /// Write one chunk to the open stream.
+    pub fn write_chunk(&mut self, data: &[u8]) -> ExecResultT<()> {
+        ExecClient::fs_ok(fs_call_on(
+            &mut self.stream,
+            &FsRequest::FsWriteChunk {
+                data_base64: nanosb_protocol::base64_encode(data),
+            },
+        )?)
+    }
+
+    /// Flush and close the stream.
+    pub fn close(mut self) -> ExecResultT<()> {
+        ExecClient::fs_ok(fs_call_on(&mut self.stream, &FsRequest::FsWriteClose)?)
     }
 }
 
@@ -696,6 +757,87 @@ mod tests {
         }
         assert!(out.contains("\"type\":\"stdin\""), "{}", out);
         assert!(out.contains("data-here"), "{}", out);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn fs_write_stream_sends_open_chunks_close() {
+        let (path, h) = fake_agent(|s| {
+            let open = read_frame(s);
+            assert_eq!(open["type"], "fs_write_stream_open");
+            assert_eq!(open["path"], "/tmp/stream.bin");
+            write_frame(s, &serde_json::json!({"type":"ok"}));
+            for expected in [b"hello ".as_slice(), b"world".as_slice()] {
+                let chunk = read_frame(s);
+                assert_eq!(chunk["type"], "fs_write_chunk");
+                let data = nanosb_protocol::base64_decode(chunk["data_base64"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(data, expected);
+                write_frame(s, &serde_json::json!({"type":"ok"}));
+            }
+            let close = read_frame(s);
+            assert_eq!(close["type"], "fs_write_close");
+            write_frame(s, &serde_json::json!({"type":"ok"}));
+        });
+        let client = ExecClient::new(&path);
+        client
+            .fs_write_stream("/tmp/stream.bin", vec![b"hello ".to_vec(), b"world".to_vec()])
+            .unwrap();
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn fs_write_stream_empty_sends_open_and_close() {
+        let (path, h) = fake_agent(|s| {
+            let open = read_frame(s);
+            assert_eq!(open["type"], "fs_write_stream_open");
+            write_frame(s, &serde_json::json!({"type":"ok"}));
+            let close = read_frame(s);
+            assert_eq!(close["type"], "fs_write_close");
+            write_frame(s, &serde_json::json!({"type":"ok"}));
+        });
+        let client = ExecClient::new(&path);
+        client
+            .fs_write_stream("/tmp/empty.bin", Vec::<Vec<u8>>::new())
+            .unwrap();
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn fs_write_stream_surfaces_agent_error_on_open() {
+        let (path, h) = fake_agent(|s| {
+            let _open = read_frame(s);
+            write_frame(s, &serde_json::json!({"type":"error","message":"disk full"}));
+        });
+        let client = ExecClient::new(&path);
+        let err = client
+            .fs_write_stream("/tmp/x", vec![b"a".to_vec()])
+            .unwrap_err();
+        assert!(
+            matches!(&err, ExecError::Agent(m) if m == "disk full"),
+            "{:?}",
+            err
+        );
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn fs_write_stream_chunk_error_aborts() {
+        let (path, h) = fake_agent(|s| {
+            let _open = read_frame(s);
+            write_frame(s, &serde_json::json!({"type":"ok"}));
+            let _chunk = read_frame(s);
+            write_frame(s, &serde_json::json!({"type":"error","message":"no space"}));
+        });
+        let client = ExecClient::new(&path);
+        let err = client
+            .fs_write_stream("/tmp/x", vec![b"a".to_vec(), b"b".to_vec()])
+            .unwrap_err();
+        assert!(
+            matches!(&err, ExecError::Agent(m) if m == "no space"),
+            "{:?}",
+            err
+        );
         h.join().unwrap();
     }
 }

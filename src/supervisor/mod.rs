@@ -23,8 +23,11 @@
 
 pub mod client;
 pub mod proto;
+pub mod secrets;
+pub mod volumes;
 
 use runtime::config::{ConsoleSpec, ExtraMount};
+use runtime::exec::ExecHandle;
 use runtime::Sandbox as RuntimeSandbox;
 use runtime::SandboxConfig;
 use serde::{Deserialize, Serialize};
@@ -305,6 +308,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
     // (secrets are never written to config.json/deploy.json or the argv), then
     // clear it so it is not inherited by the VM subprocess.
     let mut config = config;
+    let ephemeral = config.ephemeral;
     if let Ok(boot_env_json) = std::env::var("NANOSB_BOOT_ENV") {
         if let Ok(extra) = serde_json::from_str::<std::collections::HashMap<String, String>>(
             &boot_env_json,
@@ -442,6 +446,9 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
     let stdin_writer = Arc::new(Mutex::new(stdin_write));
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
     let next_subscriber_id = Arc::new(AtomicU64::new(1));
+    let secrets = Arc::new(secrets::SecretStore::new());
+    let volumes = Arc::new(volumes::VolumeRegistry::new());
+    let exec_session: Arc<Mutex<Option<ExecHandle>>> = Arc::new(Mutex::new(None));
 
     // Start control socket listener
     let control_sock_path = sandbox_dir.join("control.sock");
@@ -496,6 +503,9 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         let stdin_writer = stdin_writer.clone();
         let subscribers = subscribers.clone();
         let next_subscriber_id = next_subscriber_id.clone();
+        let secrets = secrets.clone();
+        let volumes = volumes.clone();
+        let exec_session = exec_session.clone();
         std::thread::spawn(move || {
             accept_connections(
                 &listener,
@@ -510,6 +520,9 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
                 stdin_writer,
                 subscribers,
                 next_subscriber_id,
+                secrets,
+                volumes,
+                exec_session,
             );
         })
     });
@@ -569,7 +582,16 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
     };
     write_state(&sandbox_dir, &final_state);
 
+    cleanup_after_stop(&sandbox_dir, ephemeral);
+
     std::process::exit(0);
+}
+
+fn cleanup_after_stop(sandbox_dir: &Path, ephemeral: bool) {
+    if ephemeral {
+        info!("ephemeral sandbox stopped; removing {}", sandbox_dir.display());
+        let _ = std::fs::remove_dir_all(sandbox_dir);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +740,9 @@ fn accept_connections(
     stdin_writer: Arc<Mutex<std::io::PipeWriter>>,
     subscribers: Subscribers,
     next_subscriber_id: Arc<AtomicU64>,
+    secrets: Arc<secrets::SecretStore>,
+    volumes: Arc<volumes::VolumeRegistry>,
+    exec_session: Arc<Mutex<Option<ExecHandle>>>,
 ) {
     listener.set_nonblocking(true).ok();
 
@@ -745,6 +770,9 @@ fn accept_connections(
                 let stdin_writer = stdin_writer.clone();
                 let subscribers = subscribers.clone();
                 let next_subscriber_id = next_subscriber_id.clone();
+                let secrets = secrets.clone();
+                let volumes = volumes.clone();
+                let exec_session = exec_session.clone();
 
                 std::thread::spawn(move || {
                     handle_connection(
@@ -760,6 +788,9 @@ fn accept_connections(
                         stdin_writer,
                         subscribers,
                         next_subscriber_id,
+                        secrets,
+                        volumes,
+                        exec_session,
                     );
                 });
             }
@@ -789,6 +820,9 @@ fn handle_connection(
     stdin_writer: Arc<Mutex<std::io::PipeWriter>>,
     subscribers: Subscribers,
     next_subscriber_id: Arc<AtomicU64>,
+    secrets: Arc<secrets::SecretStore>,
+    volumes: Arc<volumes::VolumeRegistry>,
+    exec_session: Arc<Mutex<Option<ExecHandle>>>,
 ) {
     let _ = stream.set_nonblocking(false);
 
@@ -871,6 +905,9 @@ fn handle_connection(
                             force_stop,
                             running: _running,
                             next_subscriber_id: &next_subscriber_id,
+                            secrets: secrets.as_ref(),
+                            volumes: volumes.as_ref(),
+                            exec_session: exec_session.as_ref(),
                         };
                         proto::serve(stream, reader, &ctx, hello);
                         return;
@@ -1143,6 +1180,25 @@ mod tests {
         let json = r#"{"type": "resize", "cols": 80, "rows": 24}"#;
         let input: AttachInput = serde_json::from_str(json).unwrap();
         assert!(matches!(input, AttachInput::Resize { cols: 80, rows: 24 }));
+    }
+
+    #[test]
+    fn test_ephemeral_cleanup_removes_dir() {
+        let tmp = std::env::temp_dir().join(format!("nsb-ephemeral-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("state.json"), "{}").unwrap();
+        cleanup_after_stop(&tmp, true);
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn test_non_ephemeral_cleanup_keeps_dir() {
+        let tmp = std::env::temp_dir().join(format!("nsb-persistent-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("state.json"), "{}").unwrap();
+        cleanup_after_stop(&tmp, false);
+        assert!(tmp.exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

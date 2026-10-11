@@ -27,6 +27,21 @@ pub enum FsRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<u32>,
     },
+    /// Open a streamed write: the agent keeps the file handle open across the
+    /// following `FsWriteChunk` frames until `FsWriteClose`.
+    FsWriteStreamOpen {
+        path: String,
+        #[serde(default)]
+        append: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    /// One chunk of a streamed write (base64).
+    FsWriteChunk {
+        data_base64: String,
+    },
+    /// Flush and close the open streamed write.
+    FsWriteClose,
     FsList {
         path: String,
     },
@@ -112,5 +127,29 @@ mod tests {
         let resp = FsResponse::FsExists { exists: true };
         let s = serde_json::to_string(&resp).unwrap();
         assert_eq!(serde_json::from_str::<FsResponse>(&s).unwrap(), resp);
+    }
+
+    #[test]
+    fn fs_write_stream_frames_roundtrip() {
+        let open = FsRequest::FsWriteStreamOpen {
+            path: "/tmp/x".into(),
+            append: false,
+            mode: Some(0o600),
+        };
+        let s = serde_json::to_string(&open).unwrap();
+        assert!(s.contains("\"type\":\"fs_write_stream_open\""));
+        assert_eq!(serde_json::from_str::<FsRequest>(&s).unwrap(), open);
+
+        let chunk = FsRequest::FsWriteChunk {
+            data_base64: "aGVsbG8=".into(),
+        };
+        let s = serde_json::to_string(&chunk).unwrap();
+        assert!(s.contains("\"type\":\"fs_write_chunk\""));
+        assert_eq!(serde_json::from_str::<FsRequest>(&s).unwrap(), chunk);
+
+        let close = FsRequest::FsWriteClose;
+        let s = serde_json::to_string(&close).unwrap();
+        assert!(s.contains("\"type\":\"fs_write_close\""));
+        assert_eq!(serde_json::from_str::<FsRequest>(&s).unwrap(), close);
     }
 }

@@ -96,6 +96,7 @@ fn capabilities() -> Vec<Capability> {
         Capability::Networking,
         Capability::Handles,
         Capability::Ephemeral,
+        Capability::Secrets,
     ]
 }
 
@@ -318,6 +319,19 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             s.name = None;
             proxy(writer, n, Request::FsCopyToHost(s))
         }
+        Request::SecretSet(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::SecretSet(s))
+        }
+        Request::SecretList { name } => {
+            proxy(writer, require_name(name)?, Request::SecretList { name: None })
+        }
+        Request::SecretRemove(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::SecretRemove(s))
+        }
         other => send(writer, &Response::Error(ProtocolError::unsupported(format!(
                 "helper does not serve {other:?}"
             ))),
@@ -410,6 +424,7 @@ fn is_terminal(resp: &Response) -> bool {
             | Response::FsExists { .. }
             | Response::Metrics(_)
             | Response::Logs { .. }
+            | Response::Secrets { .. }
             | Response::Status { .. }
             | Response::Sandbox(_)
             | Response::List(_)
