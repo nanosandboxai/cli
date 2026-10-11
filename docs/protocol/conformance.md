@@ -7,7 +7,7 @@ stream socket, so every SDK driver is tested against a real protocol target
 without a VM or network.
 
 The authoritative contract lives in
-[`sdks/conformance/SPEC.md`](../../sdks/conformance/SPEC.md). This page
+[`sdk/conformance/SPEC.md`](../../sdk/conformance/SPEC.md). This page
 summarises it and links to the details; it does not duplicate the spec verbatim.
 
 ## The harness
@@ -24,7 +24,7 @@ full server semantics.
 
 ## Scenario schema
 
-Each scenario is one JSON file in `sdks/conformance/scenarios/`:
+Each scenario is one JSON file in `sdk/conformance/scenarios/`:
 
 ```json
 {
@@ -168,4 +168,4 @@ modes. See SPEC.md §7 for the complete reference.
 The corpus covers lifecycle, exec, exec_stream, shell, attach, fs, logs, metrics,
 volumes, secrets, snapshots, errors, timeouts, and capability gating. The full
 coverage matrix (scenario file → verbs exercised) is in
-[`sdks/conformance/README.md`](../../sdks/conformance/README.md).
+[`sdk/conformance/README.md`](../../sdk/conformance/README.md).

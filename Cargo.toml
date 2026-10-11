@@ -12,7 +12,7 @@ members = [
     # CI-safe protocol conformance harness for every SDK driver.
     "crates/conformance",
     # Language SDKs.
-    "sdks/rust",
+    "sdk/rust",
 ]
 resolver = "2"
 

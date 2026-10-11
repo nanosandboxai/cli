@@ -7,14 +7,14 @@ Date: 2026-10-11 · Branch: `feat/epic-1-sdk`
 | Binding | Driver | Result |
 |---|---|---|
 | Rust (reference client) | `crates/conformance/tests/driver_test.rs` | **35/35** |
-| Python | `python3 sdks/python/conformance/run.py` | **35/35** |
-| TypeScript/Node | `node sdks/typescript/conformance/run.mjs` | **35/35** |
-| Go | `go run ./sdks/go/conformance/run.go` | **35/35** |
-| Ruby | `ruby -I sdks/ruby/lib sdks/ruby/conformance/run.rb` | **35/35** |
-| Java | `java -cp <build> Run` (`sdks/java/conformance/Run.java`) | **35/35** |
-| C#/.NET | `dotnet run --project sdks/dotnet/conformance` | **35/35** |
+| Python | `python3 sdk/python/conformance/run.py` | **35/35** |
+| TypeScript/Node | `node sdk/typescript/conformance/run.mjs` | **35/35** |
+| Go | `go run ./sdk/go/conformance/run.go` | **35/35** |
+| Ruby | `ruby -I sdk/ruby/lib sdk/ruby/conformance/run.rb` | **35/35** |
+| Java | `java -cp <build> Run` (`sdk/java/conformance/Run.java`) | **35/35** |
+| C#/.NET | `dotnet run --project sdk/dotnet/conformance` | **35/35** |
 
-The corpus (`sdks/conformance/scenarios/`, 35 scenarios) exercises lifecycle,
+The corpus (`sdk/conformance/scenarios/`, 35 scenarios) exercises lifecycle,
 exec/exec_stream/shell/attach(+input/resize), the full `fs` v1 set including
 streamed write, logs (tail/follow/cursor/source), metrics(+stream), volumes,
 secrets, snapshots, error codes, per-step timeouts, and capability gating. Each

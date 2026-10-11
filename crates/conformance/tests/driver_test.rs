@@ -1,10 +1,10 @@
 //! Conformance driver for the reference `nanosb-client`.
 //!
-//! For each scenario in `sdks/conformance/scenarios/`, spawns the
+//! For each scenario in `sdk/conformance/scenarios/`, spawns the
 //! `nanosb-conformance serve` binary (via `CARGO_BIN_EXE_nanosb-conformance`),
 //! reads the `READY <socket>` line from its stdout, connects `nanosb-client` to
 //! that socket, drives the scripted steps per the driver contract in
-//! `sdks/conformance/SPEC.md`, and evaluates the scenario's `assert` block. A
+//! `sdk/conformance/SPEC.md`, and evaluates the scenario's `assert` block. A
 //! scenario passes when the driver completes without an assertion failure.
 //!
 //! allow: SIZE_OK — a data-driven verb→operation mapping table plus the assert
@@ -33,7 +33,7 @@ use serde_json::Value;
 /// Directory holding the scenario corpus, relative to this crate's manifest.
 const SCENARIOS_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../sdks/conformance/scenarios"
+    "/../../sdk/conformance/scenarios"
 );
 
 /// Accumulated observations from driving a scenario, consumed by the assert

@@ -36,14 +36,14 @@ __pycache__/
 *.pyc
 
 # SDK build output (Maven / .NET)
-sdks/java/target/
-sdks/dotnet/**/bin/
-sdks/dotnet/**/obj/
-sdks/dotnet/**/TestResults/
+sdk/java/target/
+sdk/dotnet/**/bin/
+sdk/dotnet/**/obj/
+sdk/dotnet/**/TestResults/
 
 # Kotlin build output
-sdks/kotlin/classes/
-sdks/kotlin/*.jar
+sdk/kotlin/classes/
+sdk/kotlin/*.jar
 
 # packaging output
 dist/

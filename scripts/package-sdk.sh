@@ -67,11 +67,11 @@ for sdk in "${SDKS[@]}"; do
   if [ -n "$LIBKRUNFW" ]; then cp "$LIBKRUNFW" "$out/libs/"; fi
   if [ -f "$GVPROXY" ]; then cp "$GVPROXY" "$out/bin/gvproxy"; chmod +x "$out/bin/gvproxy"; fi
 
-  if [ -d "$REPO_ROOT/sdks/$sdk" ]; then
+  if [ -d "$REPO_ROOT/sdk/$sdk" ]; then
     rsync -a \
       --exclude target --exclude classes --exclude '*.jar' --exclude '*.class' \
       --exclude bin --exclude obj --exclude __pycache__ --exclude '*.pyc' \
-      "$REPO_ROOT/sdks/$sdk/" "$out/sdk/"
+      "$REPO_ROOT/sdk/$sdk/" "$out/sdk/"
   fi
 
   cp "$REPO_ROOT/scripts/package-install.sh" "$out/install.sh"; chmod +x "$out/install.sh"

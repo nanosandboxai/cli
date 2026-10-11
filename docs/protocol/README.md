@@ -14,10 +14,10 @@ implementation is the frozen `crates/protocol` crate; these documents mirror it.
 - **[`conformance.md`](conformance.md)** — the conformance harness: the scenario
   schema, the per-SDK driver contract, and the `expect.type` → SDK-operation
   mapping. The authoritative contract is
-  [`sdks/conformance/SPEC.md`](../../sdks/conformance/SPEC.md).
+  [`sdk/conformance/SPEC.md`](../../sdk/conformance/SPEC.md).
 
 ## Related
 
 - Epic: [`docs/epics/epic-1-multi-language-sdk.md`](../epics/epic-1-multi-language-sdk.md)
-- Conformance corpus: [`sdks/conformance/`](../../sdks/conformance/)
+- Conformance corpus: [`sdk/conformance/`](../../sdk/conformance/)
 - Protocol crate: [`crates/protocol/`](../../crates/protocol/)
