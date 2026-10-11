@@ -31,12 +31,12 @@ Rust workspace suites (green): `nanosb-protocol` 18, `nanosb-client` 21,
 | AC1 `nanosb-runtime` builds from features; boots + controls a sandbox | ✅ | `runtime-host` build; helper daemon + supervisor serve the verb set; live-VM e2e (helper_e2e) passed during W1 |
 | AC2 Protocol spec published; reference client passes every verb | ✅ | `docs/protocol/*`; Rust driver 35/35 |
 | AC3 Rust/Python/TS/Go/Ruby pass conformance | ✅ | 5/5 drivers 35/35 |
-| AC4 Java/Kotlin + C# pass conformance | ◑ | Java ✅ 35/35, C# ✅ 35/35; **Kotlin deferred** (no `kotlinc` on the host) |
+| AC4 Java/Kotlin + C# pass conformance | ✅ | Java 35/35, C# 35/35, Kotlin (facade over the Java SDK) 35/35 |
 | AC5 exec/stream/shell/attach/fs/logs/metrics/volumes in every binding | ◑ | proven per binding against the scripted harness (35/35); live-VM per-binding smoke not run |
 | AC6 snapshot+restore and pause+resume (local) | ◑ | pause/resume ✅ live; disk-only snapshots (create/list/restore/remove) ✅ live — memory/process capture + boot-from-snapshot deferred (R3, `docs/decisions/snapshots.md`) |
 | AC7 no binding persists secret values | ✅ | in-memory store; `list` returns redacted values; regression test greps the sandbox dir |
 | AC8 C FFI fully removed | ✅ | zero `extern "C" fn sandbox_`, no `cbindgen`, no `ffi` feature/cdylib |
-| AC9 bundled macOS arm64 install, zero setup, `NANOSB_HOME` works | ✗ | WS9 packaging/signing not built |
+| AC9 bundled macOS arm64 install, zero setup, `NANOSB_HOME` works | ◑ | packaging bundle (helper+gvproxy+libkrunfw) + pre-sign + lazy re-sign + `NANOSB_HOME` verified; end-to-end packaged boot not run |
 
 Legend: ✅ done · ◑ partial · ✗ not done.
 
