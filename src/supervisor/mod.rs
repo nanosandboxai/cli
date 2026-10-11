@@ -24,6 +24,7 @@
 pub mod client;
 pub mod proto;
 pub mod secrets;
+pub mod snapshots;
 pub mod volumes;
 
 use runtime::config::{ConsoleSpec, ExtraMount};

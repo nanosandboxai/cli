@@ -152,32 +152,23 @@ fn live_conformance_smoke() {
     sandbox.volume_remove(&vol_name).expect("volume_remove");
     assert!(sandbox.volume_list().unwrap().iter().all(|v| v.name != vol_name));
 
-    // ── snapshots: blocked (AC6) ───────────────────────────────────────
-    // The helper does not advertise `Snapshots` and does not dispatch the
-    // snapshot verbs; the supervisor also answers `unsupported` for them.
+    // ── snapshots (AC6): disk-only, served through the helper socket ────
     assert!(
-        !client.supports(Capability::Snapshots),
-        "this build must not advertise snapshots (AC6 snapshots are blocked)"
+        client.supports(Capability::Snapshots),
+        "the helper must advertise the Snapshots capability"
     );
-    let snap_err = sandbox
+    let snap = sandbox
         .snapshot_create(None)
-        .err()
-        .map(|e| format!("{e}"))
-        .unwrap_or_default();
-    eprintln!("live_conformance: snapshot_create via helper socket -> {snap_err}");
-    assert!(
-        snap_err.contains("helper does not serve"),
-        "snapshot_create should be blocked at the helper daemon, got: {snap_err}"
-    );
-    let restore_err = sandbox
-        .snapshot_restore("snap-live", &format!("{}-restored", name))
-        .err()
-        .map(|e| format!("{e}"))
-        .unwrap_or_default();
-    assert!(
-        restore_err.contains("helper does not serve"),
-        "snapshot_restore should be blocked at the helper daemon, got: {restore_err}"
-    );
+        .expect("snapshot_create via helper socket");
+    assert_eq!(snap.sandbox, name);
+    assert!(!snap.includes_memory);
+    assert!(client.snapshots().unwrap().iter().any(|s| s.id == snap.id));
+    let restored = format!("{}-restored", name);
+    sandbox
+        .snapshot_restore(&snap.id, &restored)
+        .expect("snapshot_restore via helper socket");
+    sandbox.snapshot_remove(&snap.id).expect("snapshot_remove");
+    assert!(client.snapshots().unwrap().iter().all(|s| s.id != snap.id));
 
     // ── lifecycle teardown ─────────────────────────────────────────────
     sandbox.stop(true).expect("stop");

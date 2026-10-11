@@ -98,6 +98,7 @@ fn capabilities() -> Vec<Capability> {
         Capability::Ephemeral,
         Capability::Secrets,
         Capability::Volumes,
+        Capability::Snapshots,
     ]
 }
 
@@ -356,6 +357,12 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             s.name = None;
             proxy(writer, n, Request::MountAdd(s))
         }
+        Request::SnapshotCreate(spec) => snapshot_create(writer, spec),
+        Request::SnapshotList => snapshot_list(writer),
+        Request::SnapshotRemove { snapshot } => snapshot_remove(writer, &snapshot),
+        Request::SnapshotRestore(spec) | Request::SnapshotFork(spec) => {
+            snapshot_materialize(writer, spec)
+        }
         other => send(writer, &Response::Error(ProtocolError::unsupported(format!(
                 "helper does not serve {other:?}"
             ))),
@@ -395,6 +402,51 @@ fn require_name(name: Option<String>) -> anyhow::Result<String> {
 
 fn not_found(name: &str) -> ProtocolError {
     ProtocolError::not_found(format!("sandbox '{name}' not found"))
+}
+
+fn snapshot_create(
+    writer: &mut UnixStream,
+    spec: nanosb_protocol::SnapshotCreateSpec,
+) -> anyhow::Result<()> {
+    let store = nanosb_cli::supervisor::snapshots::SnapshotStore::new();
+    let name = require_name(spec.name.clone())?;
+    let dir = sandboxes_dir().join(&name);
+    if !dir.exists() {
+        return send(writer, &Response::Error(not_found(&name)));
+    }
+    let image = std::fs::read_to_string(dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("image").and_then(|i| i.as_str()).map(String::from));
+    match store.create(&dir, &name, image, spec.dest) {
+        Ok(info) => send(writer, &Response::Snapshot(info)),
+        Err(e) => send(writer, &Response::Error(e.to_protocol())),
+    }
+}
+
+fn snapshot_list(writer: &mut UnixStream) -> anyhow::Result<()> {
+    let store = nanosb_cli::supervisor::snapshots::SnapshotStore::new();
+    send(writer, &Response::Snapshots { snapshots: store.list() })
+}
+
+fn snapshot_remove(writer: &mut UnixStream, id: &str) -> anyhow::Result<()> {
+    let store = nanosb_cli::supervisor::snapshots::SnapshotStore::new();
+    match store.remove(id) {
+        Ok(()) => send(writer, &Response::Ok { version: HELPER_VERSION.to_string() }),
+        Err(e) => send(writer, &Response::Error(e.to_protocol())),
+    }
+}
+
+fn snapshot_materialize(
+    writer: &mut UnixStream,
+    spec: nanosb_protocol::SnapshotRestoreSpec,
+) -> anyhow::Result<()> {
+    let store = nanosb_cli::supervisor::snapshots::SnapshotStore::new();
+    let new_dir = sandboxes_dir().join(&spec.name);
+    match store.materialize(&spec.snapshot, &spec.name, &new_dir) {
+        Ok(_) => send(writer, &Response::Ok { version: HELPER_VERSION.to_string() }),
+        Err(e) => send(writer, &Response::Error(e.to_protocol())),
+    }
 }
 
 fn sandbox_facing_socket(name: &str) -> PathBuf {

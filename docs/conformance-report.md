@@ -33,7 +33,7 @@ Rust workspace suites (green): `nanosb-protocol` 18, `nanosb-client` 21,
 | AC3 Rust/Python/TS/Go/Ruby pass conformance | ✅ | 5/5 drivers 35/35 |
 | AC4 Java/Kotlin + C# pass conformance | ◑ | Java ✅ 35/35, C# ✅ 35/35; **Kotlin deferred** (no `kotlinc` on the host) |
 | AC5 exec/stream/shell/attach/fs/logs/metrics/volumes in every binding | ◑ | proven per binding against the scripted harness (35/35); live-VM per-binding smoke not run |
-| AC6 snapshot+restore and pause+resume (local) | ◑ | pause/resume implemented (supervisor SIGSTOP/SIGCONT); **full snapshots engine (M5) not built** |
+| AC6 snapshot+restore and pause+resume (local) | ◑ | pause/resume ✅ live; disk-only snapshots (create/list/restore/remove) ✅ live — memory/process capture + boot-from-snapshot deferred (R3, `docs/decisions/snapshots.md`) |
 | AC7 no binding persists secret values | ✅ | in-memory store; `list` returns redacted values; regression test greps the sandbox dir |
 | AC8 C FFI fully removed | ✅ | zero `extern "C" fn sandbox_`, no `cbindgen`, no `ffi` feature/cdylib |
 | AC9 bundled macOS arm64 install, zero setup, `NANOSB_HOME` works | ✗ | WS9 packaging/signing not built |
@@ -56,11 +56,12 @@ Legend: ✅ done · ◑ partial · ✗ not done.
 
 ## Remaining (not in this branch)
 
-- **WS6 / M5 — snapshots**: writable-layer + manifest capture, `restore`, `fork`
-  (epic risk R3: may fall back to disk-only). Protocol + client surface exist;
-  the runtime engine does not.
-- **WS9 — packaging/signing**: bundle helper + `libkrunfw` + `gvproxy`,
-  pre-sign, lazy re-sign, `NANOSB_HOME` override, runtime-setup doc.
-- **Live-VM verification (T11/T18)**: per-binding live smoke on a vanilla image.
-- **Kotlin SDK**: blocked on a missing `kotlinc` toolchain (Java SDK ships).
+- **WS6 / M5 — snapshots (beyond disk-only)**: memory/process capture and
+  booting a VM *on* a restored writable layer. The disk-only store (create /
+  list / restore / fork / remove) ships and is verified live; see
+  `docs/decisions/snapshots.md`.
+- **Live-VM per-binding smoke (T11/T18)**: the reference-client live smoke runs;
+  per-language live smoke on a vanilla image is not run.
+- **Kotlin**: shipped (facade over the Java SDK) — a fully standalone Kotlin
+  client is an optional refinement.
 - **WS5 networking enforcement**: deliberately Epic 3 (config surface ships here).

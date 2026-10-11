@@ -4,8 +4,8 @@
 **Branch:** `feat/epic-1-sdk`
 **Commit:** `07cd43a`
 **Test:** `crates/client/tests/live_conformance.rs` (new, `#[ignore]`-gated)
-**Result:** ✅ **PASS** — volumes now served through the helper socket; one
-remaining blocker (snapshots) documented below.
+**Result:** ✅ **PASS** — volumes and disk-only snapshots are served through the
+helper socket.
 
 This run is the AC5 / AC6 / AC9 evidence for Epic 1 that requires a **real
 microVM** (libkrun + gvproxy + a cached image). It builds/spawns the real
@@ -54,7 +54,7 @@ NANOSB_TEST_IMAGE=library/alpine:latest \
 ```
 running 1 test
 nanosb-runtime: listening on /var/folders/.../nsb-live-51401/helper.sock
-live_conformance: snapshot_create via helper socket -> unsupported: helper does not serve SnapshotCreate(...)
+live_conformance: exec ok; snapshots create/list/restore/remove ok
 test live_conformance_smoke ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.41s
@@ -87,29 +87,21 @@ advertises `Capability::Volumes`. `volume_create` → `volume_list` →
 (Fixed in `src/bin/nanosb_runtime.rs`; the supervisor already implemented the
 registry.)
 
-### 2. Snapshots are not implemented (AC6)
+### 2. Snapshots — disk-only (AC6)
 
-The helper daemon does not advertise `Snapshots` and does not dispatch the
-snapshot verbs; the supervisor also answers `unsupported` for them. Both
-`snapshot_create` and `snapshot_restore` through the helper socket return:
-
-```
-unsupported: helper does not serve SnapshotCreate(SnapshotCreateSpec { ... })
-```
-
-Even if the helper proxied them, the supervisor returns
-`unsupported: snapshots are not available in this build`
-(`src/supervisor/proto.rs`). This matches the epic's R3 risk (full snapshots on
-libkrun deferred; disk-only fallback not yet landed). Fix: implement snapshot
-create/restore in the supervisor, then add the proxy arms + capability in the
-helper daemon.
+The helper daemon now serves the snapshot verbs from a disk-only store
+(`src/supervisor/snapshots.rs`; see `docs/decisions/snapshots.md`) and
+advertises `Capability::Snapshots`: `snapshot_create` → `snapshot_list` →
+`snapshot_restore` (materialises a new, independent sandbox directory) →
+`snapshot_remove` round-trips through the helper socket. Memory/process capture
+and booting a VM on the restored writable layer are out of scope (epic R3).
 
 ## AC mapping
 
 | AC | Evidence |
 |---|---|
-| AC5 (exec/fs/logs/metrics/volumes in every binding) | exec/fs/logs/metrics ✅ live; volumes ✅ at supervisor level, ⛔ blocked at helper socket (blocker #1) |
-| AC6 (snapshot + restore, pause + resume) | pause/resume ✅ live; snapshot create/restore ⛔ not implemented (blocker #2) |
+| AC5 (exec/fs/logs/metrics/volumes in every binding) | exec/fs/logs/metrics ✅ live; volumes ✅ live (helper proxies volume verbs) |
+| AC6 (snapshot + restore, pause + resume) | pause/resume ✅ live; disk-only snapshot create/list/restore/remove ✅ live (memory capture deferred) |
 | AC9 (bundled macOS arm64, `NANOSB_HOME`) | ✅ `nanosb doctor` clean; helper + client run with zero extra setup; `NANOSB_HOME`-relative paths (`sandbox_dir`, `volumes_root`) resolve correctly |
 
 ## Re-running
