@@ -44,3 +44,6 @@ sdks/dotnet/**/TestResults/
 # Kotlin build output
 sdks/kotlin/classes/
 sdks/kotlin/*.jar
+
+# packaging output
+dist/
