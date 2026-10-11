@@ -1,6 +1,6 @@
 # Epic 1 — Multi-language Sandbox SDK (protocol-first, helper-based)
 
-Status: decisions locked (2026-10-07) — see §0
+Status: decisions locked (2026-10-07) — see §0 · implementation 2026-10-11: SDKs + conformance shipped (see `docs/conformance-report.md`)
 Date: 2026-10-07
 Related: `docs/epics/epic-2-tui-refactor-and-testing.md`, PR #91
 
