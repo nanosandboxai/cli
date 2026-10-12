@@ -478,7 +478,10 @@ impl Sandbox {
         conn.call_stream(&Attach {
             name: self.name_arg()?,
         })?;
-        Ok(AttachSession { conn })
+        Ok(AttachSession {
+            conn,
+            pending: std::collections::VecDeque::new(),
+        })
     }
 
     // ── observability ──────────────────────────────────────────────────
@@ -929,28 +932,46 @@ impl Sandbox {
 /// the same connection. `read_events` returns `None` once the stream ends.
 pub struct AttachSession {
     conn: Connection,
+    pending: std::collections::VecDeque<GuestEvent>,
 }
 
 impl AttachSession {
     /// Send raw bytes to the guest console.
     pub fn send_input(&mut self, bytes: &[u8]) -> Result<()> {
         let data = String::from_utf8_lossy(bytes).into_owned();
-        match self.conn.call(&AttachInput { data })? {
-            Response::Ok { .. } => Ok(()),
-            other => Err(Error::unexpected(format!("{other:?}"))),
-        }
+        self.control(&AttachInput { data })
     }
 
     /// Resize the attached PTY.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
-        match self.conn.call(&AttachResize { cols, rows })? {
-            Response::Ok { .. } => Ok(()),
-            other => Err(Error::unexpected(format!("{other:?}"))),
+        self.control(&AttachResize { cols, rows })
+    }
+
+    /// Send a control request and wait for its `ok` ack, buffering any
+    /// interleaved console events so they are not lost or mistaken for the ack.
+    fn control(&mut self, req: &Request) -> Result<()> {
+        self.conn.send(req)?;
+        loop {
+            match self.conn.next_response()? {
+                None => return Err(Error::unexpected("attach stream closed before ack")),
+                Some(Response::Ok { .. }) => return Ok(()),
+                Some(Response::Error(e)) => return Err(Error::Protocol(e)),
+                Some(Response::Guest(ev)) => {
+                    if is_stream_end(&ev) {
+                        return Err(Error::unexpected("attach stream ended before ack"));
+                    }
+                    self.pending.push_back(ev);
+                }
+                Some(_) => {}
+            }
         }
     }
 
     /// Read the next guest event, or `None` when the attach stream has ended.
     pub fn read_events(&mut self) -> Result<Option<GuestEvent>> {
+        if let Some(ev) = self.pending.pop_front() {
+            return Ok(Some(ev));
+        }
         while let Some(resp) = self.conn.next_response()? {
             match resp {
                 Response::Guest(ev) => {
