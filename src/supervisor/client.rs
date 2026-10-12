@@ -3,7 +3,7 @@
 //! Provides connect/request/attach streams for CLI and TUI use.
 
 use crate::supervisor::{
-    AttachFrame, ControlRequest, ControlResponse, SupervisorState, SANDBOXES_DIR,
+    sandboxes_root, AttachFrame, ControlRequest, ControlResponse, SupervisorState,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -52,10 +52,7 @@ pub struct SupervisorClient {
 impl SupervisorClient {
     /// Create a new client for the given sandbox name.
     pub fn new(sandbox_name: &str) -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let sandbox_dir = PathBuf::from(&home)
-            .join(SANDBOXES_DIR)
-            .join(sandbox_name);
+        let sandbox_dir = sandboxes_root().join(sandbox_name);
         Self {
             sandbox_name: sandbox_name.to_string(),
             sandbox_dir,

@@ -11,11 +11,14 @@ pub const EXEC_VSOCK_PORT: u32 = 1024;
 
 /// Host directory holding the cross-compiled guest binaries (exec agent).
 ///
-/// Overridable with `NANOSB_GUEST_BIN_DIR`; defaults to
-/// `~/.nanosandbox/guest-bin`.
+/// Resolution order: `NANOSB_GUEST_BIN_DIR`, then `$NANOSB_HOME/guest-bin`,
+/// then `~/.nanosandbox/guest-bin`.
 pub fn guest_bin_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("NANOSB_GUEST_BIN_DIR") {
         return std::path::PathBuf::from(dir);
+    }
+    if let Ok(dir) = std::env::var("NANOSB_HOME") {
+        return std::path::PathBuf::from(dir).join("guest-bin");
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(home)

@@ -13,7 +13,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NANOSB_HOME="${NANOSB_HOME:-$HOME/.nanosandbox}"
 
-mkdir -p "$NANOSB_HOME/bin" "$NANOSB_HOME/libs"
+mkdir -p "$NANOSB_HOME/bin" "$NANOSB_HOME/libs" "$NANOSB_HOME/guest-bin"
 
 cp "$HERE/bin/nanosb-runtime" "$NANOSB_HOME/bin/nanosb-runtime"; chmod +x "$NANOSB_HOME/bin/nanosb-runtime"
 if [ -f "$HERE/bin/gvproxy" ]; then
@@ -21,6 +21,9 @@ if [ -f "$HERE/bin/gvproxy" ]; then
 fi
 if ls "$HERE"/libs/libkrunfw*.dylib >/dev/null 2>&1; then
   cp "$HERE"/libs/libkrunfw*.dylib "$NANOSB_HOME/libs/"
+fi
+if [ -f "$HERE/guest-bin/exec-agent" ]; then
+  cp "$HERE/guest-bin/exec-agent" "$NANOSB_HOME/guest-bin/exec-agent"; chmod +x "$NANOSB_HOME/guest-bin/exec-agent"
 fi
 
 # Lazy re-sign: if the helper's signature is invalid (e.g. after a copy with a
