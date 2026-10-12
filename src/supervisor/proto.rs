@@ -721,7 +721,9 @@ fn stream_attach(
                                 let _ = w.write_all(data.as_bytes());
                                 let _ = w.flush();
                             }
+                            ack_ok(stream)?;
                         }
+                        Request::AttachResize { cols, rows } => attach_resize(stream, ctx, cols, rows)?,
                         _ => {}
                     }
                 }
