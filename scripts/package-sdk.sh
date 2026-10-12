@@ -46,8 +46,11 @@ HELPER="$TARGET_DIR/nanosb-runtime"
 
 LIBKRUNFW="$(ls "$SRC_HOME"/libs/libkrunfw*.dylib 2>/dev/null | head -1 || true)"
 GVPROXY="$SRC_HOME/bin/gvproxy"
+GUEST_BIN="${NANOSB_GUEST_BIN_DIR:-$SRC_HOME/guest-bin}"
+EXEC_AGENT="$GUEST_BIN/exec-agent"
 [ -n "$LIBKRUNFW" ] || echo "warning: no libkrunfw*.dylib under $SRC_HOME/libs (bundle will omit it)"
 [ -f "$GVPROXY" ]  || echo "warning: no gvproxy under $SRC_HOME/bin (bundle will omit it)"
+[ -f "$EXEC_AGENT" ] || echo "warning: no exec-agent under $GUEST_BIN (bundle will omit it)"
 
 echo "==> pre-signing the helper"
 if command -v codesign >/dev/null 2>&1; then
@@ -61,11 +64,12 @@ mkdir -p "$DIST"
 for sdk in "${SDKS[@]}"; do
   out="$DIST/nanosandbox-sdk-$sdk"
   rm -rf "$out"
-  mkdir -p "$out/bin" "$out/libs" "$out/sdk"
+  mkdir -p "$out/bin" "$out/libs" "$out/sdk" "$out/guest-bin"
 
   cp "$HELPER" "$out/bin/nanosb-runtime"; chmod +x "$out/bin/nanosb-runtime"
   if [ -n "$LIBKRUNFW" ]; then cp "$LIBKRUNFW" "$out/libs/"; fi
   if [ -f "$GVPROXY" ]; then cp "$GVPROXY" "$out/bin/gvproxy"; chmod +x "$out/bin/gvproxy"; fi
+  if [ -f "$EXEC_AGENT" ]; then cp "$EXEC_AGENT" "$out/guest-bin/exec-agent"; chmod +x "$out/guest-bin/exec-agent"; fi
 
   if [ -d "$REPO_ROOT/sdk/$sdk" ]; then
     rsync -a \

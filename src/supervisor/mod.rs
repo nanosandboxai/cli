@@ -49,6 +49,20 @@ use tracing::{debug, error, info, warn};
 /// Base directory for sandbox state: ~/.nanosandbox/sandboxes/{name}/
 pub const SANDBOXES_DIR: &str = ".nanosandbox/sandboxes";
 
+/// The nanosandbox state root: `$NANOSB_HOME` when set, else `~/.nanosandbox`.
+pub fn nanosb_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("NANOSB_HOME") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".nanosandbox")
+}
+
+/// Base directory for sandbox state: `<NANOSB_HOME>/sandboxes`.
+pub fn sandboxes_root() -> PathBuf {
+    nanosb_home().join("sandboxes")
+}
+
 /// Maximum log file size before rotation (50 MB).
 const LOG_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -281,10 +295,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         libc::setsid();
     }
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let sandbox_dir = PathBuf::from(&home)
-        .join(SANDBOXES_DIR)
-        .join(&args.sandbox_name);
+    let sandbox_dir = sandboxes_root().join(&args.sandbox_name);
 
     // Create sandbox directory structure
     let logs_dir = sandbox_dir.join("logs");

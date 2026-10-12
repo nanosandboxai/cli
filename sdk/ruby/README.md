@@ -58,6 +58,24 @@ Every call dials a fresh connection and re-negotiates the `hello` handshake
 opening `ok` ack, then frames until the terminal frame (`guest exit/error` or
 `event done`).
 
+## Managing a real sandbox (`ManagedRuntime`)
+
+`Nanosandbox::ManagedRuntime` locates and starts the real `nanosb-runtime` helper
+so you can boot and manage microVMs without launching it yourself:
+
+```ruby
+require "nanosandbox/runtime"
+
+Nanosandbox::ManagedRuntime.open do |rt|
+  client = Nanosandbox::SandboxClient.connect(rt.socket)
+  box = client.create("image" => "library/alpine:latest", "name" => "demo")
+  puts box.exec("echo", ["hello from a microVM"])["stdout"]
+end
+```
+
+The helper is found via `NANOSB_RUNTIME_BIN` → `$NANOSB_HOME/bin/nanosb-runtime`
+→ `PATH` → the repo `target/debug/nanosb-runtime`.
+
 ## Testing
 
 Unit tests (minitest, in-process fake helper):
@@ -74,6 +92,12 @@ ruby -I sdk/ruby/lib sdk/ruby/conformance/run.rb
 ```
 
 Expected output: `35 passed, 0 failed`, exit code 0.
+
+Live microVM E2E (opt-in; needs the helper + libkrun/gvproxy + a cached image):
+
+```bash
+NANOSB_E2E=1 ruby -I sdk/ruby/lib sdk/ruby/test/test_e2e.rb
+```
 
 ## Layout
 

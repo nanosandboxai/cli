@@ -477,8 +477,15 @@ fn proxy(writer: &mut UnixStream, name: String, req: Request) -> anyhow::Result<
     )?;
     let _hello_ok = read_message::<_, Response>(&mut upstream_reader, &mut scratch)?;
     write_message(&mut upstream_writer, &req)?;
+    let streaming = request_streams(&req);
+    let mut first = true;
     while let Some(resp) = read_message::<_, Response>(&mut upstream_reader, &mut scratch)? {
-        let terminal = is_terminal(&resp);
+        let terminal = if streaming {
+            is_stream_terminal(&resp)
+        } else {
+            first
+        };
+        first = false;
         write_message(writer, &resp)?;
         if terminal {
             break;
@@ -487,26 +494,28 @@ fn proxy(writer: &mut UnixStream, name: String, req: Request) -> anyhow::Result<
     Ok(())
 }
 
-fn is_terminal(resp: &Response) -> bool {
+/// A request that yields a multi-frame stream (an opening `ok` ack followed by
+/// events until a terminal frame), as opposed to a single response frame.
+fn request_streams(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::ExecStream(_)
+            | Request::Attach { .. }
+            | Request::MetricsStream { .. }
+            | Request::FsWriteStream(_)
+            | Request::Logs(nanosb_protocol::LogsSpec { follow: true, .. })
+    )
+}
+
+/// The frame that ends a streamed exchange. The opening `ok` ack is NOT
+/// terminal — treating it as terminal truncates every streamed verb.
+fn is_stream_terminal(resp: &Response) -> bool {
     matches!(
         resp,
-        Response::Ok { .. }
-            | Response::Error(_)
-            | Response::ExecResult(_)
-            | Response::FsData { .. }
-            | Response::FsContent { .. }
-            | Response::FsEntries { .. }
-            | Response::FsStat(_)
-            | Response::FsExists { .. }
-            | Response::Metrics(_)
-            | Response::Logs { .. }
-            | Response::Secrets { .. }
-            | Response::Status { .. }
-            | Response::Sandbox(_)
-            | Response::List(_)
-            | Response::Guest(nanosb_protocol::GuestEvent::Exit { .. })
+        Response::Guest(nanosb_protocol::GuestEvent::Exit { .. })
             | Response::Guest(nanosb_protocol::GuestEvent::Error { .. })
             | Response::Event(nanosb_protocol::StreamEvent::Done)
+            | Response::Error(_)
     )
 }
 

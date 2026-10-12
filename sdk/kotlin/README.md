@@ -101,6 +101,29 @@ Every call dials a fresh connection and re-negotiates the `hello` handshake
 opening `ok` ack, then frames until the terminal frame (`guest exit/error` or
 `event done`).
 
+## Managing a real sandbox (`ManagedRuntime`)
+
+`nanosandbox.ManagedRuntime` (from the Java SDK) locates and starts the real
+`nanosb-runtime` helper so you can boot and manage microVMs without launching it
+yourself:
+
+```kotlin
+val rt = nanosandbox.ManagedRuntime.start()
+try {
+    val client = KotlinClient.connect(rt.socket.toString())
+    val spec = KtJson.obj()
+    spec.set("image", KtJson.str("library/alpine:latest"))
+    spec.set("name", KtJson.str("demo"))
+    val box = client.create(spec)
+    println(box.exec("echo", arrayOf("hello from a microVM")).getStr("stdout"))
+} finally {
+    rt.close()
+}
+```
+
+The helper is found via `NANOSB_RUNTIME_BIN` → `$NANOSB_HOME/bin/nanosb-runtime`
+→ `PATH` → the repo `target/debug/nanosb-runtime`.
+
 ## Building
 
 ```bash
@@ -132,3 +155,9 @@ java -cp sdk/kotlin/nanosandbox-kotlin.jar nanosandbox.kt.RunKt
 Run from the repository root (the driver resolves `sdk/conformance/scenarios`
 and `target/debug/nanosb-conformance` relative to the working directory).
 Expected output: `35 passed, 0 failed`, exit code 0.
+
+Live microVM E2E (opt-in; needs the helper + libkrun/gvproxy + a cached image):
+
+```bash
+NANOSB_E2E=1 java -cp sdk/kotlin/nanosandbox-kotlin.jar nanosandbox.kt.E2EKt
+```

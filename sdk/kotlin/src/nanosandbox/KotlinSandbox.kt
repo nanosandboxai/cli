@@ -95,6 +95,9 @@ class KotlinSandbox {
         delegate.attach(Consumer { ev -> onEvent(ev) })
     }
 
+    /** Opens a live attach session for driving console input/resize. */
+    fun attachSession(): KotlinAttachSession = KotlinAttachSession(delegate.attachSession())
+
     // ---- observability ---------------------------------------------------
 
     /** Returns a resource usage snapshot. */
@@ -106,6 +109,8 @@ class KotlinSandbox {
     }
 
     /** Streams log lines to {@code onLine} until the done event. */
+    fun logs(tail: Int): List<Json> = delegate.logs(tail)
+
     fun logsFollowWith(onLine: (Json) -> Unit, tail: Int, cursor: Int, source: String?) {
         delegate.logsFollowWith(Consumer { line -> onLine(line) }, tail, cursor, source)
     }
@@ -215,5 +220,30 @@ class KotlinSandbox {
     /** Removes a snapshot. */
     fun snapshotRemove(snapshot: String?) {
         delegate.snapshotRemove(snapshot)
+    }
+}
+
+/**
+ * A live attach session: drive console input/resize and read guest events on
+ * the same connection. Facade over the Java SDK's {@link Sandbox.AttachSession}.
+ */
+class KotlinAttachSession(private val delegate: Sandbox.AttachSession) {
+
+    /** Writes bytes to the guest console. */
+    fun sendInput(data: String?) {
+        delegate.sendInput(data)
+    }
+
+    /** Resizes the guest console. */
+    fun resize(cols: Int, rows: Int) {
+        delegate.resize(cols, rows)
+    }
+
+    /** Returns the next guest event, or a null value at stream end. */
+    fun readEvents(): Json = delegate.readEvents()
+
+    /** Closes the attach session connection. */
+    fun close() {
+        delegate.close()
     }
 }

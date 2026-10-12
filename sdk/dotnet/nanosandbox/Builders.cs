@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System;
 
 /// Fluent builder for a sandbox creation spec.
-class SandboxBuilder {
+public class SandboxBuilder {
     private String image;
     private String name;
     private int cpus;
@@ -193,7 +193,7 @@ class SandboxBuilder {
 }
 
 /// Fluent builder for a volume spec.
-class VolumeBuilder {
+public class VolumeBuilder {
     private String name;
     private String dir;
 

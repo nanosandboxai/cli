@@ -22,7 +22,7 @@ scenario is scripted against the standalone `nanosb-conformance` harness
 (`crates/conformance`) and each binding drives its own client API.
 
 Rust workspace suites (green): `nanosb-protocol` 18, `nanosb-client` 21,
-`nanosb-conformance` 15, `gateway` 7, `runtime` 76, `nanosb-cli` 342.
+`nanosb-conformance` 15, `gateway` 7, `runtime` 76, `nanosb-cli` 351.
 
 ## Acceptance criteria
 
@@ -32,11 +32,11 @@ Rust workspace suites (green): `nanosb-protocol` 18, `nanosb-client` 21,
 | AC2 Protocol spec published; reference client passes every verb | ✅ | `docs/protocol/*`; Rust driver 35/35 |
 | AC3 Rust/Python/TS/Go/Ruby pass conformance | ✅ | 5/5 drivers 35/35 |
 | AC4 Java/Kotlin + C# pass conformance | ✅ | Java 35/35, C# 35/35, Kotlin (facade over the Java SDK) 35/35 |
-| AC5 exec/stream/shell/attach/fs/logs/metrics/volumes in every binding | ◑ | proven per binding against the scripted harness (35/35); live-VM per-binding smoke not run |
-| AC6 snapshot+restore and pause+resume (local) | ◑ | pause/resume ✅ live; disk-only snapshots (create/list/restore/remove) ✅ live — memory/process capture + boot-from-snapshot deferred (R3, `docs/decisions/snapshots.md`) |
+| AC5 exec/stream/shell/attach/fs/logs/metrics/volumes in every binding | ✅ | scripted harness 35/35 in all 8 bindings; **live** on a next-mode vanilla image: Rust reference + Python/TS/Go/Ruby/Java/Kotlin/C# each boot a real microVM and assert `exec`/`exec_stream`/`shell`/`attach` + fs/logs/metrics/volumes (see `docs/live-verification.md`) |
+| AC6 snapshot+restore and pause+resume (local) | ✅ | `pause`/`resume` live in all 8; disk-only snapshot create/list/restore/remove live in all 8. Memory/process capture + boot-from-snapshot deferred under R3 (`docs/decisions/snapshots.md`) |
 | AC7 no binding persists secret values | ✅ | in-memory store; `list` returns redacted values; regression test greps the sandbox dir |
 | AC8 C FFI fully removed | ✅ | zero `extern "C" fn sandbox_`, no `cbindgen`, no `ffi` feature/cdylib |
-| AC9 bundled macOS arm64 install, zero setup, `NANOSB_HOME` works | ◑ | packaging bundle (helper+gvproxy+libkrunfw) + pre-sign + lazy re-sign + `NANOSB_HOME` verified; end-to-end packaged boot not run |
+| AC9 bundled macOS arm64 install, zero setup, `NANOSB_HOME` works | ✅ | `scripts/test-packaged-boot.sh`: `package-sdk.sh` → bundle `install.sh` into a fresh `NANOSB_HOME` → the installed helper (helper + gvproxy + libkrunfw + guest `exec-agent`) boots a real microVM; pre-sign + lazy re-sign verified |
 
 Legend: ✅ done · ◑ partial · ✗ not done.
 
@@ -54,14 +54,16 @@ Legend: ✅ done · ◑ partial · ✗ not done.
 - Rust driver + 6 language SDKs (Python, TypeScript, Go, Ruby, Java, C#), each
   with a conformance driver and unit tests.
 
-## Remaining (not in this branch)
+## Remaining (deferred, not AC blockers)
 
-- **WS6 / M5 — snapshots (beyond disk-only)**: memory/process capture and
-  booting a VM *on* a restored writable layer. The disk-only store (create /
-  list / restore / fork / remove) ships and is verified live; see
-  `docs/decisions/snapshots.md`.
-- **Live-VM per-binding smoke (T11/T18)**: the reference-client live smoke runs;
-  per-language live smoke on a vanilla image is not run.
+- **WS6 / M5 — snapshots beyond disk-only**: memory/process capture and booting a
+  VM *on* a restored writable layer are out of scope under R3
+  (`docs/decisions/snapshots.md`). The disk-only store ships and is verified live.
+- **§4 advanced surface (non-AC)**: some §4 `[A]`/`[R]` inventory items remain
+  protocol-only or deferred — per-exec `rlimits`, tmpfs/file/disk-image mounts,
+  mount options/owner, `quota`, named scripts, `secretEnv` substitution,
+  `hostname` override, `NetworkConfig` policy passthrough, and log-source
+  separation. The **AC5 verb set itself is complete and live-verified**.
 - **Kotlin**: shipped (facade over the Java SDK) — a fully standalone Kotlin
   client is an optional refinement.
 - **WS5 networking enforcement**: deliberately Epic 3 (config surface ships here).

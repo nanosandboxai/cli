@@ -10,7 +10,7 @@ using System.Text;
 using System;
 
 /// A structured error returned by the helper.
-class NanosbError : Exception {
+public class NanosbError : Exception {
     public String errorCode;
     public String message;
 
@@ -25,7 +25,7 @@ class NanosbError : Exception {
 }
 
 /// One negotiated connection (dial -> hello -> request -> response).
-class Conn {
+public class Conn {
     public static String PROTOCOL_VERSION = "1.0.0";
     public static String CLIENT_NAME = "nanosandbox-dotnet";
 

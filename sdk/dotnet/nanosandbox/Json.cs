@@ -14,7 +14,7 @@ using System;
 /// A JSON value. One concrete class with a `kind` discriminator (the .NET 8
 /// compiler in this toolchain rejects String-returning method overrides in
 /// abstract classes, so a sealed hierarchy is avoided).
-class JsonValue {
+public class JsonValue {
     public static int NULL = 0;
     public static int BOOL = 1;
     public static int NUMBER = 2;
