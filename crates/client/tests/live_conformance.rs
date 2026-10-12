@@ -22,7 +22,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use nanosb_client::{SandboxBuilder, SandboxClient, VolumeBuilder};
-use nanosb_protocol::{Capability, SandboxState};
+use nanosb_protocol::{Capability, ExecRequest, GuestEvent, SandboxState};
 
 struct Daemon {
     child: Child,
@@ -169,6 +169,62 @@ fn live_conformance_smoke() {
         .expect("snapshot_restore via helper socket");
     sandbox.snapshot_remove(&snap.id).expect("snapshot_remove");
     assert!(client.snapshots().unwrap().iter().all(|s| s.id != snap.id));
+    // The restore materialised a new, independent sandbox directory; tear it
+    // down too so the run leaves nothing behind (AC-E5).
+    client
+        .sandbox(&restored)
+        .remove(true)
+        .expect("remove restored sandbox");
+
+    // ── exec_stream (AC5): streamed stdout + exit code ─────────────────
+    let mut stream_out = String::new();
+    let mut req = ExecRequest::new("echo");
+    req.name = Some(name.clone());
+    req.args = vec!["hello-stream".to_string()];
+    let code = sandbox
+        .exec_stream(req, |ev| {
+            if let GuestEvent::Stdout { data } = ev {
+                stream_out.push_str(&data);
+            }
+        })
+        .expect("exec_stream");
+    assert_eq!(code, 0);
+    assert_eq!(stream_out.trim(), "hello-stream");
+
+    // ── shell (AC5): buffered shell script ─────────────────────────────
+    let sh = sandbox.shell("echo hello-shell").expect("shell");
+    assert_eq!(sh.exit_code, 0);
+    assert_eq!(sh.stdout.trim(), "hello-shell");
+
+    // ── shell_stream (AC5): streamed shell script ──────────────────────
+    let mut sh_stream_out = String::new();
+    let sh_code = sandbox
+        .shell_stream("echo hello-shell-stream", |ev| {
+            if let GuestEvent::Stdout { data } = ev {
+                sh_stream_out.push_str(&data);
+            }
+        })
+        .expect("shell_stream");
+    assert_eq!(sh_code, 0);
+    assert_eq!(sh_stream_out.trim(), "hello-shell-stream");
+
+    // ── attach (AC5): open the console stream via the helper ───────────
+    let session = sandbox.attach_session().expect("attach_session via helper");
+    drop(session);
+
+    // ── attach input/resize: driven on the sandbox control socket ──────
+    // The helper relays the console stream outward; client->guest attach
+    // control frames are served by the supervisor on the sandbox socket.
+    let direct = SandboxClient::for_sandbox(&name).expect("connect to sandbox control socket");
+    let mut direct_session = direct
+        .sandbox(&name)
+        .attach_session()
+        .expect("attach_session via sandbox socket");
+    direct_session
+        .send_input(b"echo hello-attach\n")
+        .expect("attach_input");
+    direct_session.resize(120, 40).expect("attach_resize");
+    drop(direct_session);
 
     // ── lifecycle teardown ─────────────────────────────────────────────
     sandbox.stop(true).expect("stop");

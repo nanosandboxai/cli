@@ -51,6 +51,25 @@ class E2ETest {
       assertTrue(box.metrics().getInt("disk_used_bytes") > 0);
       assertTrue(names(client.list(true)).contains(name));
 
+      StringBuilder streamOut = new StringBuilder();
+      Json execReq = Json.object();
+      execReq.set("command", Json.ofString("echo"));
+      Json execArgs = Json.array();
+      execArgs.add(Json.ofString("hello-stream"));
+      execReq.set("args", execArgs);
+      int streamCode = box.execStream(execReq, ev -> {
+        if ("stdout".equals(ev.getStr("event"))) streamOut.append(ev.getStr("data"));
+      });
+      assertEquals(0, streamCode);
+      assertEquals("hello-stream", streamOut.toString().trim());
+
+      Json shellOut = box.shell("echo hello-shell");
+      assertEquals(0, shellOut.getInt("exit_code"));
+      assertEquals("hello-shell", shellOut.getStr("stdout").trim());
+
+      Sandbox.AttachSession session = box.attachSession();
+      session.close();
+
       box.secretSet("LIVE_TOKEN", "s3cr3t");
       List<Json> secrets = box.secretList();
       assertTrue(secrets.stream().anyMatch(s -> "LIVE_TOKEN".equals(s.getStr("key"))));

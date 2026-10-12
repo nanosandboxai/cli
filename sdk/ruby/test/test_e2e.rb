@@ -46,6 +46,20 @@ class LiveE2ETest < Minitest::Test
       assert box.metrics["disk_used_bytes"].positive?
       assert_includes client.list(true).map { |s| s["name"] }, name
 
+      stream_out = +""
+      code = box.exec_stream({"command" => "echo", "args" => ["hello-stream"]}) do |ev|
+        stream_out << ev["data"] if ev["event"] == "stdout"
+      end
+      assert_equal 0, code
+      assert_equal "hello-stream", stream_out.strip
+
+      sh = box.shell("echo hello-shell")
+      assert_equal 0, sh["exit_code"]
+      assert_equal "hello-shell", sh["stdout"].strip
+
+      session = box.attach_session
+      session.close
+
       box.secret_set("LIVE_TOKEN", "s3cr3t")
       secrets = box.secret_list
       assert_includes secrets.map { |s| s["key"] }, "LIVE_TOKEN"

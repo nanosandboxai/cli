@@ -52,6 +52,23 @@ fun main() {
         check(box.metrics().getInt("disk_used_bytes") > 0)
         check(client.list(true).any { it.getStr("name") == name })
 
+        val streamOut = StringBuilder()
+        val req = KtJson.obj()
+        req.set("command", KtJson.str("echo"))
+        val args = KtJson.arr()
+        args.add(KtJson.str("hello-stream"))
+        req.set("args", args)
+        val code = box.execStream(req) { ev -> if (ev.getStr("event") == "stdout") streamOut.append(ev.getStr("data")) }
+        check(code == 0) { "exec_stream code $code" }
+        check(streamOut.toString().trim() == "hello-stream") { "stream out $streamOut" }
+
+        val sh = box.shell("echo hello-shell")
+        check(sh.getInt("exit_code") == 0L) { "shell exit" }
+        check(sh.getStr("stdout").trim() == "hello-shell") { "shell out ${sh.getStr("stdout")}" }
+
+        val session = box.attachSession()
+        session.close()
+
         box.secretSet("LIVE_TOKEN", "s3cr3t")
         val secrets = box.secretList()
         check(secrets.any { it.getStr("key") == "LIVE_TOKEN" })

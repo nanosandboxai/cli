@@ -2,13 +2,18 @@
 
 import json
 import os
+import shutil
 import socket
+import sys
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
-from nanosandbox import NanosbError, SandboxBuilder, SandboxClient, VolumeBuilder
-from nanosandbox.client import PROTOCOL_VERSION
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from nanosandbox import NanosbError, SandboxBuilder, SandboxClient, VolumeBuilder  # noqa: E402
+from nanosandbox.client import PROTOCOL_VERSION  # noqa: E402
 
 
 class FakeHelper:
@@ -105,6 +110,7 @@ class FakeHelper:
             self._listener.close()
         except OSError:
             pass
+        shutil.rmtree(self._dir, ignore_errors=True)
 
 
 class ClientTest(unittest.TestCase):

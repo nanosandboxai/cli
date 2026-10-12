@@ -52,6 +52,23 @@ test("live microVM smoke", { skip: ENABLED ? false : "set NANOSB_E2E=1 to run" }
     assert.ok((await box.metrics()).disk_used_bytes > 0);
     assert.ok((await client.list(true)).some((s) => s.name === name));
 
+    // ── exec_stream: streamed stdout + exit code ───────────────────────
+    let streamOut = "";
+    const code = await box.execStream({ command: "echo", args: ["hello-stream"] }, (ev) => {
+      if (ev.event === "stdout") streamOut += ev.data;
+    });
+    assert.equal(code, 0);
+    assert.equal(streamOut.trim(), "hello-stream");
+
+    // ── shell: buffered shell script ───────────────────────────────────
+    const sh = await box.shell("echo hello-shell");
+    assert.equal(sh.exit_code, 0);
+    assert.equal(sh.stdout.trim(), "hello-shell");
+
+    // ── attach: open the console session via the helper ────────────────
+    const session = await box.attachSession();
+    session.close();
+
     await box.secretSet("LIVE_TOKEN", "s3cr3t");
     const secrets = await box.secretList();
     assert.ok(secrets.some((s) => s.key === "LIVE_TOKEN"));

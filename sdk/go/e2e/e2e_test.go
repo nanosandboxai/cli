@@ -9,6 +9,7 @@ package e2e
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +122,45 @@ func TestLiveMicroVMSmoke(t *testing.T) {
 	if list, err := client.List(true); err != nil || !contains(names(list), name) {
 		t.Fatalf("list: %v %v", list, err)
 	}
+
+	var streamOut string
+	streamReq := nanosandbox.JsonObjectValue()
+	streamReq.Set("command", nanosandbox.JsonStringValue("echo"))
+	streamArgs := nanosandbox.JsonArrayValue()
+	streamArgs.Append(nanosandbox.JsonStringValue("hello-stream"))
+	streamReq.Set("args", streamArgs)
+	code, err := box.ExecStream(streamReq, func(ev nanosandbox.JsonValue) {
+		if e, _ := ev.Str("event"); e == "stdout" {
+			d, _ := ev.Str("data")
+			streamOut += d
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("exec_stream code %d", code)
+	}
+	if strings.TrimSpace(streamOut) != "hello-stream" {
+		t.Fatalf("stream out %q", streamOut)
+	}
+
+	sh, err := box.Shell("echo hello-shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := sh.Int("exit_code"); c != 0 {
+		t.Fatal("shell exit")
+	}
+	if so, _ := sh.Str("stdout"); strings.TrimSpace(so) != "hello-shell" {
+		t.Fatalf("shell out %q", so)
+	}
+
+	sess, err := box.AttachSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Close()
 
 	if err := box.SecretSet("LIVE_TOKEN", "s3cr3t"); err != nil {
 		t.Fatal(err)

@@ -54,6 +54,25 @@ public class E2ETest {
         Assert.IsTrue(box.metrics().intVal("disk_used_bytes") > 0);
         Assert.IsTrue(Names(client.list(true)).Contains(name));
 
+        var streamOut = new StringBuilder();
+        var execReq = JsonValue.makeObject();
+        execReq.put("command", JsonValue.of("echo"));
+        var execArgs = JsonValue.makeArray();
+        execArgs.add(JsonValue.of("hello-stream"));
+        execReq.put("args", execArgs);
+        var streamCode = box.execStream(execReq, ev => {
+            if ("stdout" == ev.str("event")) streamOut.Append(ev.str("data"));
+        });
+        Assert.AreEqual(0, streamCode);
+        Assert.AreEqual("hello-stream", streamOut.ToString().Trim());
+
+        var shellOut = box.shell("echo hello-shell");
+        Assert.AreEqual(0L, shellOut.intVal("exit_code"));
+        Assert.AreEqual("hello-shell", shellOut.str("stdout").Trim());
+
+        var session = box.attachSession();
+        session.close();
+
         box.secretSet("LIVE_TOKEN", "s3cr3t");
         var secrets = box.secretList();
         Assert.IsTrue(secrets.Exists(s => s.str("key") == "LIVE_TOKEN"));

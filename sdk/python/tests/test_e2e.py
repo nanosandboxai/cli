@@ -58,6 +58,19 @@ class LiveE2ETest(unittest.TestCase):
             self.assertGreater(sandbox.metrics()["disk_used_bytes"], 0)
             self.assertIn(name, [s["name"] for s in client.list(True)])
 
+            stream_stdout = []
+            code = sandbox.exec_stream({"command": "echo", "args": ["hello-stream"]},
+                                       lambda ev: stream_stdout.append(ev.get("data", "")) if ev.get("event") == "stdout" else None)
+            self.assertEqual(code, 0)
+            self.assertEqual("".join(stream_stdout).strip(), "hello-stream")
+
+            sh = sandbox.shell("echo hello-shell")
+            self.assertEqual(sh["exit_code"], 0)
+            self.assertEqual(sh["stdout"].strip(), "hello-shell")
+
+            session = sandbox.attach_session()
+            session.close()
+
             sandbox.secret_set("LIVE_TOKEN", "s3cr3t")
             secrets = sandbox.secret_list()
             self.assertIn("LIVE_TOKEN", [s["key"] for s in secrets])

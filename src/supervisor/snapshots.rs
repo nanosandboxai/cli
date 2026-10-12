@@ -307,6 +307,15 @@ mod tests {
         (tmp, s)
     }
 
+    fn sandbox_with_marker() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let sb = tmp.path().join("sandbox");
+        std::fs::create_dir_all(sb.join("data")).unwrap();
+        std::fs::write(sb.join("config.json"), r#"{"name":"t","image":"alpine"}"#).unwrap();
+        std::fs::write(sb.join("data").join("marker.txt"), b"payload-123").unwrap();
+        (tmp, sb)
+    }
+
     #[test]
     fn create_captures_state_and_manifest() {
         let (_t, sb) = sandbox_dir();
@@ -363,6 +372,37 @@ mod tests {
         store.materialize(&info.id, "box-restored", &new_dir).unwrap();
         assert!(new_dir.join("config.json").is_file());
         assert!(new_dir.join("data").join("file.txt").is_file());
+    }
+
+    #[test]
+    fn restore_preserves_captured_content() {
+        let (_t, sb) = sandbox_with_marker();
+        let (_s, store) = store();
+        let info = store.create(&sb, "box", Some("alpine".into()), None).unwrap();
+        let restore_tmp = tempfile::tempdir().unwrap();
+        let restore_dir = restore_tmp.path().join("box-restored");
+        store.materialize(&info.id, "box-restored", &restore_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(restore_dir.join("data").join("marker.txt")).unwrap(),
+            "payload-123"
+        );
+        assert!(restore_dir.join("config.json").is_file());
+    }
+
+    #[test]
+    fn restore_is_independent() {
+        let (_t, sb) = sandbox_with_marker();
+        let (_s, store) = store();
+        let info = store.create(&sb, "box", Some("alpine".into()), None).unwrap();
+        let restore_tmp = tempfile::tempdir().unwrap();
+        let restore_dir = restore_tmp.path().join("box-restored");
+        store.materialize(&info.id, "box-restored", &restore_dir).unwrap();
+
+        std::fs::write(restore_dir.join("data").join("marker.txt"), b"mutated").unwrap();
+
+        let snap_copy = store.root().join(&info.id).join("state").join("data").join("marker.txt");
+        assert_eq!(std::fs::read_to_string(&snap_copy).unwrap(), "payload-123");
+        assert!(!info.includes_memory);
     }
 
     #[test]

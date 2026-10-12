@@ -131,7 +131,7 @@ Unit tests exercise the client against an in-process fake NDJSON helper on a
 temp Unix socket:
 
 ```bash
-node --test sdk/typescript/tests
+node --test "sdk/typescript/tests/*.test.mjs"
 ```
 
 Conformance driver — runs all 35 scenarios in `sdk/conformance/scenarios/`
