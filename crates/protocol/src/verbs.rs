@@ -92,8 +92,13 @@ pub enum Request {
     // ── execution ──────────────────────────────────────────────────────
     Exec(Box<ExecRequest>),
     ExecStream(Box<ExecRequest>),
+    ExecDefault(Box<ExecDefaultRequest>),
     Shell(Box<ShellRequest>),
     Attach {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    AttachDefault {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
@@ -272,6 +277,40 @@ impl ExecRequest {
             shell: false,
             timeout_secs: None,
             stdin: None,
+            rlimits: Vec::new(),
+        }
+    }
+}
+
+/// Execute the sandbox's configured default workload, with optional overrides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecDefaultRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Extra arguments appended to the default command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub rlimits: Vec<Rlimit>,
+}
+
+impl Default for ExecDefaultRequest {
+    fn default() -> Self {
+        Self {
+            name: None,
+            args: Vec::new(),
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            user: None,
+            timeout_secs: None,
             rlimits: Vec::new(),
         }
     }

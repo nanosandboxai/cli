@@ -209,23 +209,36 @@ fn handle(
         ),
         Request::Pause { .. } => signal_vm(stream, ctx, libc::SIGSTOP),
         Request::Resume { .. } => signal_vm(stream, ctx, libc::SIGCONT),
-        Request::Exec(spec) => exec_buffered(stream, ctx, spec.command, spec.args, spec.cwd, spec.env, spec.shell, spec.timeout_secs),
+        Request::Exec(spec) => exec_buffered(stream, ctx, spec.command, spec.args, spec.cwd, spec.env, spec.shell, spec.timeout_secs, spec.rlimits),
         Request::Shell(spec) => {
-            exec_buffered(stream, ctx, spec.script, Vec::new(), spec.cwd, spec.env, true, spec.timeout_secs)
+            exec_buffered(stream, ctx, spec.script, Vec::new(), spec.cwd, spec.env, true, spec.timeout_secs, Vec::new())
         }
+        Request::ExecDefault(spec) => exec_default(stream, ctx, *spec),
         Request::ExecStream(spec) => {
             let opts = ExecOptions {
                 workdir: spec.cwd.clone(),
                 env: spec.env.clone(),
                 shell: spec.shell,
                 timeout_secs: spec.timeout_secs,
+                rlimits: spec
+                    .rlimits
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}={}:{}",
+                            r.resource.to_uppercase(),
+                            r.soft.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                            r.hard.map(|v| v.to_string()).unwrap_or_else(|| "-".into())
+                        )
+                    })
+                    .collect(),
                 ..ExecOptions::default()
             };
             let args: Vec<String> = spec.args.clone();
             let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
             stream_exec_stream(stream, ctx, &spec.command, &argrefs, opts)
         }
-        Request::Attach { .. } => stream_attach(stream, reader, ctx),
+        Request::Attach { .. } | Request::AttachDefault { .. } => stream_attach(stream, reader, ctx),
         Request::Logs(spec) => handle_logs(stream, ctx, spec),
         Request::Metrics { .. } => send(stream, &Response::Metrics(sample_metrics(ctx))),
         Request::FsRead(p) => {
@@ -615,6 +628,7 @@ fn exec_buffered(
     env: std::collections::HashMap<String, String>,
     shell: bool,
     timeout_secs: Option<u64>,
+    rlimits: Vec<nanosb_protocol::Rlimit>,
 ) -> std::io::Result<()> {
     let c = exec_client(ctx);
     if !c.is_available() {
@@ -630,6 +644,17 @@ fn exec_buffered(
         env,
         shell,
         timeout_secs,
+        rlimits: rlimits
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}={}:{}",
+                    r.resource.to_uppercase(),
+                    r.soft.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    r.hard.map(|v| v.to_string()).unwrap_or_else(|| "-".into())
+                )
+            })
+            .collect(),
         ..ExecOptions::default()
     };
     let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -645,6 +670,42 @@ fn exec_buffered(
         ),
         Err(e) => Err(send_agent_error(stream, e)),
     }
+}
+
+/// Execute the sandbox's configured default workload with optional overrides.
+fn exec_default(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    spec: nanosb_protocol::ExecDefaultRequest,
+) -> std::io::Result<()> {
+    let config: serde_json::Value = std::fs::read_to_string(ctx.sandbox_dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let command = config
+        .get("command")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/bin/sh")
+        .to_string();
+    let mut args: Vec<String> = config
+        .get("command_args")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    args.extend(spec.args);
+    let env = spec.env;
+    exec_buffered(
+        stream,
+        ctx,
+        command,
+        args,
+        spec.cwd,
+        env,
+        false,
+        spec.timeout_secs,
+        spec.rlimits,
+    )
 }
 
 fn stream_exec_stream(

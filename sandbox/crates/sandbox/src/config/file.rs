@@ -413,11 +413,12 @@ pub fn resolve_sandbox_configs(
                     config_dir.join(&m.host)
                 };
                 config.mounts.push(Mount {
-                    host_path,
-                    container_path: m.container.clone(),
-                    readonly: m.readonly,
                     mount_type: m.mount_type.unwrap_or(MountType::Bind),
+                    ..Mount::bind(host_path, m.container.clone())
                 });
+                if let Some(last) = config.mounts.last_mut() {
+                    last.readonly = m.readonly;
+                }
             }
         }
 

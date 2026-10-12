@@ -227,6 +227,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             s.name = None;
             proxy(writer, n, Request::ExecStream(s))
         }
+        Request::ExecDefault(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::ExecDefault(s))
+        }
         Request::Shell(mut s) => {
             let n = require_name(s.name.clone())?;
             s.name = None;
@@ -234,6 +239,9 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
         }
         Request::Attach { name } => {
             proxy(writer, require_name(name)?, Request::Attach { name: None })
+        }
+        Request::AttachDefault { name } => {
+            proxy(writer, require_name(name)?, Request::AttachDefault { name: None })
         }
         Request::Logs(mut s) => {
             let n = require_name(s.name.clone())?;

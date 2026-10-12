@@ -48,12 +48,12 @@ pub struct PlannedMount {
 
 impl From<PlannedMount> for runtime::Mount {
     fn from(pm: PlannedMount) -> Self {
-        runtime::Mount {
-            host_path: pm.host_path,
-            container_path: pm.guest_path,
-            readonly: pm.readonly,
+        let mut mount = runtime::Mount {
             mount_type: runtime::MountType::VirtioFs,
-        }
+            ..runtime::Mount::bind(pm.host_path, pm.guest_path)
+        };
+        mount.readonly = pm.readonly;
+        mount
     }
 }
 

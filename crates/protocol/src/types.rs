@@ -147,9 +147,12 @@ pub struct MountSpec {
     /// tmpfs mount (host_path ignored).
     #[serde(default)]
     pub tmpfs: bool,
-    /// Disk-image backed volume (`raw`/`qcow2`/`vmdk`).
+    /// Disk-image format (`raw`/`qcow2`/`vmdk`); `host_path` is the image file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_image: Option<String>,
+    /// Filesystem type used to mount a disk-image mount (e.g. `ext4`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fstype: Option<String>,
     /// Mount options such as `noexec`, `nosuid`, `nodev`.
     #[serde(default)]
     pub options: Vec<String>,
@@ -169,6 +172,7 @@ impl MountSpec {
             file: false,
             tmpfs: false,
             disk_image: None,
+            fstype: None,
             options: Vec::new(),
             uid: None,
             gid: None,
@@ -301,6 +305,8 @@ pub struct VolumeInfo {
     pub disk_image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fstype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_bytes: Option<u64>,
     #[serde(default)]
     pub used_bytes: u64,
 }
@@ -332,6 +338,117 @@ pub struct SnapshotInfo {
     /// Whether memory/process state was captured (currently always false).
     #[serde(default)]
     pub includes_memory: bool,
+}
+
+/// How the guest rootfs is sourced (Epic 5 §4.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootfsKind {
+    /// Boot from the OCI `image` (default).
+    #[default]
+    Oci,
+    /// Boot directly from a host directory (no OCI pull/extract).
+    LocalDir,
+    /// Boot from a disk-image file attached as a block device.
+    DiskImage,
+}
+
+/// A non-OCI rootfs source. Only meaningful when
+/// [`SandboxSpec::rootfs`] is set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RootfsSpec {
+    pub kind: RootfsKind,
+    /// Host path: a directory (`local_dir`) or a disk-image file (`disk_image`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Filesystem type used to mount a `disk_image` rootfs (e.g. `ext4`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fstype: Option<String>,
+    /// Disk-image format: `raw` (default), `qcow2`, or `vmdk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Attach the rootfs block device read-only.
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// A pre-boot patch applied to the rootfs before the VM boots (Epic 5 §4.8).
+///
+/// Patches are applied host-side against the extracted rootfs directory and
+/// never touch the source image. `from`/`to`/`path` are host paths relative to
+/// the rootfs unless absolute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum RootfsPatch {
+    /// Create a directory (parents created as needed).
+    Mkdir {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    /// Write/replace a text file.
+    Text {
+        path: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    /// Copy a single host file into the rootfs.
+    CopyFile {
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    /// Recursively copy a host directory into the rootfs.
+    CopyDir { from: String, to: String },
+    /// Remove a path from the rootfs.
+    Remove {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
+}
+
+/// Per-sandbox registry configuration (Epic 5 §4.8). Mirrors the runtime
+/// `RegistryConfig`: allow insecure HTTP / skip TLS verification for a host,
+/// with optional credentials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegistrySpec {
+    /// Registry hostname, e.g. `ghcr.io` or `localhost:5050`.
+    pub host: String,
+    #[serde(default)]
+    pub insecure: bool,
+    #[serde(default)]
+    pub skip_tls_verify: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// Stat virtualization mode (Epic 5 §4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatVirtualization {
+    /// Report normalized synthetic uid/gid/mode.
+    Strict,
+    /// Report host values with sensitive fields masked (default).
+    #[default]
+    Relaxed,
+    /// Report raw guest values (no virtualization).
+    Off,
+}
+
+/// Guest security profile (Epic 5 §4.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityProfile {
+    /// Default profile: standard guest capabilities.
+    #[default]
+    Default,
+    /// Restricted profile: drop capabilities and tighten confinement.
+    Restricted,
 }
 
 /// A modification request for a live sandbox.
@@ -396,6 +513,25 @@ pub struct SandboxSpec {
     /// Env keys sourced from the secret store (`env key` -> `secret key`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secret_env: BTreeMap<String, String>,
+    /// Named secret values supplied at create time (never persisted). Referenced
+    /// by [`SandboxSpec::secret_env`] and [`SandboxSpec::env`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<SecretEntry>,
+    /// Non-OCI rootfs source (local dir / disk image).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<RootfsSpec>,
+    /// Pre-boot rootfs patches applied host-side before the VM boots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<RootfsPatch>,
+    /// Per-sandbox registry configuration (insecure / skip-TLS / credentials).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registry: Vec<RegistrySpec>,
+    /// Stat virtualization mode; `None` uses the engine default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stat_virtualization: Option<StatVirtualization>,
+    /// Guest security profile.
+    #[serde(default)]
+    pub security_profile: SecurityProfile,
 }
 
 impl SandboxSpec {
@@ -423,6 +559,12 @@ impl SandboxSpec {
             replace: false,
             hostname: None,
             secret_env: BTreeMap::new(),
+            secrets: Vec::new(),
+            rootfs: None,
+            patches: Vec::new(),
+            registry: Vec::new(),
+            stat_virtualization: None,
+            security_profile: SecurityProfile::default(),
         }
     }
 }

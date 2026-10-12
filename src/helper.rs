@@ -38,45 +38,44 @@ impl std::error::Error for MountError {}
 /// mount-option, and uid/gid mounts return [`MountError::Unsupported`] — never
 /// a half-applied mount.
 pub fn mount_spec_to_mount(spec: &MountSpec) -> Result<Mount, MountError> {
-    if spec.tmpfs {
-        return Err(MountError::Unsupported(
-            "tmpfs mounts are not supported by this build".to_string(),
-        ));
-    }
-    if spec.disk_image.is_some() {
-        return Err(MountError::Unsupported(
-            "disk-image mounts are not supported by this build".to_string(),
-        ));
-    }
-    if spec.file {
-        return Err(MountError::Unsupported(
-            "single-file mounts are not supported by this build".to_string(),
-        ));
-    }
-    if !spec.options.is_empty() {
-        return Err(MountError::Unsupported(
-            "mount options (noexec/nosuid/nodev) are not supported by this build".to_string(),
-        ));
-    }
-    if spec.uid.is_some() || spec.gid.is_some() {
-        return Err(MountError::Unsupported(
-            "mount owner (uid/gid) is not supported by this build".to_string(),
-        ));
-    }
-    let mut mount = match spec.mount_type {
-        nanosb_protocol::MountType::Virtiofs => {
-            Mount::virtiofs(PathBuf::from(&spec.host_path), &spec.guest_path)
-        }
-        nanosb_protocol::MountType::Bind => {
-            Mount::bind(PathBuf::from(&spec.host_path), &spec.guest_path)
-        }
-        nanosb_protocol::MountType::Tmpfs => {
-            return Err(MountError::Unsupported(
-                "tmpfs mounts are not supported by this build".to_string(),
-            ))
+    let mut mount = if let Some(format) = &spec.disk_image {
+        let mut m = Mount::virtiofs(PathBuf::from(&spec.host_path), &spec.guest_path);
+        m.disk_image = Some(format.clone());
+        m.fstype = spec.fstype.clone();
+        m
+    } else if spec.tmpfs || spec.mount_type == nanosb_protocol::MountType::Tmpfs {
+        Mount::tmpfs(&spec.guest_path)
+    } else {
+        match spec.mount_type {
+            nanosb_protocol::MountType::Virtiofs => {
+                Mount::virtiofs(PathBuf::from(&spec.host_path), &spec.guest_path)
+            }
+            nanosb_protocol::MountType::Bind => {
+                Mount::bind(PathBuf::from(&spec.host_path), &spec.guest_path)
+            }
+            nanosb_protocol::MountType::Tmpfs => Mount::tmpfs(&spec.guest_path),
         }
     };
     mount.readonly = spec.readonly;
+    mount.file = spec.file;
+    mount.options = spec.options.clone();
+    mount.uid = spec.uid;
+    mount.gid = spec.gid;
+    if mount.mount_type != runtime::config::MountType::Tmpfs
+        && mount.disk_image.is_none()
+        && !mount.file
+        && !mount.host_path.exists()
+    {
+        return Err(MountError::Unsupported(format!(
+            "mount host path '{}' does not exist",
+            mount.host_path.display()
+        )));
+    }
+    if (mount.file || mount.disk_image.is_some()) && mount.fstype.is_none() && mount.disk_image.is_some() {
+        return Err(MountError::Unsupported(
+            "disk-image mount requires a fstype".to_string(),
+        ));
+    }
     Ok(mount)
 }
 
@@ -153,6 +152,7 @@ pub fn spec_to_config(spec: &SandboxSpec) -> anyhow::Result<SandboxConfig> {
             .collect(),
         dns: spec.network.dns.clone(),
         dns_zones: spec.network.dns_zones.clone(),
+        policy: spec.network.policy.clone(),
     };
 
     if let Some(cmd) = &spec.command {
@@ -160,7 +160,118 @@ pub fn spec_to_config(spec: &SandboxSpec) -> anyhow::Result<SandboxConfig> {
         config.command_args = spec.command_args.clone();
     }
 
+    if let Some(h) = &spec.hostname {
+        config.hostname = Some(h.clone());
+    }
+    config.scripts = spec.scripts.clone();
+    config.stat_virtualization = spec.stat_virtualization.map(|s| {
+        use nanosb_protocol::StatVirtualization as S;
+        match s {
+            S::Strict => "strict",
+            S::Relaxed => "relaxed",
+            S::Off => "off",
+        }
+        .to_string()
+    });
+    config.security_profile = match spec.security_profile {
+        nanosb_protocol::SecurityProfile::Default => "default",
+        nanosb_protocol::SecurityProfile::Restricted => "restricted",
+    }
+    .to_string();
+    config.rlimits = spec
+        .rlimits
+        .iter()
+        .map(|r| format_rlimit(r))
+        .collect();
+    config.registry = spec
+        .registry
+        .iter()
+        .map(|r| runtime::config::RegistryConfig {
+            host: r.host.clone(),
+            insecure: r.insecure,
+            skip_tls_verify: r.skip_tls_verify,
+        })
+        .collect();
+    if let Some(rootfs) = &spec.rootfs {
+        use nanosb_protocol::RootfsKind as K;
+        config.rootfs = Some(runtime::config::RootfsConfig {
+            source: match rootfs.kind {
+                K::Oci => runtime::config::RootfsSource::Oci,
+                K::LocalDir => runtime::config::RootfsSource::LocalDir,
+                K::DiskImage => runtime::config::RootfsSource::DiskImage,
+            },
+            path: rootfs.path.clone(),
+            fstype: rootfs.fstype.clone(),
+            format: rootfs.format.clone(),
+            read_only: rootfs.read_only,
+        });
+    }
+    config.patches = spec
+        .patches
+        .iter()
+        .map(rootfs_patch_to_config)
+        .collect();
+
+    // secret_env: resolve each env key from a create-time secret (never persisted;
+    // config.env is stripped into NANOSB_BOOT_ENV before config.json is written).
+    let create_secrets: HashMap<String, String> = spec
+        .secrets
+        .iter()
+        .filter_map(|s| s.value.clone().map(|v| (s.key.clone(), v)))
+        .collect();
+    for (env_key, secret_name) in &spec.secret_env {
+        let value = create_secrets
+            .get(secret_name)
+            .cloned()
+            .or_else(|| std::env::var(secret_name).ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "secret '{secret_name}' referenced by secret_env '{env_key}' is not defined"
+                )
+            })?;
+        config.env.insert(env_key.clone(), value);
+    }
+
     Ok(config)
+}
+
+fn format_rlimit(r: &nanosb_protocol::Rlimit) -> String {
+    let soft = r.soft.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+    let hard = r.hard.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+    format!("{}={}:{}", r.resource.to_uppercase(), soft, hard)
+}
+
+fn rootfs_patch_to_config(p: &nanosb_protocol::RootfsPatch) -> runtime::config::RootfsPatchConfig {
+    use nanosb_protocol::RootfsPatch as P;
+    use runtime::config::RootfsPatchConfig as C;
+    match p {
+        P::Mkdir { path, mode } => C::Mkdir {
+            path: path.clone(),
+            mode: *mode,
+        },
+        P::Text {
+            path,
+            content,
+            mode,
+        } => C::Text {
+            path: path.clone(),
+            content: content.clone(),
+            mode: *mode,
+        },
+        P::CopyFile { from, to, mode } => C::CopyFile {
+            from: from.clone(),
+            to: to.clone(),
+            mode: *mode,
+        },
+        P::CopyDir { from, to } => C::CopyDir {
+            from: from.clone(),
+            to: to.clone(),
+        },
+        P::Remove { path, recursive } => C::Remove {
+            path: path.clone(),
+            recursive: *recursive,
+        },
+    }
 }
 
 /// Enforce `SandboxSpec.pull_policy` against the local image cache before the
@@ -366,14 +477,17 @@ mod tests {
     // ── mount_spec_to_mount (decision-backed conversions) ───────────────
 
     fn mount_spec(mount_type: nanosb_protocol::MountType) -> MountSpec {
+        let host = tempfile::tempdir().unwrap();
+        let host_path = host.keep();
         MountSpec {
-            host_path: "/host/data".to_string(),
+            host_path: host_path.to_string_lossy().to_string(),
             guest_path: "/mnt/data".to_string(),
             readonly: false,
             mount_type,
             file: false,
             tmpfs: false,
             disk_image: None,
+            fstype: None,
             options: Vec::new(),
             uid: None,
             gid: None,
@@ -384,7 +498,6 @@ mod tests {
     fn bind_spec_converts_to_bind_mount() {
         let m = mount_spec_to_mount(&mount_spec(nanosb_protocol::MountType::Bind)).unwrap();
         assert_eq!(m.mount_type, runtime::config::MountType::Bind);
-        assert_eq!(m.host_path, PathBuf::from("/host/data"));
         assert_eq!(m.container_path, "/mnt/data");
         assert!(!m.readonly);
     }
@@ -404,24 +517,32 @@ mod tests {
     }
 
     #[test]
-    fn tmpfs_spec_is_unsupported() {
+    fn tmpfs_spec_converts_to_tmpfs_mount() {
         let mut s = mount_spec(nanosb_protocol::MountType::Bind);
         s.tmpfs = true;
-        assert!(matches!(
-            mount_spec_to_mount(&s),
-            Err(MountError::Unsupported(_))
-        ));
+        let m = mount_spec_to_mount(&s).unwrap();
+        assert_eq!(m.mount_type, runtime::config::MountType::Tmpfs);
         let s = mount_spec(nanosb_protocol::MountType::Tmpfs);
-        assert!(matches!(
-            mount_spec_to_mount(&s),
-            Err(MountError::Unsupported(_))
-        ));
+        assert_eq!(
+            mount_spec_to_mount(&s).unwrap().mount_type,
+            runtime::config::MountType::Tmpfs
+        );
     }
 
     #[test]
-    fn disk_image_spec_is_unsupported() {
+    fn disk_image_spec_threads_format_and_fstype() {
         let mut s = mount_spec(nanosb_protocol::MountType::Bind);
-        s.disk_image = Some("qcow2".to_string());
+        s.disk_image = Some("raw".to_string());
+        s.fstype = Some("ext4".to_string());
+        let m = mount_spec_to_mount(&s).unwrap();
+        assert_eq!(m.disk_image.as_deref(), Some("raw"));
+        assert_eq!(m.fstype.as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn disk_image_without_fstype_is_rejected() {
+        let mut s = mount_spec(nanosb_protocol::MountType::Bind);
+        s.disk_image = Some("raw".to_string());
         assert!(matches!(
             mount_spec_to_mount(&s),
             Err(MountError::Unsupported(_))
@@ -429,48 +550,94 @@ mod tests {
     }
 
     #[test]
-    fn file_spec_is_unsupported() {
+    fn file_spec_is_threaded() {
         let mut s = mount_spec(nanosb_protocol::MountType::Bind);
         s.file = true;
-        assert!(matches!(
-            mount_spec_to_mount(&s),
-            Err(MountError::Unsupported(_))
-        ));
+        let m = mount_spec_to_mount(&s).unwrap();
+        assert!(m.file);
     }
 
     #[test]
-    fn options_and_owner_are_unsupported() {
+    fn options_and_owner_are_threaded() {
         let mut s = mount_spec(nanosb_protocol::MountType::Bind);
         s.options = vec!["noexec".to_string()];
-        assert!(matches!(
-            mount_spec_to_mount(&s),
-            Err(MountError::Unsupported(_))
-        ));
-        let mut s = mount_spec(nanosb_protocol::MountType::Bind);
         s.uid = Some(1000);
-        assert!(matches!(
-            mount_spec_to_mount(&s),
-            Err(MountError::Unsupported(_))
-        ));
-        let mut s = mount_spec(nanosb_protocol::MountType::Bind);
         s.gid = Some(1000);
-        assert!(matches!(
-            mount_spec_to_mount(&s),
-            Err(MountError::Unsupported(_))
-        ));
+        let m = mount_spec_to_mount(&s).unwrap();
+        assert_eq!(m.options, vec!["noexec".to_string()]);
+        assert_eq!(m.uid, Some(1000));
+        assert_eq!(m.gid, Some(1000));
     }
 
     #[test]
-    fn spec_to_config_rejects_unsupported_mount_backing() {
+    fn spec_to_config_rejects_missing_mount_host_path() {
         let mut spec = SandboxSpec::new("alpine");
         let mut m = mount_spec(nanosb_protocol::MountType::Bind);
-        m.tmpfs = true;
+        m.host_path = "/nonexistent/nanosb/path".to_string();
         spec.mounts.push(m);
         let err = spec_to_config(&spec).unwrap_err();
         assert!(
             err.downcast_ref::<MountError>().is_some(),
             "expected MountError, got {err}"
         );
+    }
+
+    #[test]
+    fn spec_to_config_threads_epic5_fields() {
+        use nanosb_protocol::{RegistrySpec, RootfsKind, RootfsSpec, SecurityProfile, StatVirtualization};
+        let mut spec = SandboxSpec::new("alpine");
+        spec.hostname = Some("box".to_string());
+        spec.scripts.insert("run.sh".to_string(), "echo hi".to_string());
+        spec.stat_virtualization = Some(StatVirtualization::Strict);
+        spec.security_profile = SecurityProfile::Restricted;
+        spec.network.policy = Some(serde_json::json!({"default": "deny"}));
+        spec.registry.push(RegistrySpec {
+            host: "localhost:5050".to_string(),
+            insecure: true,
+            skip_tls_verify: false,
+            username: None,
+            password: None,
+        });
+        spec.rootfs = Some(RootfsSpec {
+            kind: RootfsKind::LocalDir,
+            path: Some("/tmp/rootfs".to_string()),
+            fstype: None,
+            format: None,
+            read_only: false,
+        });
+        let cfg = spec_to_config(&spec).unwrap();
+        assert_eq!(cfg.hostname.as_deref(), Some("box"));
+        assert_eq!(cfg.scripts.get("run.sh").map(String::as_str), Some("echo hi"));
+        assert_eq!(cfg.stat_virtualization.as_deref(), Some("strict"));
+        assert_eq!(cfg.security_profile, "restricted");
+        assert_eq!(cfg.network.policy, Some(serde_json::json!({"default": "deny"})));
+        assert_eq!(cfg.registry[0].host, "localhost:5050");
+        assert!(cfg.registry[0].insecure);
+        assert_eq!(cfg.rootfs.unwrap().source, runtime::config::RootfsSource::LocalDir);
+    }
+
+    #[test]
+    fn secret_env_resolves_from_create_secrets_without_persisting() {
+        use nanosb_protocol::SecretEntry;
+        let mut spec = SandboxSpec::new("alpine");
+        spec.secrets.push(SecretEntry {
+            key: "api-key".to_string(),
+            value: Some("s3cr3t".to_string()),
+        });
+        spec.secret_env.insert("API_KEY".to_string(), "api-key".to_string());
+        let cfg = spec_to_config(&spec).unwrap();
+        assert_eq!(cfg.env.get("API_KEY").map(String::as_str), Some("s3cr3t"));
+        // The value lives only in config.env, which is stripped into
+        // NANOSB_BOOT_ENV before config.json is written.
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("s3cr3t"));
+    }
+
+    #[test]
+    fn secret_env_missing_secret_is_rejected() {
+        let mut spec = SandboxSpec::new("alpine");
+        spec.secret_env.insert("API_KEY".to_string(), "nope".to_string());
+        assert!(spec_to_config(&spec).is_err());
     }
 
     #[test]

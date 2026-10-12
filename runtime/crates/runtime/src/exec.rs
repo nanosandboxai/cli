@@ -40,6 +40,8 @@ pub struct ExecOptions {
     pub shell: bool,
     /// Kill the process after this many seconds (None/0 = no timeout).
     pub timeout_secs: Option<u64>,
+    /// Per-exec resource limits, `RESOURCE=soft:hard` (e.g. `NOFILE=1024:4096`).
+    pub rlimits: Vec<String>,
     /// Allocate a PTY (Phase 6).
     pub tty: bool,
     /// Initial PTY columns when `tty` is set.
@@ -167,6 +169,8 @@ struct ExecRequestWire<'a> {
     cwd: Option<&'a str>,
     env: &'a HashMap<String, String>,
     timeout_secs: u64,
+    #[serde(default)]
+    rlimits: &'a [String],
     tty: bool,
     cols: u16,
     rows: u16,
@@ -285,6 +289,7 @@ impl ExecClient {
             cwd: options.workdir.as_deref(),
             env: &options.env,
             timeout_secs: options.timeout_secs.unwrap_or(0),
+            rlimits: &options.rlimits,
             tty: options.tty,
             cols: options.cols,
             rows: options.rows,

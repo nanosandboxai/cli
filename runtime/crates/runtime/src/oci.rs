@@ -186,6 +186,18 @@ fn generate_mounts(user_mounts: &[Mount]) -> Vec<serde_json::Value> {
                     "options": options
                 }));
             }
+            MountType::Tmpfs => {
+                let mut options = mount.options.clone();
+                if mount.readonly {
+                    options.push("ro".to_string());
+                }
+                mounts.push(json!({
+                    "destination": &mount.container_path,
+                    "type": "tmpfs",
+                    "source": "tmpfs",
+                    "options": options
+                }));
+            }
         }
     }
 
