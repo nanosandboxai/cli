@@ -217,8 +217,14 @@ async fn validate_linux_detailed() -> ValidationResult {
 fn find_linux_libkrunfw() -> Option<String> {
     const SONAME: &str = "libkrunfw.so.5";
 
-    // Search ~/.nanosandbox/libs/ first (user-local install), then system dirs
+    // NANOSB_HOME (default ~/.nanosandbox) is authoritative, then HOME, then system.
     let mut search_dirs: Vec<String> = Vec::new();
+    let nanosb_home = std::env::var("NANOSB_HOME")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.nanosandbox")));
+    if let Some(base) = &nanosb_home {
+        search_dirs.push(format!("{base}/libs"));
+    }
     if let Ok(home) = std::env::var("HOME") {
         search_dirs.push(format!("{}/.nanosandbox/libs", home));
     }
@@ -321,8 +327,14 @@ async fn validate_macos_detailed() -> ValidationResult {
 /// able to load the firmware at VM boot time.
 #[cfg(target_os = "macos")]
 fn find_macos_libkrunfw() -> Option<String> {
-    // Search ~/.nanosandbox/libs/ first (user-local install), then system dirs
+    // NANOSB_HOME (default ~/.nanosandbox) is authoritative, then HOME, then system.
     let mut search_dirs: Vec<String> = Vec::new();
+    let nanosb_home = std::env::var("NANOSB_HOME")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.nanosandbox")));
+    if let Some(base) = &nanosb_home {
+        search_dirs.push(format!("{base}/libs"));
+    }
     if let Ok(home) = std::env::var("HOME") {
         search_dirs.push(format!("{}/.nanosandbox/libs", home));
     }

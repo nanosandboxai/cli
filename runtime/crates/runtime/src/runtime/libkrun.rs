@@ -342,8 +342,14 @@ pub fn handle_boot_vm_subprocess() -> ! {
 /// function is called in a forked child process that will be consumed by the VM.
 #[cfg(target_os = "macos")]
 fn preload_libkrunfw() {
-    // Search ~/.nanosandbox/libs/ first (user-local install), then system dirs
+    // NANOSB_HOME (default ~/.nanosandbox) is authoritative, then HOME, then system.
     let mut search_dirs: Vec<String> = Vec::new();
+    let nanosb_home = std::env::var("NANOSB_HOME")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.nanosandbox")));
+    if let Some(base) = &nanosb_home {
+        search_dirs.push(format!("{base}/libs"));
+    }
     if let Ok(home) = std::env::var("HOME") {
         search_dirs.push(format!("{}/.nanosandbox/libs", home));
     }

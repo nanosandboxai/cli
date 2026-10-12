@@ -311,7 +311,13 @@ impl GvproxyManager {
             }
         }
 
-        // Check ~/.nanosandbox/bin/ first (user-local install)
+        // NANOSB_HOME/bin is authoritative, then ~/.nanosandbox/bin (user-local install)
+        if let Ok(base) = std::env::var("NANOSB_HOME") {
+            let nanosb_path = PathBuf::from(&base).join("bin/gvproxy");
+            if nanosb_path.exists() {
+                return Some(nanosb_path);
+            }
+        }
         if let Ok(home) = std::env::var("HOME") {
             let nanosandbox_path = PathBuf::from(&home).join(".nanosandbox/bin/gvproxy");
             if nanosandbox_path.exists() {
