@@ -617,6 +617,109 @@ mod tests {
     }
 
     #[test]
+    fn every_sandbox_spec_field_reaches_runtime_config() {
+        use nanosb_protocol::{
+            PullPolicy, RegistrySpec, RootfsKind, RootfsPatch, RootfsSpec, SecretEntry,
+            SecurityProfile, StatVirtualization,
+        };
+        let host = tempfile::tempdir().unwrap();
+        let mut spec = SandboxSpec::new("alpine");
+        spec.name = Some("ac2".to_string());
+        spec.cpus = Some(3);
+        spec.memory_mb = Some(2048);
+        spec.timeout_secs = Some(1234);
+        spec.workdir = Some("/w".to_string());
+        spec.user = Some("1000".to_string());
+        spec.home = Some("/h".to_string());
+        spec.env.insert("PLAIN".to_string(), "v".to_string());
+        spec.labels.insert("k".to_string(), "v".to_string());
+        spec.ephemeral = true;
+        spec.pull_policy = PullPolicy::Never;
+        spec.command = Some("/bin/true".to_string());
+        spec.command_args = vec!["a".to_string()];
+        spec.rlimits.push(nanosb_protocol::Rlimit {
+            resource: "nofile".to_string(),
+            soft: Some(10),
+            hard: Some(20),
+        });
+        spec.scripts.insert("s.sh".to_string(), "echo hi".to_string());
+        spec.hostname = Some("h".to_string());
+        spec.secret_env.insert("API".to_string(), "api".to_string());
+        spec.secrets.push(SecretEntry {
+            key: "api".to_string(),
+            value: Some("secret".to_string()),
+        });
+        spec.stat_virtualization = Some(StatVirtualization::Strict);
+        spec.security_profile = SecurityProfile::Restricted;
+
+        let mut mount = mount_spec(nanosb_protocol::MountType::Bind);
+        mount.host_path = host.path().to_string_lossy().to_string();
+        mount.options = vec!["noexec".to_string()];
+        mount.uid = Some(1);
+        mount.gid = Some(2);
+        spec.mounts.push(mount);
+
+        spec.network.enabled = false;
+        spec.network.mode = Some("none".to_string());
+        spec.network.scope = Some("none".to_string());
+        spec.network.dns.push("1.1.1.1".to_string());
+        spec.network.dns_zones.insert("z".to_string(), "127.0.0.1".to_string());
+        spec.network.policy = Some(serde_json::json!({"default":"deny"}));
+        spec.network.publish.push(nanosb_protocol::PortPublish::udp(1000, 1000));
+        spec.registry.push(RegistrySpec {
+            host: "h".to_string(),
+            insecure: true,
+            skip_tls_verify: true,
+            username: None,
+            password: None,
+        });
+        spec.rootfs = Some(RootfsSpec {
+            kind: RootfsKind::LocalDir,
+            path: Some(host.path().to_string_lossy().to_string()),
+            fstype: None,
+            format: None,
+            read_only: false,
+        });
+        spec.patches.push(RootfsPatch::Mkdir {
+            path: "/x".to_string(),
+            mode: Some(0o755),
+        });
+
+        let cfg = spec_to_config(&spec).unwrap();
+        assert_eq!(cfg.cpus, 3);
+        assert_eq!(cfg.memory_mb, 2048);
+        assert_eq!(cfg.timeout_secs, 1234);
+        assert_eq!(cfg.workdir, "/w");
+        assert_eq!(cfg.user.as_deref(), Some("1000"));
+        assert_eq!(cfg.home.as_deref(), Some("/h"));
+        assert_eq!(cfg.env.get("PLAIN").map(String::as_str), Some("v"));
+        assert_eq!(cfg.env.get("API").map(String::as_str), Some("secret"));
+        assert_eq!(cfg.labels.get("k").map(String::as_str), Some("v"));
+        assert!(cfg.ephemeral);
+        assert_eq!(cfg.command.as_deref(), Some("/bin/true"));
+        assert_eq!(cfg.command_args, vec!["a".to_string()]);
+        assert_eq!(cfg.rlimits, vec!["NOFILE=10:20".to_string()]);
+        assert_eq!(cfg.scripts.get("s.sh").map(String::as_str), Some("echo hi"));
+        assert_eq!(cfg.hostname.as_deref(), Some("h"));
+        assert_eq!(cfg.stat_virtualization.as_deref(), Some("strict"));
+        assert_eq!(cfg.security_profile, "restricted");
+        assert_eq!(cfg.mounts[0].options, vec!["noexec".to_string()]);
+        assert_eq!(cfg.mounts[0].uid, Some(1));
+        assert_eq!(cfg.mounts[0].gid, Some(2));
+        assert!(!cfg.network.enabled);
+        assert_eq!(cfg.network.mode, runtime::config::NetworkMode::None);
+        assert_eq!(cfg.network.scope, runtime::config::NetworkScope::None);
+        assert_eq!(cfg.network.dns, vec!["1.1.1.1".to_string()]);
+        assert_eq!(cfg.network.dns_zones.get("z").map(String::as_str), Some("127.0.0.1"));
+        assert_eq!(cfg.network.policy, Some(serde_json::json!({"default":"deny"})));
+        assert_eq!(cfg.network.port_mappings[0].protocol, "udp");
+        assert_eq!(cfg.registry[0].host, "h");
+        assert!(cfg.registry[0].insecure && cfg.registry[0].skip_tls_verify);
+        assert_eq!(cfg.rootfs.as_ref().unwrap().source, runtime::config::RootfsSource::LocalDir);
+        assert_eq!(cfg.patches.len(), 1);
+    }
+
+    #[test]
     fn secret_env_resolves_from_create_secrets_without_persisting() {
         use nanosb_protocol::SecretEntry;
         let mut spec = SandboxSpec::new("alpine");

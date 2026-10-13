@@ -684,17 +684,21 @@ fn exec_default(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
-    let command = config
+    let configured = config
         .get("command")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("/bin/sh")
-        .to_string();
-    let mut args: Vec<String> = config
-        .get("command_args")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default();
+        .filter(|s| !s.is_empty() && !s.ends_with("exec-agent"));
+    let (command, mut args) = match configured {
+        Some(cmd) => (
+            cmd.to_string(),
+            config
+                .get("command_args")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+        None => ("/bin/sh".to_string(), Vec::new()),
+    };
     args.extend(spec.args);
     let env = spec.env;
     exec_buffered(

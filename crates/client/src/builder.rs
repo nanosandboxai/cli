@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use nanosb_protocol::{
-    MountSpec, MountType, NetworkSpec, PortPublish, PullPolicy, Rlimit, SandboxSpec, VolumeSpec,
+    MountSpec, MountType, NetworkSpec, PortPublish, PullPolicy, RegistrySpec, Rlimit, RootfsPatch,
+    RootfsSpec, SandboxSpec, SecretEntry, SecurityProfile, StatVirtualization, VolumeSpec,
 };
 
 /// Builds a [`SandboxSpec`] with a fluent API, mirroring the shape of the other
@@ -199,6 +200,46 @@ impl SandboxBuilder {
     /// `secret_key` the secret store entry it resolves to.
     pub fn secret_env(mut self, key: impl Into<String>, secret_key: impl Into<String>) -> Self {
         self.spec.secret_env.insert(key.into(), secret_key.into());
+        self
+    }
+
+    /// Supply a named secret value at create time (never persisted). Reference
+    /// it from an env key with [`SandboxBuilder::secret_env`].
+    pub fn secret(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.spec.secrets.push(SecretEntry {
+            key: key.into(),
+            value: Some(value.into()),
+        });
+        self
+    }
+
+    /// Set a non-OCI rootfs source (local directory or disk image).
+    pub fn rootfs(mut self, rootfs: RootfsSpec) -> Self {
+        self.spec.rootfs = Some(rootfs);
+        self
+    }
+
+    /// Add a pre-boot rootfs patch.
+    pub fn patch(mut self, patch: RootfsPatch) -> Self {
+        self.spec.patches.push(patch);
+        self
+    }
+
+    /// Add a per-sandbox registry configuration entry.
+    pub fn registry(mut self, registry: RegistrySpec) -> Self {
+        self.spec.registry.push(registry);
+        self
+    }
+
+    /// Set the stat virtualization mode.
+    pub fn stat_virtualization(mut self, mode: StatVirtualization) -> Self {
+        self.spec.stat_virtualization = Some(mode);
+        self
+    }
+
+    /// Set the guest security profile.
+    pub fn security_profile(mut self, profile: SecurityProfile) -> Self {
+        self.spec.security_profile = profile;
         self
     }
 

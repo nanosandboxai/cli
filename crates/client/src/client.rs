@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use nanosb_protocol::{
-    Capability, ExecRequest, ExecResult, FsEntry, FsMkdirSpec, FsPathSpec, FsStat,
-    FsTransferSpec, FsWriteSpec, FsWriteStreamSpec, GuestEvent, LogLine, LogSource, LogsSpec,
-    Metrics, ModifySpec, MountSpec, Response, SandboxInfo, SandboxList, SandboxSpec,
+    Capability, ExecDefaultRequest, ExecRequest, ExecResult, FsEntry, FsMkdirSpec, FsPathSpec,
+    FsStat, FsTransferSpec, FsWriteSpec, FsWriteStreamSpec, GuestEvent, LogLine, LogSource,
+    LogsSpec, Metrics, ModifySpec, MountSpec, Response, SandboxInfo, SandboxList, SandboxSpec,
     SandboxState, SecretEntry, SnapshotInfo, StreamEvent, VolumeInfo, VolumeSpec,
     Request::{self, *},
 };
@@ -340,12 +340,26 @@ impl Sandbox {
     pub fn wait_until_stopped(&self, timeout: Duration) -> Result<SandboxState> {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.state()? {
-                SandboxState::Stopped => return Ok(SandboxState::Stopped),
-                SandboxState::Error => {
+            match self.state() {
+                Ok(SandboxState::Stopped) => return Ok(SandboxState::Stopped),
+                Ok(SandboxState::Error) => {
                     return Err(Error::unexpected("sandbox entered error state while waiting"))
                 }
-                _ => {}
+                Ok(_) => {}
+                // The supervisor exits (and its socket closes) once the sandbox
+                // stops, so an unreachable/gone sandbox means it has stopped.
+                Err(Error::Connect(_)) | Err(Error::Io(_)) => return Ok(SandboxState::Stopped),
+                Err(Error::Protocol(p))
+                    if matches!(
+                        p.code,
+                        nanosb_protocol::ErrorCode::Transport
+                            | nanosb_protocol::ErrorCode::NotFound
+                            | nanosb_protocol::ErrorCode::InvalidState
+                    ) =>
+                {
+                    return Ok(SandboxState::Stopped)
+                }
+                Err(e) => return Err(e),
             }
             if Instant::now() >= deadline {
                 return Err(Error::Timeout(format!(
@@ -452,6 +466,43 @@ impl Sandbox {
         let mut conn = self.client.open()?;
         conn.clear_read_timeout()?;
         conn.call_stream(&Attach {
+            name: self.name_arg()?,
+        })?;
+        while let Some(resp) = conn.next_response()? {
+            match resp {
+                Response::Guest(ev) => {
+                    let end = is_stream_end(&ev);
+                    on_event(ev);
+                    if end {
+                        break;
+                    }
+                }
+                Response::Error(e) => return Err(Error::Protocol(e)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute the sandbox's configured default workload, with optional
+    /// overrides (extra args, env, cwd, rlimits).
+    pub fn exec_default(&self, req: ExecDefaultRequest) -> Result<ExecResult> {
+        let mut req = req;
+        req.name = self.name_arg()?;
+        match self.client.call(&Request::ExecDefault(Box::new(req)))? {
+            Response::ExecResult(r) => Ok(r),
+            other => Err(Error::unexpected(format!("{other:?}"))),
+        }
+    }
+
+    /// Attach to the sandbox's default interactive workload.
+    pub fn attach_default<F>(&self, mut on_event: F) -> Result<()>
+    where
+        F: FnMut(GuestEvent),
+    {
+        let mut conn = self.client.open()?;
+        conn.clear_read_timeout()?;
+        conn.call_stream(&Request::AttachDefault {
             name: self.name_arg()?,
         })?;
         while let Some(resp) = conn.next_response()? {

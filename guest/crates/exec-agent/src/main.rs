@@ -179,6 +179,16 @@ fn apply_one_mount(plan: &MountPlan) -> Result<(), String> {
 }
 
 fn apply_startup_config() {
+    if let Ok(specs) = std::env::var("NANOSB_RLIMITS") {
+        let limits: Vec<String> = serde_json::from_str(&specs).unwrap_or_default();
+        for (resource, limit) in parse_rlimits(&limits) {
+            unsafe {
+                if libc::setrlimit(resource, &limit) != 0 {
+                    diag("exec-agent: startup setrlimit failed");
+                }
+            }
+        }
+    }
     if let Ok(hostname) = std::env::var("NANOSB_HOSTNAME") {
         if !hostname.is_empty() {
             if let Ok(c) = std::ffi::CString::new(hostname.clone()) {
