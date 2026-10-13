@@ -349,20 +349,9 @@ impl Sandbox {
                     ))
                 }
                 Ok(_) => {}
-                // The supervisor exits (and its socket closes) once the sandbox
-                // stops, so an unreachable/gone sandbox means it has stopped.
-                Err(Error::Connect(_)) | Err(Error::Io(_)) => return Ok(SandboxState::Stopped),
-                Err(Error::Protocol(p))
-                    if matches!(
-                        p.code,
-                        nanosb_protocol::ErrorCode::Transport
-                            | nanosb_protocol::ErrorCode::NotFound
-                            | nanosb_protocol::ErrorCode::InvalidState
-                    ) =>
-                {
-                    return Ok(SandboxState::Stopped)
-                }
-                Err(e) => return Err(e),
+                // A stopped sandbox's control socket is gone; any transport
+                // failure (direct or proxied by the helper) means it stopped.
+                Err(_) => return Ok(SandboxState::Stopped),
             }
             if Instant::now() >= deadline {
                 return Err(Error::Timeout(format!(

@@ -239,9 +239,9 @@ fn epic5_advanced_surface_live() {
     cleanup(&pull_name);
 
     // ── teardown ────────────────────────────────────────────────────────
-    let _ = sandbox.remove(true);
-    let _ = net.remove(true);
-    let _ = replaced.remove(true);
-    cleanup(&name);
-    cleanup(&net_name);
+    for n in [&name, &net_name] {
+        let _ = client.sandbox(n).stop(true);
+        let _ = client.sandbox(n).remove(true);
+        cleanup(n);
+    }
 }
