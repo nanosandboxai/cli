@@ -504,7 +504,13 @@ impl SandboxConfigBuilder {
     }
 
     /// Add an extra virtiofs mount for next mode.
-    pub fn extra_mount(mut self, tag: impl Into<String>, host_path: impl Into<String>, target: impl Into<String>, readonly: bool) -> Self {
+    pub fn extra_mount(
+        mut self,
+        tag: impl Into<String>,
+        host_path: impl Into<String>,
+        target: impl Into<String>,
+        readonly: bool,
+    ) -> Self {
         self.config.extra_mounts.push(ExtraMount {
             tag: tag.into(),
             host_path: host_path.into(),
@@ -515,11 +521,7 @@ impl SandboxConfigBuilder {
     }
 
     /// Bridge a host unix socket to a guest vsock port (next mode).
-    pub fn vsock_bridge(
-        mut self,
-        socket_path: impl Into<String>,
-        guest_port: u32,
-    ) -> Self {
+    pub fn vsock_bridge(mut self, socket_path: impl Into<String>, guest_port: u32) -> Self {
         self.config.vsock_socket = Some(socket_path.into());
         self.config.vsock_port = Some(guest_port);
         self

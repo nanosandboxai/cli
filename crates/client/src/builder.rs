@@ -126,12 +126,18 @@ impl SandboxBuilder {
     }
 
     pub fn publish_tcp(mut self, host_port: u16, guest_port: u16) -> Self {
-        self.spec.network.publish.push(PortPublish::tcp(host_port, guest_port));
+        self.spec
+            .network
+            .publish
+            .push(PortPublish::tcp(host_port, guest_port));
         self
     }
 
     pub fn publish_udp(mut self, host_port: u16, guest_port: u16) -> Self {
-        self.spec.network.publish.push(PortPublish::udp(host_port, guest_port));
+        self.spec
+            .network
+            .publish
+            .push(PortPublish::udp(host_port, guest_port));
         self
     }
 

@@ -298,9 +298,10 @@ impl ExecClient {
             stream,
             applied_timeout: None,
         };
-        handle.write_frame(&serde_json::to_vec(&req).map_err(|e| {
-            ExecError::Protocol(format!("serialize request: {}", e))
-        })?)?;
+        handle.write_frame(
+            &serde_json::to_vec(&req)
+                .map_err(|e| ExecError::Protocol(format!("serialize request: {}", e)))?,
+        )?;
         Ok(handle)
     }
 
@@ -348,12 +349,14 @@ impl ExecHandle {
             .map_err(|e| ExecError::Protocol(format!("decode event: {}", e)))?;
         Ok(Some(match wire {
             ExecEventWire::Started { pid } => ExecEvent::Started { pid },
-            ExecEventWire::Stdout { data } => {
-                ExecEvent::Output(OutputChunk { stream: Stream::Stdout, data })
-            }
-            ExecEventWire::Stderr { data } => {
-                ExecEvent::Output(OutputChunk { stream: Stream::Stderr, data })
-            }
+            ExecEventWire::Stdout { data } => ExecEvent::Output(OutputChunk {
+                stream: Stream::Stdout,
+                data,
+            }),
+            ExecEventWire::Stderr { data } => ExecEvent::Output(OutputChunk {
+                stream: Stream::Stderr,
+                data,
+            }),
             ExecEventWire::Exit { code } => ExecEvent::Exit { code },
             ExecEventWire::Error { message } => ExecEvent::Error { message },
         }))
@@ -435,7 +438,9 @@ impl ExecClient {
         match resp {
             FsResponse::Ok => Ok(()),
             FsResponse::Error { message } => Err(ExecError::Agent(message)),
-            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+            other => Err(ExecError::Protocol(format!(
+                "unexpected fs response: {other:?}"
+            ))),
         }
     }
 
@@ -454,7 +459,9 @@ impl ExecClient {
             FsResponse::FsData { data_base64 } => nanosb_protocol::base64_decode(&data_base64)
                 .ok_or_else(|| ExecError::Protocol("invalid base64 from guest".into())),
             FsResponse::Error { message } => Err(ExecError::Agent(message)),
-            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+            other => Err(ExecError::Protocol(format!(
+                "unexpected fs response: {other:?}"
+            ))),
         }
     }
 
@@ -519,7 +526,9 @@ impl ExecClient {
         })? {
             FsResponse::FsEntries { entries } => Ok(entries),
             FsResponse::Error { message } => Err(ExecError::Agent(message)),
-            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+            other => Err(ExecError::Protocol(format!(
+                "unexpected fs response: {other:?}"
+            ))),
         }
     }
 
@@ -530,7 +539,9 @@ impl ExecClient {
         })? {
             FsResponse::FsStat { stat } => Ok(stat),
             FsResponse::Error { message } => Err(ExecError::Agent(message)),
-            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+            other => Err(ExecError::Protocol(format!(
+                "unexpected fs response: {other:?}"
+            ))),
         }
     }
 
@@ -541,7 +552,9 @@ impl ExecClient {
         })? {
             FsResponse::FsExists { exists } => Ok(exists),
             FsResponse::Error { message } => Err(ExecError::Agent(message)),
-            other => Err(ExecError::Protocol(format!("unexpected fs response: {other:?}"))),
+            other => Err(ExecError::Protocol(format!(
+                "unexpected fs response: {other:?}"
+            ))),
         }
     }
 
@@ -608,7 +621,6 @@ impl FsWriteStream {
         ExecClient::fs_ok(fs_call_on(&mut self.stream, &FsRequest::FsWriteClose)?)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -775,8 +787,8 @@ mod tests {
             for expected in [b"hello ".as_slice(), b"world".as_slice()] {
                 let chunk = read_frame(s);
                 assert_eq!(chunk["type"], "fs_write_chunk");
-                let data = nanosb_protocol::base64_decode(chunk["data_base64"].as_str().unwrap())
-                    .unwrap();
+                let data =
+                    nanosb_protocol::base64_decode(chunk["data_base64"].as_str().unwrap()).unwrap();
                 assert_eq!(data, expected);
                 write_frame(s, &serde_json::json!({"type":"ok"}));
             }
@@ -786,7 +798,10 @@ mod tests {
         });
         let client = ExecClient::new(&path);
         client
-            .fs_write_stream("/tmp/stream.bin", vec![b"hello ".to_vec(), b"world".to_vec()])
+            .fs_write_stream(
+                "/tmp/stream.bin",
+                vec![b"hello ".to_vec(), b"world".to_vec()],
+            )
             .unwrap();
         h.join().unwrap();
     }
@@ -812,7 +827,10 @@ mod tests {
     fn fs_write_stream_surfaces_agent_error_on_open() {
         let (path, h) = fake_agent(|s| {
             let _open = read_frame(s);
-            write_frame(s, &serde_json::json!({"type":"error","message":"disk full"}));
+            write_frame(
+                s,
+                &serde_json::json!({"type":"error","message":"disk full"}),
+            );
         });
         let client = ExecClient::new(&path);
         let err = client
@@ -846,8 +864,3 @@ mod tests {
         h.join().unwrap();
     }
 }
-
-
-
-
-

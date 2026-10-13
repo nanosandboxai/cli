@@ -111,15 +111,11 @@ pub enum ControlRequest {
     #[serde(rename_all = "snake_case")]
     Status {},
     #[serde(rename_all = "snake_case")]
-    Stop {
-        force: Option<bool>,
-    },
+    Stop { force: Option<bool> },
     #[serde(rename_all = "snake_case")]
     Attach {},
     #[serde(rename_all = "snake_case")]
-    LogsFollow {
-        tail: Option<usize>,
-    },
+    LogsFollow { tail: Option<usize> },
     #[serde(rename_all = "snake_case")]
     Ping {},
 }
@@ -137,13 +133,9 @@ pub enum ControlResponse {
         config_hash: String,
     },
     #[serde(rename_all = "snake_case")]
-    Ok {
-        version: String,
-    },
+    Ok { version: String },
     #[serde(rename_all = "snake_case")]
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// Frame sent to an attach client (output from VM).
@@ -151,13 +143,9 @@ pub enum ControlResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AttachFrame {
     #[serde(rename_all = "snake_case")]
-    Output {
-        data: String,
-    },
+    Output { data: String },
     #[serde(rename_all = "snake_case")]
-    Exit {
-        code: i32,
-    },
+    Exit { code: i32 },
 }
 
 /// Frame received from an attach client (input to VM).
@@ -165,14 +153,9 @@ pub enum AttachFrame {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AttachInput {
     #[serde(rename_all = "snake_case")]
-    Input {
-        data: String,
-    },
+    Input { data: String },
     #[serde(rename_all = "snake_case")]
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
+    Resize { cols: u16, rows: u16 },
 }
 
 /// Attached console clients: (subscriber id, stream).
@@ -286,9 +269,7 @@ pub struct SuperviseArgs {
 /// 7. Enforces timeout
 /// 8. Cleans up on exit
 pub fn run_supervisor(args: SuperviseArgs) -> ! {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
     // Detach from parent process group
     unsafe {
@@ -322,9 +303,9 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
     let mut config = config;
     let ephemeral = config.ephemeral;
     if let Ok(boot_env_json) = std::env::var("NANOSB_BOOT_ENV") {
-        if let Ok(extra) = serde_json::from_str::<std::collections::HashMap<String, String>>(
-            &boot_env_json,
-        ) {
+        if let Ok(extra) =
+            serde_json::from_str::<std::collections::HashMap<String, String>>(&boot_env_json)
+        {
             config.env.extend(extra);
         }
         std::env::remove_var("NANOSB_BOOT_ENV");
@@ -603,7 +584,10 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
 
 fn cleanup_after_stop(sandbox_dir: &Path, ephemeral: bool) {
     if ephemeral {
-        info!("ephemeral sandbox stopped; removing {}", sandbox_dir.display());
+        info!(
+            "ephemeral sandbox stopped; removing {}",
+            sandbox_dir.display()
+        );
         let _ = std::fs::remove_dir_all(sandbox_dir);
     }
 }
@@ -1200,7 +1184,10 @@ mod tests {
 
         let json = r#"{"type": "logs_follow", "tail": 100}"#;
         let req: ControlRequest = serde_json::from_str(json).unwrap();
-        assert!(matches!(req, ControlRequest::LogsFollow { tail: Some(100) }));
+        assert!(matches!(
+            req,
+            ControlRequest::LogsFollow { tail: Some(100) }
+        ));
     }
 
     #[test]

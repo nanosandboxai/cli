@@ -98,7 +98,11 @@ fn epic5_advanced_surface_live() {
     let secret = sandbox
         .exec("sh", &["-c", "printf %s \"$API_KEY\""])
         .expect("secret exec");
-    assert_eq!(secret.stdout.trim(), "s3cr3t-value", "secretEnv not substituted");
+    assert_eq!(
+        secret.stdout.trim(),
+        "s3cr3t-value",
+        "secretEnv not substituted"
+    );
 
     // S4 invariant: the secret value is never written to disk.
     let config = std::fs::read_to_string(nanosb_client::sandbox_dir(&name).join("config.json"))
@@ -131,7 +135,10 @@ fn epic5_advanced_surface_live() {
     // S1: exec_default runs the default workload (a shell here).
     let mut def = ExecDefaultRequest::default();
     def.args = vec!["-c".into(), "printf default-ok".into()];
-    let default = client.sandbox(&name).exec_default(def).expect("exec_default");
+    let default = client
+        .sandbox(&name)
+        .exec_default(def)
+        .expect("exec_default");
     assert_eq!(default.stdout.trim(), "default-ok", "exec_default failed");
 
     // S3: stderr console output is labeled Stderr (the agent logs to fd 2).
@@ -165,7 +172,10 @@ fn epic5_advanced_surface_live() {
         )
         .expect("create with udp publish");
     assert_eq!(net.state().unwrap(), SandboxState::Running);
-    assert!(net.exec("true", &[]).is_ok(), "udp-published guest not execable");
+    assert!(
+        net.exec("true", &[]).is_ok(),
+        "udp-published guest not execable"
+    );
 
     // ── S2: list pagination cursor ──────────────────────────────────────
     let page = client.list_page(Some(1), None, None).expect("list page 1");
@@ -217,8 +227,14 @@ fn epic5_advanced_surface_live() {
         .expect("pull_policy=never with cached image");
     assert_eq!(pull.state().unwrap(), SandboxState::Running);
     pull.stop(true).expect("stop");
-    let stopped = pull.wait_until_stopped(Duration::from_secs(20)).expect("wait");
-    assert_eq!(stopped, SandboxState::Stopped, "waitUntilStopped did not observe stop");
+    let stopped = pull
+        .wait_until_stopped(Duration::from_secs(20))
+        .expect("wait");
+    assert_eq!(
+        stopped,
+        SandboxState::Stopped,
+        "waitUntilStopped did not observe stop"
+    );
     let _ = pull.remove(true);
     cleanup(&pull_name);
 

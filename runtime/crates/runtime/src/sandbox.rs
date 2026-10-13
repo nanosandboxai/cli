@@ -272,7 +272,9 @@ impl Sandbox {
 
     /// Get the VM exit code (if the VM has exited).
     pub fn vm_exit_code(&self) -> Option<i32> {
-        self.runtime.as_ref().and_then(|rt| rt.vm_exit_code(&self.id))
+        self.runtime
+            .as_ref()
+            .and_then(|rt| rt.vm_exit_code(&self.id))
     }
 
     /// Get the creation timestamp
@@ -306,13 +308,10 @@ impl Sandbox {
             self.runtime.as_ref().expect("runtime was just assigned")
         };
 
-        let bundle = self
-            .bundle
-            .as_ref()
-            .ok_or_else(|| {
-                error!(sandbox_id = %self.id, "No bundle available for sandbox start");
-                Error::SandboxCreationFailed("No bundle available".to_string())
-            })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            error!(sandbox_id = %self.id, "No bundle available for sandbox start");
+            Error::SandboxCreationFailed("No bundle available".to_string())
+        })?;
 
         let create_timeout = Duration::from_secs(300);
         let start_timeout = Duration::from_secs(600);
@@ -332,15 +331,18 @@ impl Sandbox {
         })?;
 
         debug!("Starting VM (next mode) via runtime");
-        timeout(start_timeout, runtime.start_next(&self.id, console, extra_mounts))
-            .await
-            .map_err(|_| {
-                error!(sandbox_id = %self.id, "Sandbox VM start timed out after 600s");
-                Error::Timeout(600)
-            })?
-            .inspect_err(|_| {
-                self.status = SandboxStatus::Error;
-            })?;
+        timeout(
+            start_timeout,
+            runtime.start_next(&self.id, console, extra_mounts),
+        )
+        .await
+        .map_err(|_| {
+            error!(sandbox_id = %self.id, "Sandbox VM start timed out after 600s");
+            Error::Timeout(600)
+        })?
+        .inspect_err(|_| {
+            self.status = SandboxStatus::Error;
+        })?;
 
         self.status = SandboxStatus::Running;
         info!("Sandbox {} is now running (next mode)", self.id);
@@ -376,13 +378,10 @@ impl Sandbox {
             self.runtime.as_ref().expect("runtime was just assigned")
         };
 
-        let bundle = self
-            .bundle
-            .as_ref()
-            .ok_or_else(|| {
-                error!(sandbox_id = %self.id, "No bundle available for sandbox start");
-                Error::SandboxCreationFailed("No bundle available".to_string())
-            })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            error!(sandbox_id = %self.id, "No bundle available for sandbox start");
+            Error::SandboxCreationFailed("No bundle available".to_string())
+        })?;
 
         // --- Create and start the VM ---
 
@@ -431,9 +430,7 @@ impl Sandbox {
 
     /// Get the guest IP address for this sandbox.
     pub fn guest_ip(&self) -> Option<String> {
-        self.runtime
-            .as_ref()
-            .and_then(|r| r.guest_ip(&self.id))
+        self.runtime.as_ref().and_then(|r| r.guest_ip(&self.id))
     }
 
     /// Stop the sandbox
@@ -467,13 +464,10 @@ impl Sandbox {
             )));
         }
 
-        let bundle = self
-            .bundle
-            .as_ref()
-            .ok_or_else(|| {
-                error!(sandbox_id = %self.id, "No bundle available for sandbox restart");
-                Error::SandboxCreationFailed("No bundle available".to_string())
-            })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            error!(sandbox_id = %self.id, "No bundle available for sandbox restart");
+            Error::SandboxCreationFailed("No bundle available".to_string())
+        })?;
 
         info!("Restarting sandbox {}", self.id);
 
@@ -571,5 +565,4 @@ mod tests {
             .build();
         assert!(config.project.is_some());
     }
-
 }

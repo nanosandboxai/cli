@@ -294,4 +294,3 @@ pub fn set_rlimits(ctx_id: u32, rlimits: &[String]) -> Result<(), String> {
 pub fn set_smbios_oem_strings(ctx_id: u32, strings: &[String]) -> Result<(), String> {
     libkrun_sys::safe_set_smbios_oem_strings(ctx_id, strings)
 }
-

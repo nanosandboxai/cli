@@ -209,10 +209,28 @@ fn handle(
         ),
         Request::Pause { .. } => signal_vm(stream, ctx, libc::SIGSTOP),
         Request::Resume { .. } => signal_vm(stream, ctx, libc::SIGCONT),
-        Request::Exec(spec) => exec_buffered(stream, ctx, spec.command, spec.args, spec.cwd, spec.env, spec.shell, spec.timeout_secs, spec.rlimits),
-        Request::Shell(spec) => {
-            exec_buffered(stream, ctx, spec.script, Vec::new(), spec.cwd, spec.env, true, spec.timeout_secs, Vec::new())
-        }
+        Request::Exec(spec) => exec_buffered(
+            stream,
+            ctx,
+            spec.command,
+            spec.args,
+            spec.cwd,
+            spec.env,
+            spec.shell,
+            spec.timeout_secs,
+            spec.rlimits,
+        ),
+        Request::Shell(spec) => exec_buffered(
+            stream,
+            ctx,
+            spec.script,
+            Vec::new(),
+            spec.cwd,
+            spec.env,
+            true,
+            spec.timeout_secs,
+            Vec::new(),
+        ),
         Request::ExecDefault(spec) => exec_default(stream, ctx, *spec),
         Request::ExecStream(spec) => {
             let opts = ExecOptions {
@@ -238,7 +256,9 @@ fn handle(
             let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
             stream_exec_stream(stream, ctx, &spec.command, &argrefs, opts)
         }
-        Request::Attach { .. } | Request::AttachDefault { .. } => stream_attach(stream, reader, ctx),
+        Request::Attach { .. } | Request::AttachDefault { .. } => {
+            stream_attach(stream, reader, ctx)
+        }
         Request::Logs(spec) => handle_logs(stream, ctx, spec),
         Request::Metrics { .. } => send(stream, &Response::Metrics(sample_metrics(ctx))),
         Request::FsRead(p) => {
@@ -415,7 +435,11 @@ fn signal_vm(stream: &mut UnixStream, ctx: &Ctx, sig: i32) -> std::io::Result<()
             ack_ok(stream)
         }
         _ => {
-            send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "sandbox has no running VM");
+            send_error(
+                stream,
+                nanosb_protocol::ErrorCode::InvalidState,
+                "sandbox has no running VM",
+            );
             Ok(())
         }
     }
@@ -438,15 +462,15 @@ fn handle_start(stream: &mut UnixStream, ctx: &Ctx) -> std::io::Result<()> {
     }
 }
 
-fn handle_modify(
-    stream: &mut UnixStream,
-    ctx: &Ctx,
-    spec: ModifySpec,
-) -> std::io::Result<()> {
+fn handle_modify(stream: &mut UnixStream, ctx: &Ctx, spec: ModifySpec) -> std::io::Result<()> {
     match apply_modify(ctx.sandbox_dir, &spec) {
         Ok(()) => ack_ok(stream),
         Err(e) => {
-            send_error(stream, nanosb_protocol::ErrorCode::Internal, format!("modify failed: {e}"));
+            send_error(
+                stream,
+                nanosb_protocol::ErrorCode::Internal,
+                format!("modify failed: {e}"),
+            );
             Ok(())
         }
     }
@@ -547,12 +571,20 @@ fn attach_input(stream: &mut UnixStream, ctx: &Ctx, data: String) -> std::io::Re
         let mut session = match ctx.exec_session.lock() {
             Ok(s) => s,
             Err(_) => {
-                send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session lock poisoned");
+                send_error(
+                    stream,
+                    nanosb_protocol::ErrorCode::InvalidState,
+                    "interactive session lock poisoned",
+                );
                 return Ok(());
             }
         };
         let Some(h) = session.as_mut() else {
-            send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session unavailable");
+            send_error(
+                stream,
+                nanosb_protocol::ErrorCode::InvalidState,
+                "interactive session unavailable",
+            );
             return Ok(());
         };
         let r = h.write_stdin(&data);
@@ -560,7 +592,11 @@ fn attach_input(stream: &mut UnixStream, ctx: &Ctx, data: String) -> std::io::Re
         r
     };
     if let Err(e) = write_result {
-        send_error(stream, nanosb_protocol::ErrorCode::InvalidState, format!("stdin write failed: {e}"));
+        send_error(
+            stream,
+            nanosb_protocol::ErrorCode::InvalidState,
+            format!("stdin write failed: {e}"),
+        );
         return Ok(());
     }
     ack_ok(stream)
@@ -575,18 +611,30 @@ fn attach_resize(stream: &mut UnixStream, ctx: &Ctx, cols: u16, rows: u16) -> st
         let mut session = match ctx.exec_session.lock() {
             Ok(s) => s,
             Err(_) => {
-                send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session lock poisoned");
+                send_error(
+                    stream,
+                    nanosb_protocol::ErrorCode::InvalidState,
+                    "interactive session lock poisoned",
+                );
                 return Ok(());
             }
         };
         let Some(h) = session.as_mut() else {
-            send_error(stream, nanosb_protocol::ErrorCode::InvalidState, "interactive session unavailable");
+            send_error(
+                stream,
+                nanosb_protocol::ErrorCode::InvalidState,
+                "interactive session unavailable",
+            );
             return Ok(());
         };
         h.resize(cols, rows)
     };
     if let Err(e) = resize_result {
-        send_error(stream, nanosb_protocol::ErrorCode::InvalidState, format!("resize failed: {e}"));
+        send_error(
+            stream,
+            nanosb_protocol::ErrorCode::InvalidState,
+            format!("resize failed: {e}"),
+        );
         return Ok(());
     }
     ack_ok(stream)
@@ -694,7 +742,11 @@ fn exec_default(
             config
                 .get("command_args")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default(),
         ),
         None => ("/bin/sh".to_string(), Vec::new()),
@@ -790,7 +842,9 @@ fn stream_attach(
                             }
                             ack_ok(stream)?;
                         }
-                        Request::AttachResize { cols, rows } => attach_resize(stream, ctx, cols, rows)?,
+                        Request::AttachResize { cols, rows } => {
+                            attach_resize(stream, ctx, cols, rows)?
+                        }
                         _ => {}
                     }
                 }
@@ -838,7 +892,11 @@ fn read_jsonl_logs(path: &std::path::Path) -> Vec<LogLine> {
                     source: log_source_from_name(
                         v.get("source").and_then(|x| x.as_str()).unwrap_or("stdout"),
                     ),
-                    data: v.get("data").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    data: v
+                        .get("data")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 })
                 .collect()
         })
@@ -903,17 +961,19 @@ fn handle_logs(
     while ctx.running.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(200));
         let fresh = match spec.source {
-            Some(src) => std::fs::read_to_string(logs_dir.join(format!("{}.log", log_source_name(src))))
-                .unwrap_or_default()
-                .lines()
-                .enumerate()
-                .map(|(i, l)| LogLine {
-                    cursor: i as u64,
-                    timestamp_ms: 0,
-                    source: src,
-                    data: l.to_string(),
-                })
-                .collect::<Vec<_>>(),
+            Some(src) => {
+                std::fs::read_to_string(logs_dir.join(format!("{}.log", log_source_name(src))))
+                    .unwrap_or_default()
+                    .lines()
+                    .enumerate()
+                    .map(|(i, l)| LogLine {
+                        cursor: i as u64,
+                        timestamp_ms: 0,
+                        source: src,
+                        data: l.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+            }
             None => read_jsonl_logs(&logs_dir.join("console.jsonl")),
         };
         if fresh.len() > seen {
@@ -934,7 +994,10 @@ fn stream_metrics(
     ack_ok(stream)?;
     let interval = Duration::from_millis(interval_ms.unwrap_or(1000).max(100));
     while ctx.running.load(Ordering::SeqCst) {
-        send(stream, &Response::Event(StreamEvent::Metrics(sample_metrics(ctx))))?;
+        send(
+            stream,
+            &Response::Event(StreamEvent::Metrics(sample_metrics(ctx))),
+        )?;
         std::thread::sleep(interval);
     }
     send(stream, &Response::Event(StreamEvent::Done))
@@ -1001,7 +1064,11 @@ fn fs_copy_from_host(
     let c = exec_client(ctx);
     let host = std::path::Path::new(host_path);
     if !host.exists() {
-        send_error(stream, nanosb_protocol::ErrorCode::NotFound, format!("host path {host_path} does not exist"));
+        send_error(
+            stream,
+            nanosb_protocol::ErrorCode::NotFound,
+            format!("host path {host_path} does not exist"),
+        );
         return Ok(());
     }
     if host.is_dir() {
@@ -1042,17 +1109,21 @@ fn fs_copy_to_host(
             if let Ok(entries) = c.fs_list(guest_path) {
                 for e in entries {
                     if e.is_dir {
-                        let _ = std::fs::create_dir_all(std::path::Path::new(host_path).join(&e.name));
+                        let _ =
+                            std::fs::create_dir_all(std::path::Path::new(host_path).join(&e.name));
                     } else if !e.is_symlink {
                         if let Ok(data) = c.fs_read(&e.path, None, None) {
-                            let _ = std::fs::write(std::path::Path::new(host_path).join(&e.name), data);
+                            let _ =
+                                std::fs::write(std::path::Path::new(host_path).join(&e.name), data);
                         }
                     }
                 }
             }
         }
         Ok(_) => {
-            let data = c.fs_read(guest_path, None, None).map_err(std::io::Error::other)?;
+            let data = c
+                .fs_read(guest_path, None, None)
+                .map_err(std::io::Error::other)?;
             std::fs::write(host_path, data).map_err(std::io::Error::other)?;
         }
         Err(e) => return Err(send_agent_error(stream, e)),
@@ -1364,11 +1435,12 @@ mod tests {
             client.write_all(b"\n").unwrap();
             client.flush().unwrap();
         };
-        let recv_resp = |client_reader: &mut BufReader<UnixStream>, line: &mut String| -> Response {
-            line.clear();
-            client_reader.read_line(line).unwrap();
-            serde_json::from_str(line.trim()).unwrap()
-        };
+        let recv_resp =
+            |client_reader: &mut BufReader<UnixStream>, line: &mut String| -> Response {
+                line.clear();
+                client_reader.read_line(line).unwrap();
+                serde_json::from_str(line.trim()).unwrap()
+            };
 
         std::thread::scope(|scope| {
             scope.spawn(move || {

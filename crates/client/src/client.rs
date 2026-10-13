@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 use nanosb_protocol::{
     Capability, ExecDefaultRequest, ExecRequest, ExecResult, FsEntry, FsMkdirSpec, FsPathSpec,
     FsStat, FsTransferSpec, FsWriteSpec, FsWriteStreamSpec, GuestEvent, LogLine, LogSource,
-    LogsSpec, Metrics, ModifySpec, MountSpec, Response, SandboxInfo, SandboxList, SandboxSpec,
-    SandboxState, SecretEntry, SnapshotInfo, StreamEvent, VolumeInfo, VolumeSpec,
+    LogsSpec, Metrics, ModifySpec, MountSpec,
     Request::{self, *},
+    Response, SandboxInfo, SandboxList, SandboxSpec, SandboxState, SecretEntry, SnapshotInfo,
+    StreamEvent, VolumeInfo, VolumeSpec,
 };
 
 use crate::builder::SandboxBuilder;
@@ -120,9 +121,9 @@ impl SandboxClient {
     }
 
     fn name_arg(&self, name: Option<&str>) -> Result<Option<String>> {
-        Ok(self.resolve_name(name)?.filter(|_| {
-            matches!(&self.backend, Backend::Local { sandbox: None, .. })
-        }))
+        Ok(self
+            .resolve_name(name)?
+            .filter(|_| matches!(&self.backend, Backend::Local { sandbox: None, .. })))
     }
 
     fn call(&self, req: &Request) -> Result<Response> {
@@ -343,7 +344,9 @@ impl Sandbox {
             match self.state() {
                 Ok(SandboxState::Stopped) => return Ok(SandboxState::Stopped),
                 Ok(SandboxState::Error) => {
-                    return Err(Error::unexpected("sandbox entered error state while waiting"))
+                    return Err(Error::unexpected(
+                        "sandbox entered error state while waiting",
+                    ))
                 }
                 Ok(_) => {}
                 // The supervisor exits (and its socket closes) once the sandbox
@@ -866,10 +869,12 @@ impl Sandbox {
     // ── volumes ────────────────────────────────────────────────────────
 
     pub fn volume_create(&self, volume: VolumeSpec) -> Result<VolumeInfo> {
-        match self.client.call(&VolumeCreate(nanosb_protocol::VolumeCreateSpec {
-            name: self.name_arg()?,
-            volume,
-        }))? {
+        match self
+            .client
+            .call(&VolumeCreate(nanosb_protocol::VolumeCreateSpec {
+                name: self.name_arg()?,
+                volume,
+            }))? {
             Response::Volume(v) => Ok(v),
             other => Err(Error::unexpected(format!("{other:?}"))),
         }
@@ -948,11 +953,13 @@ impl Sandbox {
     // ── snapshots ──────────────────────────────────────────────────────
 
     pub fn snapshot_create(&self, dest: Option<&str>) -> Result<SnapshotInfo> {
-        match self.client.call(&SnapshotCreate(nanosb_protocol::SnapshotCreateSpec {
-            name: self.name_arg()?,
-            dest: dest.map(String::from),
-            include_memory: false,
-        }))? {
+        match self
+            .client
+            .call(&SnapshotCreate(nanosb_protocol::SnapshotCreateSpec {
+                name: self.name_arg()?,
+                dest: dest.map(String::from),
+                include_memory: false,
+            }))? {
             Response::Snapshot(s) => Ok(s),
             other => Err(Error::unexpected(format!("{other:?}"))),
         }
@@ -1246,7 +1253,10 @@ mod tests {
         h.push_script(r#"{"type":"volume","name":"data","dir":"/tmp/vol-data","used_bytes":0}"#);
         let c = SandboxClient::connect(h.path()).unwrap();
         let sb = c.sandbox("a");
-        assert_eq!(sb.volume_fs("data").unwrap(), PathBuf::from("/tmp/vol-data"));
+        assert_eq!(
+            sb.volume_fs("data").unwrap(),
+            PathBuf::from("/tmp/vol-data")
+        );
     }
 
     #[test]

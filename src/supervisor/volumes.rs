@@ -241,7 +241,10 @@ impl VolumeRegistry {
                 name,
                 dir: None,
                 disk_image: Some(img.to_string()),
-                fstype: meta.get("fstype").and_then(|v| v.as_str()).map(String::from),
+                fstype: meta
+                    .get("fstype")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 quota_bytes,
                 used_bytes: std::fs::metadata(img).map(|m| m.len()).unwrap_or(0),
             });
@@ -290,9 +293,15 @@ fn validate_name(name: &str) -> Result<String, VolumeError> {
     if name.is_empty() {
         return Err(VolumeError::Invalid("volume name is required".to_string()));
     }
-    if name == "." || name == ".." || name.contains('/') || name.contains('\\') || name.contains('\0')
+    if name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
     {
-        return Err(VolumeError::Invalid(format!("invalid volume name '{name}'")));
+        return Err(VolumeError::Invalid(format!(
+            "invalid volume name '{name}'"
+        )));
     }
     Ok(name.to_string())
 }
@@ -352,10 +361,16 @@ mod tests {
         let mut s = spec("ext");
         s.dir = Some(external.to_string_lossy().to_string());
         let info = reg.create(&s).unwrap();
-        assert_eq!(info.dir.as_deref(), Some(external.to_string_lossy().as_ref()));
+        assert_eq!(
+            info.dir.as_deref(),
+            Some(external.to_string_lossy().as_ref())
+        );
         assert!(external.is_dir());
         // get() resolves the same backing
-        assert_eq!(reg.get("ext").unwrap().dir.as_deref(), Some(external.to_string_lossy().as_ref()));
+        assert_eq!(
+            reg.get("ext").unwrap().dir.as_deref(),
+            Some(external.to_string_lossy().as_ref())
+        );
         let _ = std::fs::remove_dir_all(&external);
     }
 
@@ -366,7 +381,10 @@ mod tests {
         s.disk_image = Some("qcow2".to_string());
         let err = reg.create(&s).unwrap_err();
         assert!(matches!(err, VolumeError::Unsupported(_)), "{err}");
-        assert_eq!(err.to_protocol().code, nanosb_protocol::ErrorCode::Unsupported);
+        assert_eq!(
+            err.to_protocol().code,
+            nanosb_protocol::ErrorCode::Unsupported
+        );
     }
 
     #[test]
@@ -401,10 +419,7 @@ mod tests {
         let (_tmp, reg) = temp_registry();
         let mut s = spec("qcow");
         s.disk_image = Some("qcow2".to_string());
-        assert!(matches!(
-            reg.create(&s),
-            Err(VolumeError::Unsupported(_))
-        ));
+        assert!(matches!(reg.create(&s), Err(VolumeError::Unsupported(_))));
     }
 
     #[test]
@@ -453,7 +468,10 @@ mod tests {
         let (_tmp, reg) = temp_registry();
         for bad in ["", "..", ".", "a/b", "a\\b", "a\0b"] {
             let err = reg.create(&spec(bad)).unwrap_err();
-            assert!(matches!(err, VolumeError::Invalid(_)), "name '{bad}': {err}");
+            assert!(
+                matches!(err, VolumeError::Invalid(_)),
+                "name '{bad}': {err}"
+            );
         }
     }
 

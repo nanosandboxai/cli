@@ -1113,4 +1113,3 @@ pub fn safe_get_shutdown_eventfd(ctx_id: u32) -> Result<i32, String> {
         Ok(ret)
     }
 }
-

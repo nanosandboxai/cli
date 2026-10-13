@@ -71,7 +71,10 @@ pub fn mount_spec_to_mount(spec: &MountSpec) -> Result<Mount, MountError> {
             mount.host_path.display()
         )));
     }
-    if (mount.file || mount.disk_image.is_some()) && mount.fstype.is_none() && mount.disk_image.is_some() {
+    if (mount.file || mount.disk_image.is_some())
+        && mount.fstype.is_none()
+        && mount.disk_image.is_some()
+    {
         return Err(MountError::Unsupported(
             "disk-image mount requires a fstype".to_string(),
         ));
@@ -178,11 +181,7 @@ pub fn spec_to_config(spec: &SandboxSpec) -> anyhow::Result<SandboxConfig> {
         nanosb_protocol::SecurityProfile::Restricted => "restricted",
     }
     .to_string();
-    config.rlimits = spec
-        .rlimits
-        .iter()
-        .map(|r| format_rlimit(r))
-        .collect();
+    config.rlimits = spec.rlimits.iter().map(|r| format_rlimit(r)).collect();
     config.registry = spec
         .registry
         .iter()
@@ -206,11 +205,7 @@ pub fn spec_to_config(spec: &SandboxSpec) -> anyhow::Result<SandboxConfig> {
             read_only: rootfs.read_only,
         });
     }
-    config.patches = spec
-        .patches
-        .iter()
-        .map(rootfs_patch_to_config)
-        .collect();
+    config.patches = spec.patches.iter().map(rootfs_patch_to_config).collect();
 
     // secret_env: resolve each env key from a create-time secret (never persisted;
     // config.env is stripped into NANOSB_BOOT_ENV before config.json is written).
@@ -236,8 +231,14 @@ pub fn spec_to_config(spec: &SandboxSpec) -> anyhow::Result<SandboxConfig> {
 }
 
 fn format_rlimit(r: &nanosb_protocol::Rlimit) -> String {
-    let soft = r.soft.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
-    let hard = r.hard.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+    let soft = r
+        .soft
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let hard = r
+        .hard
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
     format!("{}={}:{}", r.resource.to_uppercase(), soft, hard)
 }
 
@@ -584,10 +585,13 @@ mod tests {
 
     #[test]
     fn spec_to_config_threads_epic5_fields() {
-        use nanosb_protocol::{RegistrySpec, RootfsKind, RootfsSpec, SecurityProfile, StatVirtualization};
+        use nanosb_protocol::{
+            RegistrySpec, RootfsKind, RootfsSpec, SecurityProfile, StatVirtualization,
+        };
         let mut spec = SandboxSpec::new("alpine");
         spec.hostname = Some("box".to_string());
-        spec.scripts.insert("run.sh".to_string(), "echo hi".to_string());
+        spec.scripts
+            .insert("run.sh".to_string(), "echo hi".to_string());
         spec.stat_virtualization = Some(StatVirtualization::Strict);
         spec.security_profile = SecurityProfile::Restricted;
         spec.network.policy = Some(serde_json::json!({"default": "deny"}));
@@ -607,13 +611,22 @@ mod tests {
         });
         let cfg = spec_to_config(&spec).unwrap();
         assert_eq!(cfg.hostname.as_deref(), Some("box"));
-        assert_eq!(cfg.scripts.get("run.sh").map(String::as_str), Some("echo hi"));
+        assert_eq!(
+            cfg.scripts.get("run.sh").map(String::as_str),
+            Some("echo hi")
+        );
         assert_eq!(cfg.stat_virtualization.as_deref(), Some("strict"));
         assert_eq!(cfg.security_profile, "restricted");
-        assert_eq!(cfg.network.policy, Some(serde_json::json!({"default": "deny"})));
+        assert_eq!(
+            cfg.network.policy,
+            Some(serde_json::json!({"default": "deny"}))
+        );
         assert_eq!(cfg.registry[0].host, "localhost:5050");
         assert!(cfg.registry[0].insecure);
-        assert_eq!(cfg.rootfs.unwrap().source, runtime::config::RootfsSource::LocalDir);
+        assert_eq!(
+            cfg.rootfs.unwrap().source,
+            runtime::config::RootfsSource::LocalDir
+        );
     }
 
     #[test]
@@ -642,7 +655,8 @@ mod tests {
             soft: Some(10),
             hard: Some(20),
         });
-        spec.scripts.insert("s.sh".to_string(), "echo hi".to_string());
+        spec.scripts
+            .insert("s.sh".to_string(), "echo hi".to_string());
         spec.hostname = Some("h".to_string());
         spec.secret_env.insert("API".to_string(), "api".to_string());
         spec.secrets.push(SecretEntry {
@@ -663,9 +677,13 @@ mod tests {
         spec.network.mode = Some("none".to_string());
         spec.network.scope = Some("none".to_string());
         spec.network.dns.push("1.1.1.1".to_string());
-        spec.network.dns_zones.insert("z".to_string(), "127.0.0.1".to_string());
+        spec.network
+            .dns_zones
+            .insert("z".to_string(), "127.0.0.1".to_string());
         spec.network.policy = Some(serde_json::json!({"default":"deny"}));
-        spec.network.publish.push(nanosb_protocol::PortPublish::udp(1000, 1000));
+        spec.network
+            .publish
+            .push(nanosb_protocol::PortPublish::udp(1000, 1000));
         spec.registry.push(RegistrySpec {
             host: "h".to_string(),
             insecure: true,
@@ -710,12 +728,21 @@ mod tests {
         assert_eq!(cfg.network.mode, runtime::config::NetworkMode::None);
         assert_eq!(cfg.network.scope, runtime::config::NetworkScope::None);
         assert_eq!(cfg.network.dns, vec!["1.1.1.1".to_string()]);
-        assert_eq!(cfg.network.dns_zones.get("z").map(String::as_str), Some("127.0.0.1"));
-        assert_eq!(cfg.network.policy, Some(serde_json::json!({"default":"deny"})));
+        assert_eq!(
+            cfg.network.dns_zones.get("z").map(String::as_str),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            cfg.network.policy,
+            Some(serde_json::json!({"default":"deny"}))
+        );
         assert_eq!(cfg.network.port_mappings[0].protocol, "udp");
         assert_eq!(cfg.registry[0].host, "h");
         assert!(cfg.registry[0].insecure && cfg.registry[0].skip_tls_verify);
-        assert_eq!(cfg.rootfs.as_ref().unwrap().source, runtime::config::RootfsSource::LocalDir);
+        assert_eq!(
+            cfg.rootfs.as_ref().unwrap().source,
+            runtime::config::RootfsSource::LocalDir
+        );
         assert_eq!(cfg.patches.len(), 1);
     }
 
@@ -727,7 +754,8 @@ mod tests {
             key: "api-key".to_string(),
             value: Some("s3cr3t".to_string()),
         });
-        spec.secret_env.insert("API_KEY".to_string(), "api-key".to_string());
+        spec.secret_env
+            .insert("API_KEY".to_string(), "api-key".to_string());
         let cfg = spec_to_config(&spec).unwrap();
         assert_eq!(cfg.env.get("API_KEY").map(String::as_str), Some("s3cr3t"));
         // The value lives only in config.env, which is stripped into
@@ -739,7 +767,8 @@ mod tests {
     #[test]
     fn secret_env_missing_secret_is_rejected() {
         let mut spec = SandboxSpec::new("alpine");
-        spec.secret_env.insert("API_KEY".to_string(), "nope".to_string());
+        spec.secret_env
+            .insert("API_KEY".to_string(), "nope".to_string());
         assert!(spec_to_config(&spec).is_err());
     }
 

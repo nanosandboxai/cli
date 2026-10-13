@@ -600,7 +600,10 @@ mod tests {
         let s = serde_json::to_string(&spec).unwrap();
         let back: SandboxSpec = serde_json::from_str(&s).unwrap();
         assert_eq!(back.hostname.as_deref(), Some("box"));
-        assert_eq!(back.secret_env.get("API_KEY").map(String::as_str), Some("api-key"));
+        assert_eq!(
+            back.secret_env.get("API_KEY").map(String::as_str),
+            Some("api-key")
+        );
     }
 
     #[test]
