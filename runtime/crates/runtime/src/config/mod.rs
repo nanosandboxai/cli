@@ -213,6 +213,42 @@ pub struct SandboxConfig {
     /// Ephemeral sandboxes are removed automatically once they stop.
     #[serde(default)]
     pub ephemeral: bool,
+
+    /// Guest hostname override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+
+    /// Non-OCI rootfs source (local dir / disk image).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<RootfsConfig>,
+
+    /// Pre-boot rootfs patches applied host-side before boot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<RootfsPatchConfig>,
+
+    /// Named scripts materialized at `/.nanosb/scripts/<name>` before boot.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub scripts: HashMap<String, String>,
+
+    /// Per-registry pull configuration (insecure / skip-TLS / credentials).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registry: Vec<RegistryConfig>,
+
+    /// Stat virtualization mode (`strict`/`relaxed`/`off`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stat_virtualization: Option<String>,
+
+    /// Guest security profile (`default`/`restricted`).
+    #[serde(default = "default_security_profile")]
+    pub security_profile: String,
+
+    /// VM-level rlimits passed to the guest init (`RESOURCE=soft:hard`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rlimits: Vec<String>,
+}
+
+fn default_security_profile() -> String {
+    "default".to_string()
 }
 
 fn default_cpus() -> u32 {
@@ -262,6 +298,14 @@ impl Default for SandboxConfig {
             vsock_port: None,
             labels: HashMap::new(),
             ephemeral: false,
+            hostname: None,
+            rootfs: None,
+            patches: Vec::new(),
+            scripts: HashMap::new(),
+            registry: Vec::new(),
+            stat_virtualization: None,
+            security_profile: default_security_profile(),
+            rlimits: Vec::new(),
         }
     }
 }
@@ -460,7 +504,13 @@ impl SandboxConfigBuilder {
     }
 
     /// Add an extra virtiofs mount for next mode.
-    pub fn extra_mount(mut self, tag: impl Into<String>, host_path: impl Into<String>, target: impl Into<String>, readonly: bool) -> Self {
+    pub fn extra_mount(
+        mut self,
+        tag: impl Into<String>,
+        host_path: impl Into<String>,
+        target: impl Into<String>,
+        readonly: bool,
+    ) -> Self {
         self.config.extra_mounts.push(ExtraMount {
             tag: tag.into(),
             host_path: host_path.into(),
@@ -471,11 +521,7 @@ impl SandboxConfigBuilder {
     }
 
     /// Bridge a host unix socket to a guest vsock port (next mode).
-    pub fn vsock_bridge(
-        mut self,
-        socket_path: impl Into<String>,
-        guest_port: u32,
-    ) -> Self {
+    pub fn vsock_bridge(mut self, socket_path: impl Into<String>, guest_port: u32) -> Self {
         self.config.vsock_socket = Some(socket_path.into());
         self.config.vsock_port = Some(guest_port);
         self
@@ -496,6 +542,8 @@ pub enum MountType {
     Bind,
     /// virtio-fs mount (VM-optimized, faster)
     VirtioFs,
+    /// Guest tmpfs (host_path ignored).
+    Tmpfs,
 }
 
 /// Mount point configuration
@@ -511,9 +559,33 @@ pub struct Mount {
     #[serde(default)]
     pub readonly: bool,
 
-    /// Mount type (bind or virtio-fs)
+    /// Mount type (bind, virtio-fs, or tmpfs)
     #[serde(default)]
     pub mount_type: MountType,
+
+    /// Single file shared from the host (share parent dir + bind the file).
+    #[serde(default)]
+    pub file: bool,
+
+    /// Disk-image file hosted as a block device (format `raw`/`qcow2`/`vmdk`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_image: Option<String>,
+
+    /// Filesystem used to mount a `disk_image` block device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fstype: Option<String>,
+
+    /// Guest mount options (`noexec`, `nosuid`, `nodev`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+
+    /// Guest uid owning the mount point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+
+    /// Guest gid owning the mount point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
 }
 
 impl Mount {
@@ -524,16 +596,29 @@ impl Mount {
             container_path: container.into(),
             readonly: false,
             mount_type: MountType::Bind,
+            file: false,
+            disk_image: None,
+            fstype: None,
+            options: Vec::new(),
+            uid: None,
+            gid: None,
         }
     }
 
     /// Create a new virtio-fs mount
     pub fn virtiofs(host: impl Into<PathBuf>, container: impl Into<String>) -> Self {
         Self {
-            host_path: host.into(),
-            container_path: container.into(),
-            readonly: false,
             mount_type: MountType::VirtioFs,
+            ..Self::bind(host, container)
+        }
+    }
+
+    /// Create a guest tmpfs mount.
+    pub fn tmpfs(container: impl Into<String>) -> Self {
+        Self {
+            container_path: container.into(),
+            mount_type: MountType::Tmpfs,
+            ..Self::bind("/", "")
         }
     }
 
@@ -542,6 +627,67 @@ impl Mount {
         self.readonly = true;
         self
     }
+}
+
+/// Source of the guest rootfs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RootfsSource {
+    /// Extract the OCI `image`.
+    #[default]
+    Oci,
+    /// Boot directly from a host directory.
+    LocalDir,
+    /// Boot from a disk-image attached as a block device.
+    DiskImage,
+}
+
+/// Non-OCI rootfs configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootfsConfig {
+    #[serde(default)]
+    pub source: RootfsSource,
+    /// Host directory (`local_dir`) or disk-image file (`disk_image`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fstype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// A pre-boot rootfs patch applied host-side before boot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum RootfsPatchConfig {
+    Mkdir {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    Text {
+        path: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    CopyFile {
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    CopyDir {
+        from: String,
+        to: String,
+    },
+    Remove {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
 }
 
 /// Port mapping for inbound connections
@@ -615,6 +761,11 @@ pub struct NetworkConfig {
     /// Example: `"containers.internal" -> "192.168.127.1"`
     #[serde(default)]
     pub dns_zones: HashMap<String, String>,
+
+    /// Opaque network policy config passthrough. Carried through to guests and
+    /// consumers; enforcement is a separate engine (Epic 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<serde_json::Value>,
 }
 
 fn default_network_enabled() -> bool {
@@ -638,6 +789,7 @@ impl Default for NetworkConfig {
             port_mappings: Vec::new(),
             dns: Vec::new(),
             dns_zones: HashMap::new(),
+            policy: None,
         }
     }
 }
@@ -652,6 +804,7 @@ impl NetworkConfig {
             port_mappings: Vec::new(),
             dns: Vec::new(),
             dns_zones: HashMap::new(),
+            policy: None,
         }
     }
 
@@ -664,6 +817,7 @@ impl NetworkConfig {
             port_mappings: Vec::new(),
             dns: Vec::new(),
             dns_zones: HashMap::new(),
+            policy: None,
         }
     }
 

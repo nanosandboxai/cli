@@ -2,7 +2,7 @@
 //!
 //! High-level API for creating and managing sandboxed execution environments.
 
-use crate::config::{ConsoleSpec, ExtraMount, RuntimeMode, SandboxConfig};
+use crate::config::{ConsoleSpec, ExtraMount, RootfsSource, RuntimeMode, SandboxConfig};
 use crate::error::{Error, Result};
 use crate::image::{ImageManager, PulledImage};
 use crate::oci;
@@ -95,35 +95,53 @@ impl Sandbox {
         // Initialize runtime
         let runtime = Runtime::new().await?;
 
-        // Initialize image manager
-        let image_manager = Arc::new(ImageManager::with_default_cache()?);
+        // Non-OCI rootfs (local dir / disk image) boots directly from the
+        // configured path — no image pull, no OCI bundle.
+        let non_oci_rootfs = config
+            .rootfs
+            .as_ref()
+            .is_some_and(|r| r.source != RootfsSource::Oci);
 
-        // Pull image and create OCI bundle (all platforms use libkrun)
-        progress("Pulling image...");
-        debug!("Pulling image: {}", config.image);
-        let pulled = image_manager.pull(&config.image).await?;
+        let (bundle, pulled_image, image_manager) = if non_oci_rootfs {
+            (None, None, None)
+        } else {
+            // Initialize image manager with per-registry config
+            let cache_dir = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".nanosandbox");
+            let image_manager = Arc::new(ImageManager::with_options(
+                cache_dir,
+                None,
+                config.registry.clone(),
+            )?);
 
-        // Create OCI bundle directory (empty rootfs)
-        let bundles_dir = image_manager.cache_dir().join("bundles");
-        let bundle = OciBundle::create(&bundles_dir, &id)?;
+            // Pull image and create OCI bundle (all platforms use libkrun)
+            progress("Pulling image...");
+            debug!("Pulling image: {}", config.image);
+            let pulled = image_manager.pull(&config.image).await?;
 
-        // Extract all layers into the bundle's rootfs. The manifest
-        // config_digest enables the golden-rootfs cache: subsequent
-        // sandboxes for the same image clone the cached tree via
-        // APFS clonefile (macOS) or recursive copy (Linux).
-        progress("Preparing rootfs...");
-        debug!("Creating rootfs from {} layers", pulled.layers.len());
-        image_manager.create_rootfs(
-            &pulled.layers,
-            &bundle.rootfs_path,
-            Some(&pulled.config_digest),
-        )?;
+            // Create OCI bundle directory (empty rootfs)
+            let bundles_dir = image_manager.cache_dir().join("bundles");
+            let bundle = OciBundle::create(&bundles_dir, &id)?;
 
-        progress("Generating config...");
-        let oci_config = oci::generate_config(&config, &bundle.rootfs_path);
-        bundle.write_config(&oci_config)?;
+            // Extract all layers into the bundle's rootfs. The manifest
+            // config_digest enables the golden-rootfs cache: subsequent
+            // sandboxes for the same image clone the cached tree via
+            // APFS clonefile (macOS) or recursive copy (Linux).
+            progress("Preparing rootfs...");
+            debug!("Creating rootfs from {} layers", pulled.layers.len());
+            image_manager.create_rootfs(
+                &pulled.layers,
+                &bundle.rootfs_path,
+                Some(&pulled.config_digest),
+            )?;
 
-        let (bundle, pulled_image) = (Some(bundle), Some(pulled));
+            progress("Generating config...");
+            let oci_config = oci::generate_config(&config, &bundle.rootfs_path);
+            bundle.write_config(&oci_config)?;
+
+            (Some(bundle), Some(pulled), Some(image_manager))
+        };
 
         info!("Sandbox {} created successfully", id);
 
@@ -133,7 +151,9 @@ impl Sandbox {
             status: SandboxStatus::Ready,
             runtime: Some(runtime),
             bundle,
-            image_manager,
+            image_manager: image_manager.unwrap_or_else(|| {
+                Arc::new(ImageManager::with_default_cache().expect("default image manager"))
+            }),
             pulled_image,
             created_at: Utc::now(),
         })
@@ -163,28 +183,41 @@ impl Sandbox {
             let id = uuid::Uuid::new_v4().to_string();
             info!("Creating sandbox {} with image {}", id, config.image);
 
-            // Pull the image
-            progress("Pulling image...");
-            debug!("Pulling image: {}", config.image);
-            let pulled_image = image_manager.pull(&config.image).await?;
+            // Non-OCI rootfs (local dir / disk image) boots directly from the
+            // configured path — no image pull, no OCI bundle.
+            let non_oci_rootfs = config
+                .rootfs
+                .as_ref()
+                .is_some_and(|r| r.source != RootfsSource::Oci);
 
-            // Create OCI bundle directory (empty rootfs)
-            let bundles_dir = image_manager.cache_dir().join("bundles");
-            let bundle = OciBundle::create(&bundles_dir, &id)?;
+            let (bundle, pulled_image) = if non_oci_rootfs {
+                (None, None)
+            } else {
+                // Pull the image
+                progress("Pulling image...");
+                debug!("Pulling image: {}", config.image);
+                let pulled_image = image_manager.pull(&config.image).await?;
 
-            // Extract all layers into the bundle's rootfs, using the golden
-            // rootfs cache (keyed on config_digest) to avoid re-extraction.
-            progress("Preparing rootfs...");
-            debug!("Creating rootfs from {} layers", pulled_image.layers.len());
-            image_manager.create_rootfs(
-                &pulled_image.layers,
-                &bundle.rootfs_path,
-                Some(&pulled_image.config_digest),
-            )?;
+                // Create OCI bundle directory (empty rootfs)
+                let bundles_dir = image_manager.cache_dir().join("bundles");
+                let bundle = OciBundle::create(&bundles_dir, &id)?;
 
-            progress("Generating config...");
-            let oci_config = oci::generate_config(&config, &bundle.rootfs_path);
-            bundle.write_config(&oci_config)?;
+                // Extract all layers into the bundle's rootfs, using the golden
+                // rootfs cache (keyed on config_digest) to avoid re-extraction.
+                progress("Preparing rootfs...");
+                debug!("Creating rootfs from {} layers", pulled_image.layers.len());
+                image_manager.create_rootfs(
+                    &pulled_image.layers,
+                    &bundle.rootfs_path,
+                    Some(&pulled_image.config_digest),
+                )?;
+
+                progress("Generating config...");
+                let oci_config = oci::generate_config(&config, &bundle.rootfs_path);
+                bundle.write_config(&oci_config)?;
+
+                (Some(bundle), Some(pulled_image))
+            };
 
             info!("Sandbox {} created successfully", id);
 
@@ -193,9 +226,9 @@ impl Sandbox {
                 config,
                 status: SandboxStatus::Ready,
                 runtime: None,
-                bundle: Some(bundle),
+                bundle,
                 image_manager,
-                pulled_image: Some(pulled_image),
+                pulled_image,
                 created_at: Utc::now(),
             })
         }
@@ -239,7 +272,9 @@ impl Sandbox {
 
     /// Get the VM exit code (if the VM has exited).
     pub fn vm_exit_code(&self) -> Option<i32> {
-        self.runtime.as_ref().and_then(|rt| rt.vm_exit_code(&self.id))
+        self.runtime
+            .as_ref()
+            .and_then(|rt| rt.vm_exit_code(&self.id))
     }
 
     /// Get the creation timestamp
@@ -273,13 +308,10 @@ impl Sandbox {
             self.runtime.as_ref().expect("runtime was just assigned")
         };
 
-        let bundle = self
-            .bundle
-            .as_ref()
-            .ok_or_else(|| {
-                error!(sandbox_id = %self.id, "No bundle available for sandbox start");
-                Error::SandboxCreationFailed("No bundle available".to_string())
-            })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            error!(sandbox_id = %self.id, "No bundle available for sandbox start");
+            Error::SandboxCreationFailed("No bundle available".to_string())
+        })?;
 
         let create_timeout = Duration::from_secs(300);
         let start_timeout = Duration::from_secs(600);
@@ -299,15 +331,18 @@ impl Sandbox {
         })?;
 
         debug!("Starting VM (next mode) via runtime");
-        timeout(start_timeout, runtime.start_next(&self.id, console, extra_mounts))
-            .await
-            .map_err(|_| {
-                error!(sandbox_id = %self.id, "Sandbox VM start timed out after 600s");
-                Error::Timeout(600)
-            })?
-            .inspect_err(|_| {
-                self.status = SandboxStatus::Error;
-            })?;
+        timeout(
+            start_timeout,
+            runtime.start_next(&self.id, console, extra_mounts),
+        )
+        .await
+        .map_err(|_| {
+            error!(sandbox_id = %self.id, "Sandbox VM start timed out after 600s");
+            Error::Timeout(600)
+        })?
+        .inspect_err(|_| {
+            self.status = SandboxStatus::Error;
+        })?;
 
         self.status = SandboxStatus::Running;
         info!("Sandbox {} is now running (next mode)", self.id);
@@ -343,13 +378,10 @@ impl Sandbox {
             self.runtime.as_ref().expect("runtime was just assigned")
         };
 
-        let bundle = self
-            .bundle
-            .as_ref()
-            .ok_or_else(|| {
-                error!(sandbox_id = %self.id, "No bundle available for sandbox start");
-                Error::SandboxCreationFailed("No bundle available".to_string())
-            })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            error!(sandbox_id = %self.id, "No bundle available for sandbox start");
+            Error::SandboxCreationFailed("No bundle available".to_string())
+        })?;
 
         // --- Create and start the VM ---
 
@@ -398,9 +430,7 @@ impl Sandbox {
 
     /// Get the guest IP address for this sandbox.
     pub fn guest_ip(&self) -> Option<String> {
-        self.runtime
-            .as_ref()
-            .and_then(|r| r.guest_ip(&self.id))
+        self.runtime.as_ref().and_then(|r| r.guest_ip(&self.id))
     }
 
     /// Stop the sandbox
@@ -434,13 +464,10 @@ impl Sandbox {
             )));
         }
 
-        let bundle = self
-            .bundle
-            .as_ref()
-            .ok_or_else(|| {
-                error!(sandbox_id = %self.id, "No bundle available for sandbox restart");
-                Error::SandboxCreationFailed("No bundle available".to_string())
-            })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            error!(sandbox_id = %self.id, "No bundle available for sandbox restart");
+            Error::SandboxCreationFailed("No bundle available".to_string())
+        })?;
 
         info!("Restarting sandbox {}", self.id);
 
@@ -538,5 +565,4 @@ mod tests {
             .build();
         assert!(config.project.is_some());
     }
-
 }

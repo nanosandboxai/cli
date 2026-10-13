@@ -18,7 +18,10 @@
 
 use super::ffi;
 use super::gvproxy::{GvproxyInstance, GvproxyManager};
-use crate::config::{ConsoleSpec, ExtraMount, MountType, NetworkScope, RuntimeMode, SandboxConfig};
+use crate::config::{
+    ConsoleSpec, ExtraMount, Mount, MountType, NetworkScope, RootfsPatchConfig, RootfsSource,
+    RuntimeMode, SandboxConfig,
+};
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -82,17 +85,237 @@ pub struct BootVmRequest {
     /// Guest vsock port the host socket is bridged to.
     #[serde(default)]
     pub vsock_port: Option<u32>,
+    /// Rootfs source: "oci", "local_dir", or "disk_image".
+    #[serde(default = "default_rootfs_source")]
+    pub rootfs_source: String,
+    /// Disk-image format for a `disk_image` rootfs ("raw"/"qcow2"/"vmdk").
+    #[serde(default)]
+    pub rootfs_format: Option<String>,
+    /// Whether the root disk is exposed read-only.
+    #[serde(default)]
+    pub rootfs_read_only: bool,
+    /// Disk-image mounts (block_id, host_path, format, read_only).
+    #[serde(default)]
+    pub disk_mounts: Vec<(String, String, String, bool)>,
+    /// Pre-boot rootfs patches applied host-side before boot.
+    #[serde(default)]
+    pub patches: Vec<RootfsPatchConfig>,
+    /// Named scripts materialized at `/.nanosb/scripts/<name>` before boot.
+    #[serde(default)]
+    pub scripts: HashMap<String, String>,
+    /// Full mount specs for guest env serialization (NANOSB_MOUNTS).
+    #[serde(default)]
+    pub mount_specs: Vec<Mount>,
+    /// Guest hostname override.
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// Guest security profile (`default`/`restricted`).
+    #[serde(default = "default_security_profile")]
+    pub security_profile: String,
+    /// Stat virtualization mode (`strict`/`relaxed`/`off`).
+    #[serde(default)]
+    pub stat_virtualization: Option<String>,
+    /// VM-level rlimits passed to the guest init (`RESOURCE=soft:hard`).
+    #[serde(default)]
+    pub rlimits: Vec<String>,
 }
 
 fn default_runtime_mode() -> String {
     "legacy".to_string()
 }
 
+fn default_rootfs_source() -> String {
+    "oci".to_string()
+}
+
+fn default_security_profile() -> String {
+    "default".to_string()
+}
+
+/// Serialize `config.mounts` into the `NANOSB_MOUNTS` guest env value.
+///
+/// Produces a JSON array of `{target, kind, tag?, source?, fstype?, options[],
+/// uid?, gid?, readonly}`. `kind` is one of `virtiofs`, `tmpfs`, `file`, or
+/// `disk`. Tags mirror the host-side registration in `create()`: virtiofs
+/// mounts get `mountN`, disk-image mounts get `diskN`.
+fn mounts_env_json(mounts: &[Mount]) -> serde_json::Value {
+    let mut virtiofs_idx = 0usize;
+    let mut disk_idx = 0usize;
+    let arr: Vec<serde_json::Value> = mounts
+        .iter()
+        .map(|m| {
+            let (kind, tag) = match m.mount_type {
+                MountType::Tmpfs => ("tmpfs", None),
+                MountType::VirtioFs => {
+                    let t = format!("mount{}", virtiofs_idx);
+                    virtiofs_idx += 1;
+                    ("virtiofs", Some(t))
+                }
+                MountType::Bind => {
+                    if m.disk_image.is_some() {
+                        let t = format!("disk{}", disk_idx);
+                        disk_idx += 1;
+                        ("disk", Some(t))
+                    } else if m.file {
+                        let t = format!("mount{}", virtiofs_idx);
+                        virtiofs_idx += 1;
+                        ("file", Some(t))
+                    } else {
+                        let t = format!("mount{}", virtiofs_idx);
+                        virtiofs_idx += 1;
+                        ("virtiofs", Some(t))
+                    }
+                }
+            };
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "target".into(),
+                serde_json::Value::String(m.container_path.clone()),
+            );
+            obj.insert("kind".into(), serde_json::Value::String(kind.to_string()));
+            if let Some(t) = tag {
+                obj.insert("tag".into(), serde_json::Value::String(t));
+            }
+            if m.mount_type != MountType::Tmpfs {
+                obj.insert(
+                    "source".into(),
+                    serde_json::Value::String(m.host_path.to_string_lossy().to_string()),
+                );
+            }
+            if let Some(fs) = &m.fstype {
+                obj.insert("fstype".into(), serde_json::Value::String(fs.clone()));
+            }
+            obj.insert(
+                "options".into(),
+                serde_json::Value::Array(
+                    m.options
+                        .iter()
+                        .map(|o| serde_json::Value::String(o.clone()))
+                        .collect(),
+                ),
+            );
+            if let Some(uid) = m.uid {
+                obj.insert("uid".into(), serde_json::Value::Number(uid.into()));
+            }
+            if let Some(gid) = m.gid {
+                obj.insert("gid".into(), serde_json::Value::Number(gid.into()));
+            }
+            obj.insert("readonly".into(), serde_json::Value::Bool(m.readonly));
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::Value::Array(arr)
+}
+
+/// Join a guest-relative path onto the rootfs, rejecting any `..` component
+/// that would escape the rootfs directory.
+fn rootfs_join(rootfs: &Path, guest_path: &str) -> std::result::Result<PathBuf, String> {
+    let p = Path::new(guest_path);
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("path escapes rootfs: '{}'", guest_path));
+    }
+    let rel = p.strip_prefix("/").unwrap_or(p);
+    Ok(rootfs.join(rel))
+}
+
+/// Apply pre-boot rootfs patches host-side.
+///
+/// Supported ops: `Mkdir`, `Text`, `CopyFile`, `CopyDir`, `Remove`. All
+/// guest-side paths are confined to the rootfs (path escape is rejected).
+/// `mode` (when set) is applied via chmod.
+fn apply_rootfs_patches(
+    rootfs: &Path,
+    patches: &[RootfsPatchConfig],
+) -> std::result::Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    for patch in patches {
+        match patch {
+            RootfsPatchConfig::Mkdir { path, mode } => {
+                let target = rootfs_join(rootfs, path)?;
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| format!("mkdir {}: {}", target.display(), e))?;
+                if let Some(m) = mode {
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(*m))
+                        .map_err(|e| format!("chmod {}: {}", target.display(), e))?;
+                }
+            }
+            RootfsPatchConfig::Text {
+                path,
+                content,
+                mode,
+            } => {
+                let target = rootfs_join(rootfs, path)?;
+                std::fs::create_dir_all(target.parent().unwrap_or(rootfs))
+                    .map_err(|e| format!("mkdir {}: {}", target.display(), e))?;
+                std::fs::write(&target, content)
+                    .map_err(|e| format!("write {}: {}", target.display(), e))?;
+                if let Some(m) = mode {
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(*m))
+                        .map_err(|e| format!("chmod {}: {}", target.display(), e))?;
+                }
+            }
+            RootfsPatchConfig::CopyFile { from, to, mode } => {
+                let target = rootfs_join(rootfs, to)?;
+                std::fs::create_dir_all(target.parent().unwrap_or(rootfs))
+                    .map_err(|e| format!("mkdir {}: {}", target.display(), e))?;
+                std::fs::copy(Path::new(from), &target)
+                    .map_err(|e| format!("copy {} -> {}: {}", from, target.display(), e))?;
+                if let Some(m) = mode {
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(*m))
+                        .map_err(|e| format!("chmod {}: {}", target.display(), e))?;
+                }
+            }
+            RootfsPatchConfig::CopyDir { from, to } => {
+                let target = rootfs_join(rootfs, to)?;
+                copy_dir_recursive(Path::new(from), &target)
+                    .map_err(|e| format!("copy dir {} -> {}: {}", from, target.display(), e))?;
+            }
+            RootfsPatchConfig::Remove { path, recursive } => {
+                let target = rootfs_join(rootfs, path)?;
+                if *recursive {
+                    std::fs::remove_dir_all(&target)
+                        .map_err(|e| format!("remove {}: {}", target.display(), e))?;
+                } else {
+                    std::fs::remove_file(&target)
+                        .map_err(|e| format!("remove {}: {}", target.display(), e))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Materialize named scripts at `<rootfs>/.nanosb/scripts/<name>` (mode 0755).
+fn materialize_scripts(
+    rootfs: &Path,
+    scripts: &HashMap<String, String>,
+) -> std::result::Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let scripts_dir = rootfs.join(".nanosb").join("scripts");
+    std::fs::create_dir_all(&scripts_dir)
+        .map_err(|e| format!("mkdir {}: {}", scripts_dir.display(), e))?;
+    for (name, content) in scripts {
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err(format!("invalid script name '{}'", name));
+        }
+        let path = scripts_dir.join(name);
+        std::fs::write(&path, content).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod {}: {}", path.display(), e))?;
+    }
+    Ok(())
+}
+
 /// Look up a group name in the guest's `/etc/group`, returning its numeric gid.
-fn lookup_group_gid(rootfs_path: &std::path::Path, name: &str) -> std::result::Result<String, String> {
+fn lookup_group_gid(
+    rootfs_path: &std::path::Path,
+    name: &str,
+) -> std::result::Result<String, String> {
     let path = rootfs_path.join("etc/group");
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let data =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     for line in data.lines() {
         let mut fields = line.split(':');
         if fields.next() == Some(name) {
@@ -159,8 +382,14 @@ fn resolve_guest_user(
     } else {
         entry_fields[2].to_string()
     };
-    let default_gid = entry_fields.get(3).filter(|g| !g.is_empty()).map(|g| g.to_string());
-    let passwd_home = entry_fields.get(5).filter(|h| !h.is_empty()).map(|h| h.to_string());
+    let default_gid = entry_fields
+        .get(3)
+        .filter(|g| !g.is_empty())
+        .map(|g| g.to_string());
+    let passwd_home = entry_fields
+        .get(5)
+        .filter(|h| !h.is_empty())
+        .map(|h| h.to_string());
 
     let gid = match group_part {
         Some(g) if !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()) => Some(g.to_string()),
@@ -243,6 +472,20 @@ pub fn handle_boot_vm_subprocess() -> ! {
     // WARN level avoids the very verbose vCPU MMIO/interrupt traces from DEBUG.
     let _ = ffi::init_log(ffi::KRUN_LOG_TARGET_DEFAULT, ffi::KRUN_LOG_LEVEL_WARN);
 
+    // Pre-boot rootfs customization (directory rootfs only — a disk-image
+    // rootfs has no host-visible directory to patch).
+    if std::path::Path::new(&config.rootfs_path).is_dir() {
+        let rootfs = std::path::Path::new(&config.rootfs_path);
+        if let Err(e) = apply_rootfs_patches(rootfs, &config.patches) {
+            eprintln!("internal-boot-vm: failed to apply rootfs patches: {}", e);
+            std::process::exit(1);
+        }
+        if let Err(e) = materialize_scripts(rootfs, &config.scripts) {
+            eprintln!("internal-boot-vm: failed to materialize scripts: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     // Build environment variables for the VM
     let mut env = HashMap::new();
     for (key, value) in &config.env {
@@ -279,6 +522,26 @@ pub fn handle_boot_vm_subprocess() -> ! {
         env.insert("NANOSANDBOX_DNS".to_string(), config.dns.join(","));
     }
 
+    // Inject nanosandbox guest environment (both legacy and next paths).
+    if let Some(hostname) = &config.hostname {
+        env.insert("NANOSB_HOSTNAME".to_string(), hostname.clone());
+    }
+    env.insert(
+        "NANOSB_SECURITY_PROFILE".to_string(),
+        config.security_profile.clone(),
+    );
+    if let Some(stat_virt) = &config.stat_virtualization {
+        env.insert("NANOSB_STAT_VIRT".to_string(), stat_virt.clone());
+    }
+    env.insert(
+        "NANOSB_RLIMITS".to_string(),
+        serde_json::to_string(&config.rlimits).unwrap_or_default(),
+    );
+    env.insert(
+        "NANOSB_MOUNTS".to_string(),
+        serde_json::to_string(&mounts_env_json(&config.mount_specs)).unwrap_or_default(),
+    );
+
     let args_refs: Vec<&str> = config.command_args.iter().map(|s| s.as_str()).collect();
 
     let result = match config.runtime_mode.as_str() {
@@ -301,6 +564,10 @@ pub fn handle_boot_vm_subprocess() -> ! {
             &config.extra_mounts,
             config.vsock_socket.as_deref(),
             config.vsock_port,
+            &config.rootfs_source,
+            config.rootfs_format.as_deref(),
+            config.rootfs_read_only,
+            &config.disk_mounts,
         ),
         _ => LibkrunRuntime::configure_and_start_vm(
             &config.rootfs_path,
@@ -315,6 +582,10 @@ pub fn handle_boot_vm_subprocess() -> ! {
             &config.mounts,
             &config.dns,
             config.gvproxy_socket.as_deref(),
+            &config.rootfs_source,
+            config.rootfs_format.as_deref(),
+            config.rootfs_read_only,
+            &config.disk_mounts,
         ),
     };
 
@@ -344,16 +615,21 @@ pub fn handle_boot_vm_subprocess() -> ! {
 fn preload_libkrunfw() {
     // NANOSB_HOME (default ~/.nanosandbox) is authoritative, then HOME, then system.
     let mut search_dirs: Vec<String> = Vec::new();
-    let nanosb_home = std::env::var("NANOSB_HOME")
-        .ok()
-        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.nanosandbox")));
+    let nanosb_home = std::env::var("NANOSB_HOME").ok().or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{h}/.nanosandbox"))
+    });
     if let Some(base) = &nanosb_home {
         search_dirs.push(format!("{base}/libs"));
     }
     if let Ok(home) = std::env::var("HOME") {
         search_dirs.push(format!("{}/.nanosandbox/libs", home));
     }
-    search_dirs.extend(["/opt/homebrew/lib".to_string(), "/usr/local/lib".to_string()]);
+    search_dirs.extend([
+        "/opt/homebrew/lib".to_string(),
+        "/usr/local/lib".to_string(),
+    ]);
 
     for dir in &search_dirs {
         let path = format!("{}/libkrunfw.5.dylib", dir);
@@ -469,7 +745,10 @@ fn clone_rootfs(src: &std::path::Path, dst: &std::path::Path) -> std::result::Re
     copy_dir_recursive(src, dst)
 }
 
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::result::Result<(), String> {
+fn copy_dir_recursive(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::result::Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -486,6 +765,34 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::resu
         }
     }
     Ok(())
+}
+
+/// Boot-time configuration carried from the sandbox state into the VM
+/// subprocess (serialized into [`BootVmRequest`]).
+#[derive(Clone)]
+struct BootConfig {
+    /// Rootfs source: "oci", "local_dir", or "disk_image".
+    rootfs_source: String,
+    /// Disk-image format for a `disk_image` rootfs ("raw"/"qcow2"/"vmdk").
+    rootfs_format: Option<String>,
+    /// Whether the root disk is exposed read-only.
+    rootfs_read_only: bool,
+    /// Disk-image mounts (block_id, host_path, format, read_only).
+    disk_mounts: Vec<(String, String, String, bool)>,
+    /// Pre-boot rootfs patches applied host-side before boot.
+    patches: Vec<RootfsPatchConfig>,
+    /// Named scripts materialized at `/.nanosb/scripts/<name>` before boot.
+    scripts: HashMap<String, String>,
+    /// Full mount specs for guest env serialization (NANOSB_MOUNTS).
+    mount_specs: Vec<Mount>,
+    /// Guest hostname override.
+    hostname: Option<String>,
+    /// Guest security profile (`default`/`restricted`).
+    security_profile: String,
+    /// Stat virtualization mode (`strict`/`relaxed`/`off`).
+    stat_virtualization: Option<String>,
+    /// VM-level rlimits passed to the guest init (`RESOURCE=soft:hard`).
+    rlimits: Vec<String>,
 }
 
 struct SandboxState {
@@ -523,6 +830,9 @@ struct SandboxState {
     vsock_socket: Option<String>,
     /// Guest vsock port for the exec channel.
     vsock_port: Option<u32>,
+    /// Epic 5 boot-time configuration (rootfs source, disk mounts, patches,
+    /// scripts, guest env metadata).
+    boot: BootConfig,
     /// VM subprocess exit code (set when the VM exits).
     exit_code: Arc<Mutex<Option<i32>>>,
 }
@@ -589,6 +899,10 @@ impl LibkrunRuntime {
         mounts: &[(String, String)],
         dns: &[String],
         gvproxy_socket: Option<&str>,
+        rootfs_source: &str,
+        rootfs_format: Option<&str>,
+        rootfs_read_only: bool,
+        disk_mounts: &[(String, String, String, bool)],
     ) -> std::result::Result<(), String> {
         // Create VM context
         let ctx = ffi::create_ctx()?;
@@ -599,8 +913,14 @@ impl LibkrunRuntime {
         let vcpus = cpus.min(max_vcpus).max(1) as u8;
         ffi::set_vm_config(ctx, vcpus, memory_mb)?;
 
-        // Set rootfs
-        ffi::set_root(ctx, rootfs_path)?;
+        // Set rootfs: OCI/local-dir rootfs is shared via virtiofs; a
+        // disk-image rootfs is attached as a block device.
+        if rootfs_source == "disk_image" {
+            let format = rootfs_format.unwrap_or("raw");
+            ffi::set_root_disk(ctx, "root", rootfs_path, format, rootfs_read_only)?;
+        } else {
+            ffi::set_root(ctx, rootfs_path)?;
+        }
 
         // Configure networking — use modern add_net_unixgram API (replaces deprecated set_gvproxy_path).
         if let Some(socket_path) = gvproxy_socket {
@@ -628,6 +948,11 @@ impl LibkrunRuntime {
         // Add virtiofs mounts
         for (tag, path) in mounts {
             ffi::add_virtiofs(ctx, tag, path)?;
+        }
+
+        // Add disk-image mounts as block devices
+        for (block_id, path, format, read_only) in disk_mounts {
+            ffi::add_disk(ctx, block_id, path, format, *read_only)?;
         }
 
         // Set working directory
@@ -713,6 +1038,10 @@ impl LibkrunRuntime {
         extra_mounts: &[ExtraMount],
         vsock_socket: Option<&str>,
         vsock_port: Option<u32>,
+        rootfs_source: &str,
+        rootfs_format: Option<&str>,
+        rootfs_read_only: bool,
+        disk_mounts: &[(String, String, String, bool)],
     ) -> std::result::Result<(), String> {
         // Create VM context
         let ctx = ffi::create_ctx()?;
@@ -722,8 +1051,14 @@ impl LibkrunRuntime {
         let vcpus = cpus.min(max_vcpus).max(1) as u8;
         ffi::set_vm_config(ctx, vcpus, memory_mb)?;
 
-        // Set rootfs
-        ffi::set_root(ctx, rootfs_path)?;
+        // Set rootfs: OCI/local-dir rootfs is shared via virtiofs; a
+        // disk-image rootfs is attached as a block device.
+        if rootfs_source == "disk_image" {
+            let format = rootfs_format.unwrap_or("raw");
+            ffi::set_root_disk(ctx, "root", rootfs_path, format, rootfs_read_only)?;
+        } else {
+            ffi::set_root(ctx, rootfs_path)?;
+        }
 
         // Configure networking
         if let Some(socket_path) = gvproxy_socket {
@@ -753,6 +1088,11 @@ impl LibkrunRuntime {
             // Register the tag with the host path so libkrun shares the correct
             // host directory. The init patch mounts it at `em.target` inside the guest.
             ffi::add_virtiofs(ctx, &em.tag, &em.host_path)?;
+        }
+
+        // Add disk-image mounts as block devices
+        for (block_id, path, format, read_only) in disk_mounts {
+            ffi::add_disk(ctx, block_id, path, format, *read_only)?;
         }
 
         // Dedicated host↔guest exec channel: bridge a host unix socket to a
@@ -847,8 +1187,11 @@ impl LibkrunRuntime {
                 Some(ref g) => serde_json::json!({ "uid": uid, "gid": g }),
                 None => serde_json::json!({ "uid": uid }),
             };
-            std::fs::write(&host_config, serde_json::to_string(&doc).unwrap_or_default())
-                .map_err(|e| format!("failed to write {}: {}", host_config.display(), e))?;
+            std::fs::write(
+                &host_config,
+                serde_json::to_string(&doc).unwrap_or_default(),
+            )
+            .map_err(|e| format!("failed to write {}: {}", host_config.display(), e))?;
             env_vars.push(format!("KRUN_CONFIG={}", guest_config));
 
             let name_part = user.split(':').next().unwrap_or(user);
@@ -867,8 +1210,9 @@ impl LibkrunRuntime {
                 // dropped-privilege process (and its config mounts) has a target.
                 let host_home = std::path::Path::new(rootfs_path).join(h.trim_start_matches('/'));
                 if !host_home.exists() {
-                    std::fs::create_dir_all(&host_home)
-                        .map_err(|e| format!("failed to create home {}: {}", host_home.display(), e))?;
+                    std::fs::create_dir_all(&host_home).map_err(|e| {
+                        format!("failed to create home {}: {}", host_home.display(), e)
+                    })?;
                 }
                 env_vars.push(format!("KRUN_HOME={}", h));
             }
@@ -889,7 +1233,12 @@ impl LibkrunRuntime {
                 ffi::add_virtio_console_default(ctx, -1, cons.stdout_fd, cons.stderr_fd)?;
             } else {
                 // Raw fd mode: wire stdin/stdout/stderr directly.
-                ffi::add_virtio_console_default(ctx, cons.stdin_fd, cons.stdout_fd, cons.stderr_fd)?;
+                ffi::add_virtio_console_default(
+                    ctx,
+                    cons.stdin_fd,
+                    cons.stdout_fd,
+                    cons.stderr_fd,
+                )?;
             }
         } else {
             // No console spec: use default console with inherited fds.
@@ -983,14 +1332,30 @@ impl LibkrunRuntime {
             self.destroy(id).await?;
         }
 
-        // Derive rootfs path from the bundle
-        let bundle = bundle_path.ok_or_else(|| {
-            Error::SandboxCreationFailed(
-                "LibkrunRuntime requires a bundle path with rootfs (handles_image_pull=false)"
-                    .to_string(),
-            )
-        })?;
-        let mut rootfs_path = bundle.join("rootfs");
+        // Derive rootfs path from the bundle, or from the configured
+        // non-OCI rootfs (local dir / disk image) when present.
+        let bundle = bundle_path;
+        let mut rootfs_path = match config.rootfs.as_ref() {
+            Some(rf)
+                if rf.source == RootfsSource::LocalDir || rf.source == RootfsSource::DiskImage =>
+            {
+                PathBuf::from(rf.path.as_deref().ok_or_else(|| {
+                    Error::SandboxCreationFailed(format!(
+                        "rootfs source {:?} requires a path",
+                        rf.source
+                    ))
+                })?)
+            }
+            _ => {
+                let bundle = bundle.ok_or_else(|| {
+                    Error::SandboxCreationFailed(
+                        "LibkrunRuntime requires a bundle path with rootfs (handles_image_pull=false)"
+                            .to_string(),
+                    )
+                })?;
+                bundle.join("rootfs")
+            }
+        };
 
         if !rootfs_path.exists() {
             return Err(Error::SandboxCreationFailed(format!(
@@ -999,8 +1364,15 @@ impl LibkrunRuntime {
             )));
         }
 
-        if config.fresh_rootfs {
-            let boot_rootfs = bundle.join(format!("rootfs.boot-{}", std::process::id()));
+        if config.fresh_rootfs && rootfs_path.is_dir() {
+            let boot_rootfs = bundle_path
+                .map(|b| b.join(format!("rootfs.boot-{}", std::process::id())))
+                .unwrap_or_else(|| {
+                    rootfs_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join(format!("rootfs.boot-{}", std::process::id()))
+                });
             let _ = std::fs::remove_dir_all(&boot_rootfs);
             clone_rootfs(&rootfs_path, &boot_rootfs).map_err(|e| {
                 Error::SandboxCreationFailed(format!("failed to clone rootfs: {}", e))
@@ -1008,14 +1380,12 @@ impl LibkrunRuntime {
             rootfs_path = boot_rootfs;
         }
 
-        // Collect mount info (canonicalize paths to prevent symlink escape / path traversal)
-        let mounts: Vec<(String, String)> = config
-            .mounts
-            .iter()
-            .filter(|m| m.mount_type == MountType::VirtioFs || m.mount_type == MountType::Bind)
-            .enumerate()
-            .map(|(i, m)| {
-                let tag = format!("mount{}", i);
+        // Collect mount info (canonicalize paths to prevent symlink escape / path traversal).
+        // Disk-image mounts are registered as block devices; everything else is virtiofs.
+        let mut mounts: Vec<(String, String)> = Vec::new();
+        let mut disk_mounts: Vec<(String, String, String, bool)> = Vec::new();
+        for m in &config.mounts {
+            if let Some(format) = m.disk_image.as_deref() {
                 let canonical = m.host_path.canonicalize().map_err(|e| {
                     Error::SandboxCreationFailed(format!(
                         "Mount path cannot be resolved: {}: {}",
@@ -1023,9 +1393,24 @@ impl LibkrunRuntime {
                         e
                     ))
                 })?;
-                Ok((tag, canonical.to_string_lossy().to_string()))
-            })
-            .collect::<Result<Vec<_>>>()?;
+                disk_mounts.push((
+                    format!("disk{}", disk_mounts.len()),
+                    canonical.to_string_lossy().to_string(),
+                    format.to_string(),
+                    m.readonly,
+                ));
+            } else if m.mount_type == MountType::VirtioFs || m.mount_type == MountType::Bind {
+                let tag = format!("mount{}", mounts.len());
+                let canonical = m.host_path.canonicalize().map_err(|e| {
+                    Error::SandboxCreationFailed(format!(
+                        "Mount path cannot be resolved: {}: {}",
+                        m.host_path.display(),
+                        e
+                    ))
+                })?;
+                mounts.push((tag, canonical.to_string_lossy().to_string()));
+            }
+        }
 
         // Collect port mappings (preserving protocol for gvproxy forwarding)
         let port_mappings: Vec<(u16, u16, String)> = config
@@ -1133,6 +1518,27 @@ impl LibkrunRuntime {
             home: config.home.clone(),
             vsock_socket: config.vsock_socket.clone(),
             vsock_port: config.vsock_port,
+            boot: BootConfig {
+                rootfs_source: match config.rootfs.as_ref() {
+                    Some(rf) if rf.source == RootfsSource::DiskImage => "disk_image".to_string(),
+                    Some(rf) if rf.source == RootfsSource::LocalDir => "local_dir".to_string(),
+                    _ => "oci".to_string(),
+                },
+                rootfs_format: config.rootfs.as_ref().and_then(|rf| rf.format.clone()),
+                rootfs_read_only: config
+                    .rootfs
+                    .as_ref()
+                    .map(|rf| rf.read_only)
+                    .unwrap_or(false),
+                disk_mounts,
+                patches: config.patches.clone(),
+                scripts: config.scripts.clone(),
+                mount_specs: config.mounts.clone(),
+                hostname: config.hostname.clone(),
+                security_profile: config.security_profile.clone(),
+                stat_virtualization: config.stat_virtualization.clone(),
+                rlimits: config.rlimits.clone(),
+            },
             exit_code: Arc::new(Mutex::new(None)),
         };
 
@@ -1183,6 +1589,7 @@ impl LibkrunRuntime {
             env,
             user,
             home,
+            boot,
         ) = {
             let sandboxes = self.lock_sandboxes();
             let state = sandboxes
@@ -1203,9 +1610,9 @@ impl LibkrunRuntime {
                 state.env.clone(),
                 state.user.clone(),
                 state.home.clone(),
+                state.boot.clone(),
             )
         };
-
 
         // Boot the VM in a blocking task (subprocess + krun_start_enter)
         let id_owned = id.to_string();
@@ -1227,6 +1634,7 @@ impl LibkrunRuntime {
                 &env,
                 user.as_deref(),
                 home.as_deref(),
+                boot,
             )
         })
         .await
@@ -1282,10 +1690,7 @@ impl LibkrunRuntime {
                     for (name, ip) in &state.dns_zones {
                         match gvproxy.add_dns_zone(name, ip) {
                             Ok(()) => {
-                                info!(
-                                    "Configured DNS zone via gvproxy: {} -> {}",
-                                    name, ip
-                                );
+                                info!("Configured DNS zone via gvproxy: {} -> {}", name, ip);
                             }
                             Err(e) => {
                                 warn!(
@@ -1344,6 +1749,7 @@ impl LibkrunRuntime {
         extra_mounts: Vec<ExtraMount>,
         vsock_socket: Option<&str>,
         vsock_port: Option<u32>,
+        boot: BootConfig,
         exit_code_slot: Arc<Mutex<Option<i32>>>,
     ) -> std::result::Result<i32, String> {
         let mut request = BootVmRequest {
@@ -1367,6 +1773,17 @@ impl LibkrunRuntime {
             env: env.clone(),
             vsock_socket: vsock_socket.map(|s| s.to_string()),
             vsock_port,
+            rootfs_source: boot.rootfs_source,
+            rootfs_format: boot.rootfs_format,
+            rootfs_read_only: boot.rootfs_read_only,
+            disk_mounts: boot.disk_mounts,
+            patches: boot.patches,
+            scripts: boot.scripts,
+            mount_specs: boot.mount_specs,
+            hostname: boot.hostname,
+            security_profile: boot.security_profile,
+            stat_virtualization: boot.stat_virtualization,
+            rlimits: boot.rlimits,
         };
 
         let mut console_dups: Vec<i32> = Vec::new();
@@ -1508,6 +1925,7 @@ impl LibkrunRuntime {
         env: &HashMap<String, String>,
         user: Option<&str>,
         home: Option<&str>,
+        boot: BootConfig,
     ) -> std::result::Result<i32, String> {
         // Serialize VM configuration for the subprocess
         // Determine runtime mode from environment (set by the supervisor).
@@ -1530,11 +1948,22 @@ impl LibkrunRuntime {
             user: user.map(|s| s.to_string()),
             home: home.map(|s| s.to_string()),
             runtime_mode,
-            console: None,   // Set by the supervisor via env or config
+            console: None,            // Set by the supervisor via env or config
             extra_mounts: Vec::new(), // Set by the supervisor via config
             env: env.clone(),
             vsock_socket: None,
             vsock_port: None,
+            rootfs_source: boot.rootfs_source,
+            rootfs_format: boot.rootfs_format,
+            rootfs_read_only: boot.rootfs_read_only,
+            disk_mounts: boot.disk_mounts,
+            patches: boot.patches,
+            scripts: boot.scripts,
+            mount_specs: boot.mount_specs,
+            hostname: boot.hostname,
+            security_profile: boot.security_profile,
+            stat_virtualization: boot.stat_virtualization,
+            rlimits: boot.rlimits,
         };
 
         let config_json = serde_json::to_string(&request)
@@ -1648,7 +2077,6 @@ impl LibkrunRuntime {
         Ok(pid)
     }
 
-
     /// Start the sandbox in next mode with console fds and extra mounts.
     ///
     /// This is the zero-image-customization path. The caller (supervisor) provides
@@ -1689,6 +2117,7 @@ impl LibkrunRuntime {
             home,
             vsock_socket,
             vsock_port,
+            boot,
             exit_code_slot,
         ) = {
             let sandboxes = self.lock_sandboxes();
@@ -1712,6 +2141,7 @@ impl LibkrunRuntime {
                 state.home.clone(),
                 state.vsock_socket.clone(),
                 state.vsock_port,
+                state.boot.clone(),
                 state.exit_code.clone(),
             )
         };
@@ -1739,6 +2169,7 @@ impl LibkrunRuntime {
                 extra_mounts,
                 vsock_socket.as_deref(),
                 vsock_port,
+                boot,
                 exit_code_slot,
             )
         })
@@ -1794,10 +2225,7 @@ impl LibkrunRuntime {
                     for (name, ip) in &state.dns_zones {
                         match gvproxy.add_dns_zone(name, ip) {
                             Ok(()) => {
-                                info!(
-                                    "Configured DNS zone via gvproxy: {} -> {}",
-                                    name, ip
-                                );
+                                info!("Configured DNS zone via gvproxy: {} -> {}", name, ip);
                             }
                             Err(e) => {
                                 warn!(
@@ -1811,7 +2239,10 @@ impl LibkrunRuntime {
             }
         }
 
-        info!("VM (next mode) started for sandbox '{}' (pid: {})", id, vm_pid);
+        info!(
+            "VM (next mode) started for sandbox '{}' (pid: {})",
+            id, vm_pid
+        );
         Ok(())
     }
 
@@ -1891,7 +2322,6 @@ impl LibkrunRuntime {
                 gvproxy.stop();
             }
 
-
             if state
                 .rootfs_path
                 .file_name()
@@ -1922,7 +2352,6 @@ impl LibkrunRuntime {
     pub fn handles_image_pull(&self) -> bool {
         false
     }
-
 }
 
 #[cfg(test)]
@@ -1930,7 +2359,11 @@ mod tests {
     use super::*;
 
     fn fixture_rootfs(passwd: &str, group: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("nanosb-usr-{}-{}", std::process::id(), unique_nonce()));
+        let dir = std::env::temp_dir().join(format!(
+            "nanosb-usr-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
         let etc = dir.join("etc");
         std::fs::create_dir_all(&etc).unwrap();
         std::fs::write(etc.join("passwd"), passwd).unwrap();
@@ -1945,7 +2378,8 @@ mod tests {
             .unwrap_or(0)
     }
 
-    const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\ndeveloper:x:1000:1000:Dev:/home/developer:/bin/bash\n";
+    const PASSWD: &str =
+        "root:x:0:0:root:/root:/bin/sh\ndeveloper:x:1000:1000:Dev:/home/developer:/bin/bash\n";
     const GROUP: &str = "root:x:0:\ndeveloper:x:1000:\nwheel:x:10:\n";
 
     #[test]
@@ -2005,7 +2439,11 @@ mod tests {
 
     #[test]
     fn name_without_passwd_gives_actionable_error() {
-        let dir = std::env::temp_dir().join(format!("nanosb-nopasswd-{}-{}", std::process::id(), unique_nonce()));
+        let dir = std::env::temp_dir().join(format!(
+            "nanosb-nopasswd-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let err = resolve_guest_user(&dir, "developer", None).unwrap_err();
         assert!(err.contains("/etc/passwd"), "{}", err);
@@ -2014,7 +2452,11 @@ mod tests {
 
     #[test]
     fn numeric_uid_without_passwd_still_works() {
-        let dir = std::env::temp_dir().join(format!("nanosb-nopasswd2-{}-{}", std::process::id(), unique_nonce()));
+        let dir = std::env::temp_dir().join(format!(
+            "nanosb-nopasswd2-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let (uid, gid, home) = resolve_guest_user(&dir, "1000", None).unwrap();
         assert_eq!(uid, "1000");
@@ -2045,5 +2487,175 @@ mod tests {
             .file_type()
             .is_symlink());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn fixture_rootfs_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nanosb-patch-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn apply_patches_mkdir_text_copy_remove() {
+        let root = fixture_rootfs_dir();
+        let host_file = root.join("host-file.txt");
+        std::fs::write(&host_file, b"from-host").unwrap();
+        let host_dir = root.join("host-dir");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("a.txt"), b"a").unwrap();
+
+        let patches = vec![
+            RootfsPatchConfig::Mkdir {
+                path: "/etc/nanosb".to_string(),
+                mode: Some(0o750),
+            },
+            RootfsPatchConfig::Text {
+                path: "/etc/nanosb/hello.txt".to_string(),
+                content: "hello".to_string(),
+                mode: Some(0o600),
+            },
+            RootfsPatchConfig::CopyFile {
+                from: host_file.to_string_lossy().to_string(),
+                to: "/opt/copied.txt".to_string(),
+                mode: None,
+            },
+            RootfsPatchConfig::CopyDir {
+                from: host_dir.to_string_lossy().to_string(),
+                to: "/opt/host-dir".to_string(),
+            },
+        ];
+        apply_rootfs_patches(&root, &patches).unwrap();
+
+        assert_eq!(
+            std::fs::read(root.join("etc/nanosb/hello.txt")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(root.join("opt/copied.txt")).unwrap(),
+            b"from-host"
+        );
+        assert_eq!(
+            std::fs::read(root.join("opt/host-dir/a.txt")).unwrap(),
+            b"a"
+        );
+        assert!(root.join("etc/nanosb").is_dir());
+
+        apply_rootfs_patches(
+            &root,
+            &vec![RootfsPatchConfig::Remove {
+                path: "/opt/copied.txt".to_string(),
+                recursive: false,
+            }],
+        )
+        .unwrap();
+        assert!(!root.join("opt/copied.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_patches_rejects_path_escape() {
+        let root = fixture_rootfs_dir();
+        let err = apply_rootfs_patches(
+            &root,
+            &vec![RootfsPatchConfig::Text {
+                path: "../escape.txt".to_string(),
+                content: "x".to_string(),
+                mode: None,
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("escapes rootfs"), "{}", err);
+        assert!(!root.parent().unwrap().join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn materialize_scripts_writes_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture_rootfs_dir();
+        let scripts = HashMap::from([("run.sh".to_string(), "echo hi".to_string())]);
+        materialize_scripts(&root, &scripts).unwrap();
+        let path = root.join(".nanosb/scripts/run.sh");
+        assert_eq!(std::fs::read(&path).unwrap(), b"echo hi");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn materialize_scripts_rejects_path_traversal_name() {
+        let root = fixture_rootfs_dir();
+        let scripts = HashMap::from([("../evil".to_string(), "x".to_string())]);
+        let err = materialize_scripts(&root, &scripts).unwrap_err();
+        assert!(err.contains("invalid script name"), "{}", err);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mounts_env_json_serializes_kinds_and_tags() {
+        let mounts = vec![
+            Mount::virtiofs("/host/ws".to_string(), "/workspace".to_string()),
+            Mount::tmpfs("/dev/shm".to_string()),
+            Mount {
+                host_path: std::path::PathBuf::from("/host/secret"),
+                container_path: "/etc/secret".to_string(),
+                readonly: true,
+                mount_type: MountType::Bind,
+                file: true,
+                disk_image: None,
+                fstype: None,
+                options: vec!["noexec".to_string()],
+                uid: Some(1000),
+                gid: None,
+            },
+            Mount {
+                host_path: std::path::PathBuf::from("/host/data.img"),
+                container_path: "/mnt/data".to_string(),
+                readonly: false,
+                mount_type: MountType::Bind,
+                file: false,
+                disk_image: Some("qcow2".to_string()),
+                fstype: Some("ext4".to_string()),
+                options: Vec::new(),
+                uid: None,
+                gid: None,
+            },
+        ];
+        let value = mounts_env_json(&mounts);
+        let json = serde_json::to_string(&value).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.len(), 4);
+        let first = parsed[0].as_object().unwrap();
+        assert_eq!(first.get("target").unwrap().as_str().unwrap(), "/workspace");
+        assert_eq!(first.get("kind").unwrap().as_str().unwrap(), "virtiofs");
+        assert_eq!(first.get("tag").unwrap().as_str().unwrap(), "mount0");
+        assert_eq!(first.get("readonly").unwrap().as_bool().unwrap(), false);
+
+        let tmpfs = parsed[1].as_object().unwrap();
+        assert_eq!(tmpfs.get("kind").unwrap().as_str().unwrap(), "tmpfs");
+        assert!(tmpfs.get("source").is_none());
+
+        let file = parsed[2].as_object().unwrap();
+        assert_eq!(file.get("kind").unwrap().as_str().unwrap(), "file");
+        assert_eq!(file.get("tag").unwrap().as_str().unwrap(), "mount1");
+        assert_eq!(file.get("readonly").unwrap().as_bool().unwrap(), true);
+        assert_eq!(file.get("uid").unwrap().as_u64().unwrap(), 1000);
+        assert_eq!(
+            file.get("options").unwrap().as_array().unwrap()[0]
+                .as_str()
+                .unwrap(),
+            "noexec"
+        );
+
+        let disk = parsed[3].as_object().unwrap();
+        assert_eq!(disk.get("kind").unwrap().as_str().unwrap(), "disk");
+        assert_eq!(disk.get("tag").unwrap().as_str().unwrap(), "disk0");
+        assert_eq!(disk.get("fstype").unwrap().as_str().unwrap(), "ext4");
     }
 }

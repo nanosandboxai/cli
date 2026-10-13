@@ -51,7 +51,7 @@ dirs = "6"
 
 # libkrun compiled directly as rlib on all platforms
 [target.'cfg(unix)'.dependencies]
-libkrun-sys = { path = "../libkrun-sys", features = ["net"] }
+libkrun-sys = { path = "../libkrun-sys", features = ["net", "blk"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -59,11 +59,14 @@ Legend: ✅ done · ◑ partial · ✗ not done.
 - **WS6 / M5 — snapshots beyond disk-only**: memory/process capture and booting a
   VM *on* a restored writable layer are out of scope under R3
   (`docs/decisions/snapshots.md`). The disk-only store ships and is verified live.
-- **§4 advanced surface (non-AC)**: some §4 `[A]`/`[R]` inventory items remain
-  protocol-only or deferred — per-exec `rlimits`, tmpfs/file/disk-image mounts,
-  mount options/owner, `quota`, named scripts, `secretEnv` substitution,
-  `hostname` override, `NetworkConfig` policy passthrough, and log-source
-  separation. The **AC5 verb set itself is complete and live-verified**.
+- **§4 advanced surface (non-AC)**: **closed by Epic 5**
+  (`docs/epics/epic-5-advanced-sandbox-surface.md`). Per-exec `rlimits`,
+  tmpfs/file/disk-image mounts, mount options/owner, `quota`, named scripts,
+  `secretEnv` substitution, `hostname`, `NetworkConfig` policy passthrough, and
+  log-source separation are now threaded end-to-end with live assertions in
+  `crates/client/tests/epic5_live.rs`. Still deferred: live `mount_add` (no
+  virtiofs hotplug), `stat virtualization` and `securityProfile` enforcement
+  (undefined semantics). The **AC5 verb set itself is complete and live-verified**.
 - **Kotlin**: shipped (facade over the Java SDK) — a fully standalone Kotlin
   client is an optional refinement.
 - **WS5 networking enforcement**: deliberately Epic 3 (config surface ships here).

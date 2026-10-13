@@ -39,7 +39,8 @@ fn main() -> anyhow::Result<()> {
             .get(3)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("__supervise requires config_json"))?;
-        let extra_mounts_json = named_arg(&args, "--extra-mounts-json").unwrap_or_else(|| "[]".into());
+        let extra_mounts_json =
+            named_arg(&args, "--extra-mounts-json").unwrap_or_else(|| "[]".into());
         let timeout_secs = named_arg(&args, "--timeout-secs")
             .and_then(|s| s.parse().ok())
             .unwrap_or(3600);
@@ -67,7 +68,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn named_arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn nanosb_home() -> PathBuf {
@@ -179,7 +182,9 @@ fn handle(stream: UnixStream) -> anyhow::Result<()> {
 fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
     match req {
         Request::Hello(_) => Ok(()),
-        Request::Ping => send(writer, &Response::Pong {
+        Request::Ping => send(
+            writer,
+            &Response::Pong {
                 version: HELPER_VERSION.to_string(),
             },
         ),
@@ -189,10 +194,13 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             cursor,
             label,
         } => {
-            let sandboxes = list_sandboxes(all, label.as_deref(), limit, cursor.as_deref());
-            send(writer, &Response::List(SandboxList {
+            let (sandboxes, next_cursor) =
+                list_sandboxes(all, label.as_deref(), limit, cursor.as_deref());
+            send(
+                writer,
+                &Response::List(SandboxList {
                     sandboxes,
-                    next_cursor: None,
+                    next_cursor,
                 }),
             )
         }
@@ -201,21 +209,35 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             None => send(writer, &Response::Error(not_found(&name))),
         },
         Request::Create(spec) => create(writer, spec.spec),
-        Request::Start { name } => proxy(writer, require_name(name)?, Request::Start { name: None }),
-        Request::Status { name } => proxy(writer, require_name(name)?, Request::Status { name: None }),
-        Request::Stop { name, force } => {
-            proxy(writer, require_name(name)?, Request::Stop { name: None, force })
+        Request::Start { name } => {
+            proxy(writer, require_name(name)?, Request::Start { name: None })
         }
+        Request::Status { name } => {
+            proxy(writer, require_name(name)?, Request::Status { name: None })
+        }
+        Request::Stop { name, force } => proxy(
+            writer,
+            require_name(name)?,
+            Request::Stop { name: None, force },
+        ),
         Request::Kill { name } => proxy(writer, require_name(name)?, Request::Kill { name: None }),
-        Request::Drain { name } => proxy(writer, require_name(name)?, Request::Drain { name: None }),
-        Request::Touch { name } => proxy(writer, require_name(name)?, Request::Touch { name: None }),
-        Request::Pause { name } => proxy(writer, require_name(name)?, Request::Pause { name: None }),
+        Request::Drain { name } => {
+            proxy(writer, require_name(name)?, Request::Drain { name: None })
+        }
+        Request::Touch { name } => {
+            proxy(writer, require_name(name)?, Request::Touch { name: None })
+        }
+        Request::Pause { name } => {
+            proxy(writer, require_name(name)?, Request::Pause { name: None })
+        }
         Request::Resume { name } => {
             proxy(writer, require_name(name)?, Request::Resume { name: None })
         }
-        Request::Modify { name, spec } => {
-            proxy(writer, require_name(name)?, Request::Modify { name: None, spec })
-        }
+        Request::Modify { name, spec } => proxy(
+            writer,
+            require_name(name)?,
+            Request::Modify { name: None, spec },
+        ),
         Request::Remove { name, force } => remove_sandbox(writer, &require_name(name)?, force),
         Request::Exec(mut s) => {
             let n = require_name(s.name.clone())?;
@@ -227,6 +249,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             s.name = None;
             proxy(writer, n, Request::ExecStream(s))
         }
+        Request::ExecDefault(mut s) => {
+            let n = require_name(s.name.clone())?;
+            s.name = None;
+            proxy(writer, n, Request::ExecDefault(s))
+        }
         Request::Shell(mut s) => {
             let n = require_name(s.name.clone())?;
             s.name = None;
@@ -235,6 +262,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
         Request::Attach { name } => {
             proxy(writer, require_name(name)?, Request::Attach { name: None })
         }
+        Request::AttachDefault { name } => proxy(
+            writer,
+            require_name(name)?,
+            Request::AttachDefault { name: None },
+        ),
         Request::Logs(mut s) => {
             let n = require_name(s.name.clone())?;
             s.name = None;
@@ -326,9 +358,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             s.name = None;
             proxy(writer, n, Request::SecretSet(s))
         }
-        Request::SecretList { name } => {
-            proxy(writer, require_name(name)?, Request::SecretList { name: None })
-        }
+        Request::SecretList { name } => proxy(
+            writer,
+            require_name(name)?,
+            Request::SecretList { name: None },
+        ),
         Request::SecretRemove(mut s) => {
             let n = require_name(s.name.clone())?;
             s.name = None;
@@ -339,9 +373,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             s.name = None;
             proxy(writer, n, Request::VolumeCreate(s))
         }
-        Request::VolumeList { name } => {
-            proxy(writer, require_name(name)?, Request::VolumeList { name: None })
-        }
+        Request::VolumeList { name } => proxy(
+            writer,
+            require_name(name)?,
+            Request::VolumeList { name: None },
+        ),
         Request::VolumeGet(mut s) => {
             let n = require_name(s.name.clone())?;
             s.name = None;
@@ -363,7 +399,9 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
         Request::SnapshotRestore(spec) | Request::SnapshotFork(spec) => {
             snapshot_materialize(writer, spec)
         }
-        other => send(writer, &Response::Error(ProtocolError::unsupported(format!(
+        other => send(
+            writer,
+            &Response::Error(ProtocolError::unsupported(format!(
                 "helper does not serve {other:?}"
             ))),
         ),
@@ -374,23 +412,29 @@ fn create(writer: &mut UnixStream, spec: nanosb_protocol::SandboxSpec) -> anyhow
     let name = match spec.name.clone() {
         Some(n) => n,
         None => {
-            return send(writer, &Response::Error(ProtocolError::bad_request("spec.name is required")),
+            return send(
+                writer,
+                &Response::Error(ProtocolError::bad_request("spec.name is required")),
             )
         }
     };
-    if sandboxes_dir()
-        .join(&name)
-        .join(nanosb_protocol::STATE_FILE)
-        .exists()
-        && !spec.replace
-    {
-        return send(writer, &Response::Error(ProtocolError::invalid_state(format!(
-                "sandbox '{name}' already exists (set replace=true)"
-            ))),
-        );
+    let dir = sandboxes_dir().join(&name);
+    if dir.join(nanosb_protocol::STATE_FILE).exists() {
+        if !spec.replace {
+            return send(
+                writer,
+                &Response::Error(ProtocolError::invalid_state(format!(
+                    "sandbox '{name}' already exists (set replace=true)"
+                ))),
+            );
+        }
+        stop_sandbox(&name);
+        let _ = std::fs::remove_dir_all(&dir);
     }
     nanosb_cli::helper::create_sandbox(&spec)?;
-    send(writer, &Response::Ok {
+    send(
+        writer,
+        &Response::Ok {
             version: HELPER_VERSION.to_string(),
         },
     )
@@ -426,13 +470,23 @@ fn snapshot_create(
 
 fn snapshot_list(writer: &mut UnixStream) -> anyhow::Result<()> {
     let store = nanosb_cli::supervisor::snapshots::SnapshotStore::new();
-    send(writer, &Response::Snapshots { snapshots: store.list() })
+    send(
+        writer,
+        &Response::Snapshots {
+            snapshots: store.list(),
+        },
+    )
 }
 
 fn snapshot_remove(writer: &mut UnixStream, id: &str) -> anyhow::Result<()> {
     let store = nanosb_cli::supervisor::snapshots::SnapshotStore::new();
     match store.remove(id) {
-        Ok(()) => send(writer, &Response::Ok { version: HELPER_VERSION.to_string() }),
+        Ok(()) => send(
+            writer,
+            &Response::Ok {
+                version: HELPER_VERSION.to_string(),
+            },
+        ),
         Err(e) => send(writer, &Response::Error(e.to_protocol())),
     }
 }
@@ -444,7 +498,12 @@ fn snapshot_materialize(
     let store = nanosb_cli::supervisor::snapshots::SnapshotStore::new();
     let new_dir = sandboxes_dir().join(&spec.name);
     match store.materialize(&spec.snapshot, &spec.name, &new_dir) {
-        Ok(_) => send(writer, &Response::Ok { version: HELPER_VERSION.to_string() }),
+        Ok(_) => send(
+            writer,
+            &Response::Ok {
+                version: HELPER_VERSION.to_string(),
+            },
+        ),
         Err(e) => send(writer, &Response::Error(e.to_protocol())),
     }
 }
@@ -462,7 +521,9 @@ fn proxy(writer: &mut UnixStream, name: String, req: Request) -> anyhow::Result<
     let stream = match UnixStream::connect(&socket) {
         Ok(s) => s,
         Err(e) => {
-            return send(writer, &Response::Error(ProtocolError::invalid_state(format!(
+            return send(
+                writer,
+                &Response::Error(ProtocolError::invalid_state(format!(
                     "sandbox '{name}' is not running ({e})"
                 ))),
             )
@@ -473,7 +534,10 @@ fn proxy(writer: &mut UnixStream, name: String, req: Request) -> anyhow::Result<
     let mut scratch = String::new();
     write_message(
         &mut upstream_writer,
-        &Request::Hello(nanosb_protocol::HelloRequest::new("nanosb-runtime", PROTOCOL_VERSION)),
+        &Request::Hello(nanosb_protocol::HelloRequest::new(
+            "nanosb-runtime",
+            PROTOCOL_VERSION,
+        )),
     )?;
     let _hello_ok = read_message::<_, Response>(&mut upstream_reader, &mut scratch)?;
     write_message(&mut upstream_writer, &req)?;
@@ -523,8 +587,8 @@ fn list_sandboxes(
     all: bool,
     label: Option<&str>,
     limit: Option<usize>,
-    _cursor: Option<&str>,
-) -> Vec<SandboxInfo> {
+    cursor: Option<&str>,
+) -> (Vec<SandboxInfo>, Option<String>) {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(sandboxes_dir()) {
         for entry in entries.flatten() {
@@ -543,10 +607,22 @@ fn list_sandboxes(
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    if let Some(n) = limit {
-        out.truncate(n);
-    }
-    out
+    let start = match cursor {
+        Some(c) => out
+            .iter()
+            .position(|s| s.name.as_str() > c)
+            .unwrap_or(out.len()),
+        None => 0,
+    };
+    let mut page: Vec<SandboxInfo> = out[start..].to_vec();
+    let next_cursor = match limit {
+        Some(n) if page.len() > n => {
+            page.truncate(n);
+            page.last().map(|s| s.name.clone())
+        }
+        _ => None,
+    };
+    (page, next_cursor)
 }
 
 fn selector_matches(labels: &std::collections::HashMap<String, String>, selector: &str) -> bool {
@@ -568,7 +644,11 @@ fn sandbox_info(name: &str) -> Option<SandboxInfo> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
-    let state_enum = match state.get("state").and_then(|v| v.as_str()).unwrap_or("error") {
+    let state_enum = match state
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("error")
+    {
         "starting" => nanosb_protocol::SandboxState::Starting,
         "running" => nanosb_protocol::SandboxState::Running,
         "stopped" => nanosb_protocol::SandboxState::Stopped,
@@ -578,6 +658,9 @@ fn sandbox_info(name: &str) -> Option<SandboxInfo> {
         .get("labels")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let pid = state.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32);
+    let live = matches!(state_enum, nanosb_protocol::SandboxState::Running)
+        && pid.map(|p| p > 0).unwrap_or(false);
     Some(SandboxInfo {
         name: name.to_string(),
         state: state_enum,
@@ -586,7 +669,7 @@ fn sandbox_info(name: &str) -> Option<SandboxInfo> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        pid: state.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32),
+        pid,
         exit_code: state
             .get("exit_code")
             .and_then(|v| v.as_i64())
@@ -599,7 +682,7 @@ fn sandbox_info(name: &str) -> Option<SandboxInfo> {
             .get("config_hash")
             .and_then(|v| v.as_str())
             .map(String::from),
-        detached: true,
+        detached: !live,
         ephemeral: config
             .get("ephemeral")
             .and_then(|v| v.as_bool())
@@ -615,7 +698,9 @@ fn remove_sandbox(writer: &mut UnixStream, name: &str, force: bool) -> anyhow::R
     let dir = sandboxes_dir().join(name);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
-        send(writer, &Response::Ok {
+        send(
+            writer,
+            &Response::Ok {
                 version: HELPER_VERSION.to_string(),
             },
         )

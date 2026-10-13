@@ -48,32 +48,25 @@ pub struct PlannedMount {
 
 impl From<PlannedMount> for runtime::Mount {
     fn from(pm: PlannedMount) -> Self {
-        runtime::Mount {
-            host_path: pm.host_path,
-            container_path: pm.guest_path,
-            readonly: pm.readonly,
+        let mut mount = runtime::Mount {
             mount_type: runtime::MountType::VirtioFs,
-        }
+            ..runtime::Mount::bind(pm.host_path, pm.guest_path)
+        };
+        mount.readonly = pm.readonly;
+        mount
     }
 }
 
 /// Per-agent state directory definitions.
 fn agent_state_dirs(agent_type: AgentType) -> Vec<&'static str> {
     match agent_type {
-        AgentType::Claude => vec![
-            "/home/developer/.claude",
-        ],
-        AgentType::Codex => vec![
-            "/home/developer/.codex",
-            "/home/developer/.agents",
-        ],
+        AgentType::Claude => vec!["/home/developer/.claude"],
+        AgentType::Codex => vec!["/home/developer/.codex", "/home/developer/.agents"],
         AgentType::Goose => vec![
             "/home/developer/.config/goose",
             "/home/developer/.local/share/goose",
         ],
-        AgentType::Cursor => vec![
-            "/home/developer/.cursor",
-        ],
+        AgentType::Cursor => vec!["/home/developer/.cursor"],
     }
 }
 
@@ -82,19 +75,13 @@ fn agent_state_dirs(agent_type: AgentType) -> Vec<&'static str> {
 fn agent_config_guest_paths(agent_type: AgentType) -> Vec<(&'static str, &'static str)> {
     // Returns (guest_path, relative_subdir_under_config)
     match agent_type {
-        AgentType::Claude => vec![
-            ("/home/developer/.claude", "claude"),
-        ],
+        AgentType::Claude => vec![("/home/developer/.claude", "claude")],
         AgentType::Codex => vec![
             ("/home/developer/.codex", "codex"),
             ("/home/developer/.agents", "agents"),
         ],
-        AgentType::Goose => vec![
-            ("/home/developer/.config/goose", "goose"),
-        ],
-        AgentType::Cursor => vec![
-            ("/home/developer/.cursor", "cursor"),
-        ],
+        AgentType::Goose => vec![("/home/developer/.config/goose", "goose")],
+        AgentType::Cursor => vec![("/home/developer/.cursor", "cursor")],
     }
 }
 
@@ -213,18 +200,30 @@ mod tests {
         let mounts = MountPlanner::plan(&config, &AgentType::Claude, sandbox_dir, None);
 
         // Claude: merged state+config mount + shared nanosandbox
-        assert!(mounts.len() >= 2, "claude should have at least 2 mounts, got {}", mounts.len());
+        assert!(
+            mounts.len() >= 2,
+            "claude should have at least 2 mounts, got {}",
+            mounts.len()
+        );
 
         let claude_mounts: Vec<_> = mounts
             .iter()
             .filter(|m| m.guest_path == "/home/developer/.claude")
             .collect();
         assert_eq!(claude_mounts.len(), 1, "exactly one ~/.claude mount");
-        assert!(!claude_mounts[0].readonly, "merged ~/.claude mount should be RW");
+        assert!(
+            !claude_mounts[0].readonly,
+            "merged ~/.claude mount should be RW"
+        );
 
-        let ns_mount = mounts.iter().find(|m| m.guest_path == "/home/developer/.nanosandbox");
+        let ns_mount = mounts
+            .iter()
+            .find(|m| m.guest_path == "/home/developer/.nanosandbox");
         assert!(ns_mount.is_some(), "should have nanosandbox state mount");
-        assert!(!ns_mount.unwrap().readonly, "nanosandbox mount should be RW");
+        assert!(
+            !ns_mount.unwrap().readonly,
+            "nanosandbox mount should be RW"
+        );
     }
 
     #[test]
@@ -234,7 +233,11 @@ mod tests {
         let mounts = MountPlanner::plan(&config, &AgentType::Goose, sandbox_dir, None);
 
         // Goose: 2 merged state mounts + nanosandbox shared
-        assert!(mounts.len() >= 3, "goose should have at least 3 mounts, got {}", mounts.len());
+        assert!(
+            mounts.len() >= 3,
+            "goose should have at least 3 mounts, got {}",
+            mounts.len()
+        );
 
         let goose_config: Vec<_> = mounts
             .iter()
@@ -243,8 +246,13 @@ mod tests {
         assert_eq!(goose_config.len(), 1, "exactly one .config/goose mount");
         assert!(!goose_config[0].readonly, "merged goose mount should be RW");
 
-        let goose_state = mounts.iter().find(|m| m.guest_path == "/home/developer/.local/share/goose");
-        assert!(goose_state.is_some(), "goose local/share state mount should exist");
+        let goose_state = mounts
+            .iter()
+            .find(|m| m.guest_path == "/home/developer/.local/share/goose");
+        assert!(
+            goose_state.is_some(),
+            "goose local/share state mount should exist"
+        );
         assert!(!goose_state.unwrap().readonly, "state mount should be RW");
     }
 
@@ -308,14 +316,22 @@ mod tests {
         let mounts = MountPlanner::plan(&config, &AgentType::Codex, sandbox_dir, None);
 
         // Codex: 2 merged state mounts + nanosandbox shared
-        assert!(mounts.len() >= 3, "codex should have at least 3 mounts, got {}", mounts.len());
+        assert!(
+            mounts.len() >= 3,
+            "codex should have at least 3 mounts, got {}",
+            mounts.len()
+        );
 
         assert!(
-            mounts.iter().any(|m| m.guest_path == "/home/developer/.codex"),
+            mounts
+                .iter()
+                .any(|m| m.guest_path == "/home/developer/.codex"),
             "should have .codex mount"
         );
         assert!(
-            mounts.iter().any(|m| m.guest_path == "/home/developer/.agents"),
+            mounts
+                .iter()
+                .any(|m| m.guest_path == "/home/developer/.agents"),
             "should have .agents mount"
         );
     }
@@ -327,10 +343,16 @@ mod tests {
         let mounts = MountPlanner::plan(&config, &AgentType::Cursor, sandbox_dir, None);
 
         // Cursor: 1 merged state mount + nanosandbox shared
-        assert!(mounts.len() >= 2, "cursor should have at least 2 mounts, got {}", mounts.len());
+        assert!(
+            mounts.len() >= 2,
+            "cursor should have at least 2 mounts, got {}",
+            mounts.len()
+        );
 
         assert!(
-            mounts.iter().any(|m| m.guest_path == "/home/developer/.cursor"),
+            mounts
+                .iter()
+                .any(|m| m.guest_path == "/home/developer/.cursor"),
             "should have .cursor mount"
         );
     }

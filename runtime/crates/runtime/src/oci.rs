@@ -186,6 +186,18 @@ fn generate_mounts(user_mounts: &[Mount]) -> Vec<serde_json::Value> {
                     "options": options
                 }));
             }
+            MountType::Tmpfs => {
+                let mut options = mount.options.clone();
+                if mount.readonly {
+                    options.push("ro".to_string());
+                }
+                mounts.push(json!({
+                    "destination": &mount.container_path,
+                    "type": "tmpfs",
+                    "source": "tmpfs",
+                    "options": options
+                }));
+            }
         }
     }
 
@@ -387,7 +399,11 @@ impl OciBundle {
         let config_path = bundle_path.join("config.json");
 
         std::fs::create_dir_all(&rootfs_path).map_err(|e| {
-            error!("create(): failed to create bundle dir {}: {}", rootfs_path.display(), e);
+            error!(
+                "create(): failed to create bundle dir {}: {}",
+                rootfs_path.display(),
+                e
+            );
             crate::error::Error::SandboxCreationFailed(format!(
                 "Create bundle dir {}: {}",
                 rootfs_path.display(),
@@ -406,15 +422,25 @@ impl OciBundle {
     ///
     /// Creates a junction/symlink from `bundle_path/rootfs` -> cached rootfs so that
     /// the runtime can find the rootfs at the conventional `bundle_path/rootfs` location.
-    pub fn create_with_rootfs(base_dir: &Path, sandbox_id: &str, rootfs: &Path) -> crate::error::Result<Self> {
+    pub fn create_with_rootfs(
+        base_dir: &Path,
+        sandbox_id: &str,
+        rootfs: &Path,
+    ) -> crate::error::Result<Self> {
         let bundle_path = base_dir.join(sandbox_id);
         let config_path = bundle_path.join("config.json");
         let rootfs_link = bundle_path.join("rootfs");
 
         std::fs::create_dir_all(&bundle_path).map_err(|e| {
-            error!("create_with_rootfs(): failed to create bundle dir {}: {}", bundle_path.display(), e);
+            error!(
+                "create_with_rootfs(): failed to create bundle dir {}: {}",
+                bundle_path.display(),
+                e
+            );
             crate::error::Error::SandboxCreationFailed(format!(
-                "Create bundle dir {}: {}", bundle_path.display(), e
+                "Create bundle dir {}: {}",
+                bundle_path.display(),
+                e
             ))
         })?;
 
@@ -422,9 +448,17 @@ impl OciBundle {
         // can find it via the conventional bundle_path/rootfs path.
         if !rootfs_link.exists() {
             std::os::unix::fs::symlink(rootfs, &rootfs_link).map_err(|e| {
-                error!("create_with_rootfs(): failed to symlink rootfs {} -> {}: {}", rootfs_link.display(), rootfs.display(), e);
+                error!(
+                    "create_with_rootfs(): failed to symlink rootfs {} -> {}: {}",
+                    rootfs_link.display(),
+                    rootfs.display(),
+                    e
+                );
                 crate::error::Error::SandboxCreationFailed(format!(
-                    "Symlink rootfs {} -> {}: {}", rootfs_link.display(), rootfs.display(), e
+                    "Symlink rootfs {} -> {}: {}",
+                    rootfs_link.display(),
+                    rootfs.display(),
+                    e
                 ))
             })?;
         }
@@ -440,7 +474,11 @@ impl OciBundle {
     pub fn write_config(&self, config: &serde_json::Value) -> crate::error::Result<()> {
         let content = serde_json::to_string_pretty(config)?;
         std::fs::write(&self.config_path, &content).map_err(|e| {
-            error!("write_config(): failed to write bundle config {}: {}", self.config_path.display(), e);
+            error!(
+                "write_config(): failed to write bundle config {}: {}",
+                self.config_path.display(),
+                e
+            );
             crate::error::Error::SandboxCreationFailed(format!(
                 "Write bundle config {}: {}",
                 self.config_path.display(),
@@ -494,7 +532,9 @@ mod tests {
             "defaultAction should be SCMP_ACT_ALLOW (blocklist approach)"
         );
 
-        let syscalls = seccomp["syscalls"].as_array().expect("syscalls should be an array");
+        let syscalls = seccomp["syscalls"]
+            .as_array()
+            .expect("syscalls should be an array");
         assert!(!syscalls.is_empty(), "syscalls array should have entries");
 
         // Find the ERRNO entry
@@ -541,7 +581,11 @@ mod tests {
         let bounding = caps["bounding"]
             .as_array()
             .expect("bounding should be an array");
-        assert_eq!(bounding.len(), 8, "bounding set should have exactly 8 capabilities");
+        assert_eq!(
+            bounding.len(),
+            8,
+            "bounding set should have exactly 8 capabilities"
+        );
 
         // These 7 must be present
         let expected = [
@@ -635,10 +679,7 @@ mod tests {
             .as_array()
             .expect("rlimits should be an array");
 
-        let rlimit_types: Vec<&str> = rlimits
-            .iter()
-            .filter_map(|r| r["type"].as_str())
-            .collect();
+        let rlimit_types: Vec<&str> = rlimits.iter().filter_map(|r| r["type"].as_str()).collect();
 
         for expected in &["RLIMIT_NOFILE", "RLIMIT_NPROC", "RLIMIT_FSIZE", "RLIMIT_AS"] {
             assert!(

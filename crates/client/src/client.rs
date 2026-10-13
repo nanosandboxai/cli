@@ -5,11 +5,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use nanosb_protocol::{
-    Capability, ExecRequest, ExecResult, FsEntry, FsMkdirSpec, FsPathSpec, FsStat,
-    FsTransferSpec, FsWriteSpec, FsWriteStreamSpec, GuestEvent, LogLine, LogSource, LogsSpec,
-    Metrics, ModifySpec, MountSpec, Response, SandboxInfo, SandboxList, SandboxSpec,
-    SandboxState, SecretEntry, SnapshotInfo, StreamEvent, VolumeInfo, VolumeSpec,
+    Capability, ExecDefaultRequest, ExecRequest, ExecResult, FsEntry, FsMkdirSpec, FsPathSpec,
+    FsStat, FsTransferSpec, FsWriteSpec, FsWriteStreamSpec, GuestEvent, LogLine, LogSource,
+    LogsSpec, Metrics, ModifySpec, MountSpec,
     Request::{self, *},
+    Response, SandboxInfo, SandboxList, SandboxSpec, SandboxState, SecretEntry, SnapshotInfo,
+    StreamEvent, VolumeInfo, VolumeSpec,
 };
 
 use crate::builder::SandboxBuilder;
@@ -120,9 +121,9 @@ impl SandboxClient {
     }
 
     fn name_arg(&self, name: Option<&str>) -> Result<Option<String>> {
-        Ok(self.resolve_name(name)?.filter(|_| {
-            matches!(&self.backend, Backend::Local { sandbox: None, .. })
-        }))
+        Ok(self
+            .resolve_name(name)?
+            .filter(|_| matches!(&self.backend, Backend::Local { sandbox: None, .. })))
     }
 
     fn call(&self, req: &Request) -> Result<Response> {
@@ -340,12 +341,17 @@ impl Sandbox {
     pub fn wait_until_stopped(&self, timeout: Duration) -> Result<SandboxState> {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.state()? {
-                SandboxState::Stopped => return Ok(SandboxState::Stopped),
-                SandboxState::Error => {
-                    return Err(Error::unexpected("sandbox entered error state while waiting"))
+            match self.state() {
+                Ok(SandboxState::Stopped) => return Ok(SandboxState::Stopped),
+                Ok(SandboxState::Error) => {
+                    return Err(Error::unexpected(
+                        "sandbox entered error state while waiting",
+                    ))
                 }
-                _ => {}
+                Ok(_) => {}
+                // A stopped sandbox's control socket is gone; any transport
+                // failure (direct or proxied by the helper) means it stopped.
+                Err(_) => return Ok(SandboxState::Stopped),
             }
             if Instant::now() >= deadline {
                 return Err(Error::Timeout(format!(
@@ -452,6 +458,43 @@ impl Sandbox {
         let mut conn = self.client.open()?;
         conn.clear_read_timeout()?;
         conn.call_stream(&Attach {
+            name: self.name_arg()?,
+        })?;
+        while let Some(resp) = conn.next_response()? {
+            match resp {
+                Response::Guest(ev) => {
+                    let end = is_stream_end(&ev);
+                    on_event(ev);
+                    if end {
+                        break;
+                    }
+                }
+                Response::Error(e) => return Err(Error::Protocol(e)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute the sandbox's configured default workload, with optional
+    /// overrides (extra args, env, cwd, rlimits).
+    pub fn exec_default(&self, req: ExecDefaultRequest) -> Result<ExecResult> {
+        let mut req = req;
+        req.name = self.name_arg()?;
+        match self.client.call(&Request::ExecDefault(Box::new(req)))? {
+            Response::ExecResult(r) => Ok(r),
+            other => Err(Error::unexpected(format!("{other:?}"))),
+        }
+    }
+
+    /// Attach to the sandbox's default interactive workload.
+    pub fn attach_default<F>(&self, mut on_event: F) -> Result<()>
+    where
+        F: FnMut(GuestEvent),
+    {
+        let mut conn = self.client.open()?;
+        conn.clear_read_timeout()?;
+        conn.call_stream(&Request::AttachDefault {
             name: self.name_arg()?,
         })?;
         while let Some(resp) = conn.next_response()? {
@@ -815,10 +858,12 @@ impl Sandbox {
     // ── volumes ────────────────────────────────────────────────────────
 
     pub fn volume_create(&self, volume: VolumeSpec) -> Result<VolumeInfo> {
-        match self.client.call(&VolumeCreate(nanosb_protocol::VolumeCreateSpec {
-            name: self.name_arg()?,
-            volume,
-        }))? {
+        match self
+            .client
+            .call(&VolumeCreate(nanosb_protocol::VolumeCreateSpec {
+                name: self.name_arg()?,
+                volume,
+            }))? {
             Response::Volume(v) => Ok(v),
             other => Err(Error::unexpected(format!("{other:?}"))),
         }
@@ -897,11 +942,13 @@ impl Sandbox {
     // ── snapshots ──────────────────────────────────────────────────────
 
     pub fn snapshot_create(&self, dest: Option<&str>) -> Result<SnapshotInfo> {
-        match self.client.call(&SnapshotCreate(nanosb_protocol::SnapshotCreateSpec {
-            name: self.name_arg()?,
-            dest: dest.map(String::from),
-            include_memory: false,
-        }))? {
+        match self
+            .client
+            .call(&SnapshotCreate(nanosb_protocol::SnapshotCreateSpec {
+                name: self.name_arg()?,
+                dest: dest.map(String::from),
+                include_memory: false,
+            }))? {
             Response::Snapshot(s) => Ok(s),
             other => Err(Error::unexpected(format!("{other:?}"))),
         }
@@ -1195,7 +1242,10 @@ mod tests {
         h.push_script(r#"{"type":"volume","name":"data","dir":"/tmp/vol-data","used_bytes":0}"#);
         let c = SandboxClient::connect(h.path()).unwrap();
         let sb = c.sandbox("a");
-        assert_eq!(sb.volume_fs("data").unwrap(), PathBuf::from("/tmp/vol-data"));
+        assert_eq!(
+            sb.volume_fs("data").unwrap(),
+            PathBuf::from("/tmp/vol-data")
+        );
     }
 
     #[test]

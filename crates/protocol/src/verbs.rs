@@ -92,13 +92,23 @@ pub enum Request {
     // ── execution ──────────────────────────────────────────────────────
     Exec(Box<ExecRequest>),
     ExecStream(Box<ExecRequest>),
+    ExecDefault(Box<ExecDefaultRequest>),
     Shell(Box<ShellRequest>),
     Attach {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    AttachInput { data: String },
-    AttachResize { cols: u16, rows: u16 },
+    AttachDefault {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    AttachInput {
+        data: String,
+    },
+    AttachResize {
+        cols: u16,
+        rows: u16,
+    },
 
     // ── filesystem ─────────────────────────────────────────────────────
     FsRead(FsPathSpec),
@@ -106,7 +116,10 @@ pub enum Request {
     FsWrite(FsWriteSpec),
     FsWriteStream(FsWriteStreamSpec),
     /// Body frame for `FsWriteStream` (base64) or `AttachInput`-style streams.
-    FsData { data_base64: String, eof: bool },
+    FsData {
+        data_base64: String,
+        eof: bool,
+    },
     FsList(FsPathSpec),
     FsStat(FsPathSpec),
     FsExists(FsPathSpec),
@@ -155,7 +168,9 @@ pub enum Request {
     SnapshotList,
     SnapshotRestore(SnapshotRestoreSpec),
     SnapshotFork(SnapshotRestoreSpec),
-    SnapshotRemove { snapshot: String },
+    SnapshotRemove {
+        snapshot: String,
+    },
 }
 
 /// Helper -> client response. Exactly one non-stream `Response` answers each
@@ -165,10 +180,14 @@ pub enum Request {
 pub enum Response {
     // handshake
     HelloOk(HelloResponse),
-    Pong { version: String },
+    Pong {
+        version: String,
+    },
 
     // generic acks (wire-compatible with the legacy `ok`)
-    Ok { version: String },
+    Ok {
+        version: String,
+    },
     Error(ProtocolError),
 
     // lifecycle
@@ -190,11 +209,20 @@ pub enum Response {
     ExecResult(ExecResult),
 
     // filesystem
-    FsData { data_base64: String, eof: bool },
-    FsContent { content: String },
-    FsEntries { entries: Vec<FsEntry> },
+    FsData {
+        data_base64: String,
+        eof: bool,
+    },
+    FsContent {
+        content: String,
+    },
+    FsEntries {
+        entries: Vec<FsEntry>,
+    },
     FsStat(FsStat),
-    FsExists { exists: bool },
+    FsExists {
+        exists: bool,
+    },
 
     // observability
     Metrics(Metrics),
@@ -205,13 +233,19 @@ pub enum Response {
     },
 
     // storage / secrets
-    Volumes { volumes: Vec<VolumeInfo> },
+    Volumes {
+        volumes: Vec<VolumeInfo>,
+    },
     Volume(VolumeInfo),
-    Secrets { secrets: Vec<SecretEntry> },
+    Secrets {
+        secrets: Vec<SecretEntry>,
+    },
 
     // snapshots
     Snapshot(SnapshotInfo),
-    Snapshots { snapshots: Vec<SnapshotInfo> },
+    Snapshots {
+        snapshots: Vec<SnapshotInfo>,
+    },
 
     // streaming
     /// A proxied guest event (exec / attach).
@@ -272,6 +306,40 @@ impl ExecRequest {
             shell: false,
             timeout_secs: None,
             stdin: None,
+            rlimits: Vec::new(),
+        }
+    }
+}
+
+/// Execute the sandbox's configured default workload, with optional overrides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecDefaultRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Extra arguments appended to the default command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub rlimits: Vec<Rlimit>,
+}
+
+impl Default for ExecDefaultRequest {
+    fn default() -> Self {
+        Self {
+            name: None,
+            args: Vec::new(),
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            user: None,
+            timeout_secs: None,
             rlimits: Vec::new(),
         }
     }
@@ -472,7 +540,12 @@ mod tests {
             Request::Ping
         );
         let ok: Response = serde_json::from_str("{\"type\":\"ok\",\"version\":\"1.0.0\"}").unwrap();
-        assert_eq!(ok, Response::Ok { version: "1.0.0".into() });
+        assert_eq!(
+            ok,
+            Response::Ok {
+                version: "1.0.0".into()
+            }
+        );
         // Legacy error had only `message`; `code` is a required superset field,
         // so a legacy bare error must still decode with a defaulted code.
         let err: Response =
@@ -490,7 +563,9 @@ mod tests {
             Request::Ping,
             Request::Hello(HelloRequest::new("test", "1.0.0")),
             Request::Status { name: None },
-            Request::Status { name: Some("s".into()) },
+            Request::Status {
+                name: Some("s".into()),
+            },
             Request::Exec(Box::new(e)),
             Request::FsList(FsPathSpec {
                 name: None,
@@ -507,7 +582,9 @@ mod tests {
     #[test]
     fn response_variants_roundtrip() {
         for resp in [
-            Response::Pong { version: "1".into() },
+            Response::Pong {
+                version: "1".into(),
+            },
             Response::FsExists { exists: true },
             Response::ExecResult(ExecResult {
                 exit_code: 0,

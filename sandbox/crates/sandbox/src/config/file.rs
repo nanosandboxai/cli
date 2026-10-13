@@ -413,11 +413,12 @@ pub fn resolve_sandbox_configs(
                     config_dir.join(&m.host)
                 };
                 config.mounts.push(Mount {
-                    host_path,
-                    container_path: m.container.clone(),
-                    readonly: m.readonly,
                     mount_type: m.mount_type.unwrap_or(MountType::Bind),
+                    ..Mount::bind(host_path, m.container.clone())
                 });
+                if let Some(last) = config.mounts.last_mut() {
+                    last.readonly = m.readonly;
+                }
             }
         }
 
@@ -790,8 +791,16 @@ sandboxes:
 "#;
         let file = parse_sandbox_file(yaml).unwrap();
         let configs = resolve_sandbox_configs(&file, std::path::Path::new("/tmp")).unwrap();
-        let a = configs.iter().find(|(k, _)| k == "a").map(|(_, c)| c).unwrap();
-        let b = configs.iter().find(|(k, _)| k == "b").map(|(_, c)| c).unwrap();
+        let a = configs
+            .iter()
+            .find(|(k, _)| k == "a")
+            .map(|(_, c)| c)
+            .unwrap();
+        let b = configs
+            .iter()
+            .find(|(k, _)| k == "b")
+            .map(|(_, c)| c)
+            .unwrap();
         assert_eq!(a.sandbox.workspace_mode, WorkspaceMode::Shared);
         assert_eq!(b.sandbox.workspace_mode, WorkspaceMode::Isolated);
         assert!(!a.sandbox.fresh_rootfs);
@@ -938,10 +947,7 @@ sandboxes:
         let b = configs.iter().find(|(k, _)| k == "b").unwrap();
         assert_eq!(a.1.sandbox.cpus, 8);
         assert_eq!(a.1.sandbox.memory_mb, 4096);
-        assert_eq!(
-            a.1.sandbox.image,
-            "docker.io/library/default:latest"
-        );
+        assert_eq!(a.1.sandbox.image, "docker.io/library/default:latest");
         assert_eq!(b.1.sandbox.cpus, 2);
     }
 
@@ -1515,7 +1521,11 @@ sandboxes:
     workdir: /another/path
 "#;
         let result = parse_sandbox_file(yaml);
-        assert!(result.is_ok(), "workdir in yaml should be silently ignored, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "workdir in yaml should be silently ignored, got: {:?}",
+            result.err()
+        );
         let file = result.unwrap();
         assert_eq!(file.sandboxes.len(), 1);
     }

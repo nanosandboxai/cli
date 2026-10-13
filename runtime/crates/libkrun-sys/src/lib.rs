@@ -157,6 +157,8 @@ extern "C" {
         fstype: *const c_char,
         options: *const c_char,
     ) -> c_int;
+    #[cfg(feature = "blk")]
+    pub fn krun_set_root_disk(ctx_id: c_uint, disk_path: *const c_char) -> c_int;
 
     // --- Filesystem ---
     pub fn krun_add_virtiofs(ctx_id: c_uint, tag: *const c_char, path: *const c_char) -> c_int;
@@ -476,6 +478,21 @@ pub fn safe_add_disk3(
     };
     if ret < 0 {
         Err(format!("krun_add_disk3 failed with code {}", ret))
+    } else {
+        Ok(())
+    }
+}
+
+/// Attach the root filesystem as a block device.
+///
+/// The underlying `krun_set_root_disk` only supports raw, read-write root
+/// disks; non-raw formats or read-only roots must use `safe_add_disk2`.
+#[cfg(feature = "blk")]
+pub fn safe_set_root_disk(ctx_id: u32, disk_path: &str) -> Result<(), String> {
+    let c_path = to_cstring(disk_path).ok_or_else(|| "Invalid disk_path".to_string())?;
+    let ret = unsafe { krun_set_root_disk(ctx_id as c_uint, c_path.as_ptr()) };
+    if ret < 0 {
+        Err(format!("krun_set_root_disk failed with code {}", ret))
     } else {
         Ok(())
     }
@@ -1096,4 +1113,3 @@ pub fn safe_get_shutdown_eventfd(ctx_id: u32) -> Result<i32, String> {
         Ok(ret)
     }
 }
-

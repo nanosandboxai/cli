@@ -79,6 +79,15 @@ microsandbox's — no native addons, no C ABI, no per-language signing.
 
 Legend: **[A]** SDK-surface work · **[R]** runtime work · **[D]** deliberate divergence.
 
+> **Status after Epic 5** (`docs/epics/epic-5-advanced-sandbox-surface.md` §7):
+> the §4 `[A]`/`[R]` items below are now implemented end-to-end (protocol →
+> helper/supervisor → runtime/guest) unless noted otherwise. Re-tagged:
+> `mount_add` live → **defer** (no virtiofs hotplug); `stat virtualization`
+> enforcement → **defer** (undefined semantics); `securityProfile` → **defer**
+> (no policy mapping). Disk-image volumes/rootfs are implemented (`blk`).
+> The five §3 items (`replace`, `waitUntilStopped`, publish-with-bind-address,
+> publish-UDP, `pullPolicy`) gained live coverage in `crates/client/tests/epic5_live.rs`.
+
 ### 4.1 Lifecycle & handles
 | Interface | nanosandbox | Target |
 |---|---|---|
