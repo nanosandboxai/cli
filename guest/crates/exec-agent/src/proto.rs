@@ -26,6 +26,9 @@ pub struct ExecRequest {
     /// Kill the process after this many seconds (0 = no timeout).
     #[serde(default)]
     pub timeout_secs: u64,
+    /// Per-exec resource limits, `RESOURCE=soft:hard` (`-` = unlimited).
+    #[serde(default)]
+    pub rlimits: Vec<String>,
     /// Allocate a PTY for the process (merges stdout/stderr, enables resize).
     #[serde(default)]
     pub tty: bool,

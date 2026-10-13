@@ -41,7 +41,171 @@ fn diag(msg: &str) {
     }
 }
 
+fn rlimit_resource(name: &str) -> Option<libc::c_int> {
+    let name = name
+        .strip_prefix("RLIMIT_")
+        .unwrap_or(name)
+        .to_ascii_uppercase();
+    Some(match name.as_str() {
+        "NOFILE" | "OFILE" => libc::RLIMIT_NOFILE,
+        "NPROC" => libc::RLIMIT_NPROC,
+        "FSIZE" => libc::RLIMIT_FSIZE,
+        "AS" => libc::RLIMIT_AS,
+        "CPU" => libc::RLIMIT_CPU,
+        "CORE" => libc::RLIMIT_CORE,
+        "DATA" => libc::RLIMIT_DATA,
+        "STACK" => libc::RLIMIT_STACK,
+        "MEMLOCK" => libc::RLIMIT_MEMLOCK,
+        _ => return None,
+    })
+}
+
+fn parse_limit(value: &str) -> libc::rlim_t {
+    let v = value.trim();
+    if v.is_empty()
+        || v == "-"
+        || v.eq_ignore_ascii_case("infinity")
+        || v.eq_ignore_ascii_case("unlimited")
+    {
+        libc::RLIM_INFINITY
+    } else {
+        v.parse::<libc::rlim_t>().unwrap_or(libc::RLIM_INFINITY)
+    }
+}
+
+fn parse_rlimits(specs: &[String]) -> Vec<(libc::c_int, libc::rlimit)> {
+    let mut out = Vec::new();
+    for spec in specs {
+        let Some((resource, values)) = spec.split_once('=') else {
+            continue;
+        };
+        let Some(code) = rlimit_resource(resource) else {
+            diag(&format!("exec-agent: unknown rlimit '{}'", resource));
+            continue;
+        };
+        let (soft, hard) = match values.split_once(':') {
+            Some((s, h)) => (s, h),
+            None => (values, values),
+        };
+        out.push((
+            code,
+            libc::rlimit {
+                rlim_cur: parse_limit(soft),
+                rlim_max: parse_limit(hard),
+            },
+        ));
+    }
+    out
+}
+
+#[derive(serde::Deserialize)]
+struct MountPlan {
+    target: String,
+    kind: String,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    fstype: Option<String>,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    uid: Option<u32>,
+    #[serde(default)]
+    gid: Option<u32>,
+    #[serde(default)]
+    readonly: bool,
+}
+
+fn apply_one_mount(plan: &MountPlan) -> Result<(), String> {
+    let _ = std::fs::create_dir_all(&plan.target);
+    let target = std::ffi::CString::new(plan.target.clone()).map_err(|e| e.to_string())?;
+    let mut flags: libc::c_ulong = 0;
+    for opt in &plan.options {
+        match opt.as_str() {
+            "noexec" => flags |= libc::MS_NOEXEC as libc::c_ulong,
+            "nosuid" => flags |= libc::MS_NOSUID as libc::c_ulong,
+            "nodev" => flags |= libc::MS_NODEV as libc::c_ulong,
+            _ => {}
+        }
+    }
+    if plan.readonly {
+        flags |= libc::MS_RDONLY as libc::c_ulong;
+    }
+    let (source, fstype, extra) = match plan.kind.as_str() {
+        "tmpfs" => ("tmpfs".to_string(), "tmpfs".to_string(), 0u64),
+        "virtiofs" => (
+            plan.tag.clone().unwrap_or_default(),
+            "virtiofs".to_string(),
+            0u64,
+        ),
+        "file" => (
+            plan.source.clone().unwrap_or_default(),
+            String::new(),
+            libc::MS_BIND as u64,
+        ),
+        "disk" => (
+            plan.source.clone().unwrap_or_default(),
+            plan.fstype.clone().unwrap_or_else(|| "auto".to_string()),
+            0u64,
+        ),
+        other => return Err(format!("unknown mount kind '{other}'")),
+    };
+    let data = plan.options.join(",");
+    let c_source = std::ffi::CString::new(source).map_err(|e| e.to_string())?;
+    let c_fstype = std::ffi::CString::new(fstype).map_err(|e| e.to_string())?;
+    let c_data = std::ffi::CString::new(data).map_err(|e| e.to_string())?;
+    let rc = unsafe {
+        libc::mount(
+            c_source.as_ptr(),
+            target.as_ptr(),
+            c_fstype.as_ptr(),
+            flags | extra,
+            c_data.as_ptr() as *const libc::c_void,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    if plan.uid.is_some() || plan.gid.is_some() {
+        let uid = plan.uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
+        let gid = plan.gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
+        unsafe {
+            libc::chown(target.as_ptr(), uid, gid);
+        }
+    }
+    Ok(())
+}
+
+fn apply_startup_config() {
+    if let Ok(hostname) = std::env::var("NANOSB_HOSTNAME") {
+        if !hostname.is_empty() {
+            if let Ok(c) = std::ffi::CString::new(hostname.clone()) {
+                unsafe {
+                    if libc::sethostname(c.as_ptr(), hostname.len()) != 0 {
+                        diag("exec-agent: sethostname failed");
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mounts) = std::env::var("NANOSB_MOUNTS") {
+        match serde_json::from_str::<Vec<MountPlan>>(&mounts) {
+            Ok(plans) => {
+                for plan in &plans {
+                    if let Err(e) = apply_one_mount(plan) {
+                        diag(&format!("exec-agent: mount {} failed: {}", plan.target, e));
+                    }
+                }
+            }
+            Err(e) => diag(&format!("exec-agent: bad NANOSB_MOUNTS: {}", e)),
+        }
+    }
+}
+
 fn run(port: u32) -> Result<(), String> {
+    apply_startup_config();
     diag(&format!("exec-agent: listening on vsock port {}", port));
     // Match smolvm: the guest SERVES a vsock listener and the host connects in
     // (libkrun's `listen=true` acceptor bridges the host's unix socket to us).
@@ -348,6 +512,20 @@ impl Session {
         let mut pty_slave: Option<std::os::fd::RawFd> = None;
         let mut cmd = Command::new(&program);
         cmd.args(&args);
+
+        let parsed_limits = parse_rlimits(&req.rlimits);
+        if !parsed_limits.is_empty() {
+            unsafe {
+                cmd.pre_exec(move || {
+                    for (resource, limit) in &parsed_limits {
+                        if libc::setrlimit(*resource, limit) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+        }
 
         if req.tty {
             let (master, slave) = openpty(req.cols.max(1), req.rows.max(1))?;

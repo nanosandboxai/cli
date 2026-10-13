@@ -598,6 +598,8 @@ fn sandbox_info(ctx: &Ctx) -> SandboxInfo {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
+    let live = matches!(state.state, crate::supervisor::SandboxState::Running)
+        && state.pid.map(|p| p > 0).unwrap_or(false);
     SandboxInfo {
         name: ctx.sandbox_name.to_string(),
         state: map_state(state.state),
@@ -610,7 +612,7 @@ fn sandbox_info(ctx: &Ctx) -> SandboxInfo {
         exit_code: state.exit_code,
         started_at: Some(state.started_at),
         config_hash: Some(state.config_hash),
-        detached: true,
+        detached: !live,
         ephemeral: config
             .get("ephemeral")
             .and_then(|v| v.as_bool())
@@ -800,67 +802,121 @@ fn stream_attach(
     Ok(())
 }
 
+fn log_source_name(source: LogSource) -> &'static str {
+    match source {
+        LogSource::Stdout => "stdout",
+        LogSource::Stderr => "stderr",
+        LogSource::Pty => "pty",
+        LogSource::System => "system",
+    }
+}
+
+fn log_source_from_name(name: &str) -> LogSource {
+    match name {
+        "stderr" => LogSource::Stderr,
+        "pty" => LogSource::Pty,
+        "system" => LogSource::System,
+        _ => LogSource::Stdout,
+    }
+}
+
+/// Parse the `console.jsonl` sidecar (one `{cursor,source,data}` record per line).
+fn read_jsonl_logs(path: &std::path::Path) -> Vec<LogLine> {
+    std::fs::read_to_string(path)
+        .map(|content| {
+            content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .map(|v| LogLine {
+                    cursor: v.get("cursor").and_then(|x| x.as_u64()).unwrap_or(0),
+                    timestamp_ms: 0,
+                    source: log_source_from_name(
+                        v.get("source").and_then(|x| x.as_str()).unwrap_or("stdout"),
+                    ),
+                    data: v.get("data").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn handle_logs(
     stream: &mut UnixStream,
     ctx: &Ctx,
     spec: nanosb_protocol::LogsSpec,
 ) -> std::io::Result<()> {
-    let log_path = ctx.sandbox_dir.join("logs").join("console.log");
-    let content = std::fs::read_to_string(&log_path).unwrap_or_default();
-    let all: Vec<&str> = content.lines().collect();
-    let start = match spec.tail {
-        Some(n) if all.len() > n => all.len() - n,
-        _ => 0,
+    let logs_dir = ctx.sandbox_dir.join("logs");
+    let page = |all: Vec<LogLine>| -> (Vec<LogLine>, u64) {
+        let start = match spec.tail {
+            Some(n) if all.len() > n => all.len() - n,
+            _ => 0,
+        };
+        let start = spec
+            .cursor
+            .map(|c| (c as usize).min(all.len()))
+            .unwrap_or(start);
+        let next = all.len() as u64;
+        (all[start..].to_vec(), next)
     };
-    let start = spec
-        .cursor
-        .map(|c| (c as usize).min(all.len()))
-        .unwrap_or(start);
-    let lines: Vec<LogLine> = all[start..]
-        .iter()
-        .enumerate()
-        .map(|(i, l)| LogLine {
-            cursor: (start + i) as u64,
-            timestamp_ms: 0,
-            source: LogSource::Stdout,
-            data: (*l).to_string(),
-        })
-        .collect();
+
+    let mut lines = match spec.source {
+        Some(src) => {
+            let path = logs_dir.join(format!("{}.log", log_source_name(src)));
+            std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .enumerate()
+                .map(|(i, l)| LogLine {
+                    cursor: i as u64,
+                    timestamp_ms: 0,
+                    source: src,
+                    data: l.to_string(),
+                })
+                .collect::<Vec<_>>()
+        }
+        None => read_jsonl_logs(&logs_dir.join("console.jsonl")),
+    };
+
     if !spec.follow {
+        let (page_lines, next) = page(lines);
         return send(
             stream,
             &Response::Logs {
-                next_cursor: Some(all.len() as u64),
-                lines,
+                next_cursor: Some(next),
+                lines: page_lines,
             },
         );
     }
+
+    let (page_lines, _) = page(lines.clone());
     ack_ok(stream)?;
-    for line in lines {
-        send(stream, &Response::Event(StreamEvent::Log(line)))?;
+    for line in &page_lines {
+        send(stream, &Response::Event(StreamEvent::Log(line.clone())))?;
     }
-    let mut cursor = all.len();
-    let mut last_len = content.len();
+    let mut seen = lines.len();
+    lines.clear();
     while ctx.running.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(200));
-        let Ok(new_content) = std::fs::read_to_string(&log_path) else {
-            continue;
+        let fresh = match spec.source {
+            Some(src) => std::fs::read_to_string(logs_dir.join(format!("{}.log", log_source_name(src))))
+                .unwrap_or_default()
+                .lines()
+                .enumerate()
+                .map(|(i, l)| LogLine {
+                    cursor: i as u64,
+                    timestamp_ms: 0,
+                    source: src,
+                    data: l.to_string(),
+                })
+                .collect::<Vec<_>>(),
+            None => read_jsonl_logs(&logs_dir.join("console.jsonl")),
         };
-        if new_content.len() > last_len {
-            let tail = &new_content[last_len..];
-            for l in tail.lines() {
-                cursor += 1;
-                send(
-                    stream,
-                    &Response::Event(StreamEvent::Log(LogLine {
-                        cursor: (cursor - 1) as u64,
-                        timestamp_ms: 0,
-                        source: LogSource::Stdout,
-                        data: l.to_string(),
-                    })),
-                )?;
+        if fresh.len() > seen {
+            for line in &fresh[seen..] {
+                send(stream, &Response::Event(StreamEvent::Log(line.clone())))?;
             }
-            last_len = new_content.len();
+            seen = fresh.len();
         }
     }
     send(stream, &Response::Event(StreamEvent::Done))
@@ -1115,6 +1171,37 @@ fn send_agent_error(stream: &mut UnixStream, e: runtime::exec::ExecError) -> std
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonl_logs_preserve_per_line_source() {
+        let dir = std::env::temp_dir().join(format!("nsb-logsrc-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("console.jsonl");
+        std::fs::write(
+            &path,
+            "{\"cursor\":0,\"source\":\"stdout\",\"data\":\"out\"}\n\
+             {\"cursor\":1,\"source\":\"stderr\",\"data\":\"err\"}\n",
+        )
+        .unwrap();
+        let logs = read_jsonl_logs(&path);
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].source, LogSource::Stdout);
+        assert_eq!(logs[1].source, LogSource::Stderr);
+        assert_eq!(logs[1].data, "err");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_source_name_roundtrips() {
+        for s in [
+            LogSource::Stdout,
+            LogSource::Stderr,
+            LogSource::Pty,
+            LogSource::System,
+        ] {
+            assert_eq!(log_source_from_name(log_source_name(s)), s);
+        }
+    }
 
     #[test]
     fn apply_modify_writes_mutable_fields() {

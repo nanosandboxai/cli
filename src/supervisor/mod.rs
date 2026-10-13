@@ -491,6 +491,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
             current_log_size.clone(),
             logs_dir.clone(),
             subscribers.clone(),
+            nanosb_protocol::LogSource::Stdout,
         ),
         spawn_output_reader(
             stderr_read,
@@ -500,6 +501,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
             current_log_size.clone(),
             logs_dir.clone(),
             subscribers.clone(),
+            nanosb_protocol::LogSource::Stderr,
         ),
     ];
 
@@ -666,6 +668,15 @@ fn broadcast_line(subscribers: &Subscribers, line: &str) {
     }
 }
 
+fn log_source_str(source: nanosb_protocol::LogSource) -> &'static str {
+    match source {
+        nanosb_protocol::LogSource::Stdout => "stdout",
+        nanosb_protocol::LogSource::Stderr => "stderr",
+        nanosb_protocol::LogSource::Pty => "pty",
+        nanosb_protocol::LogSource::System => "system",
+    }
+}
+
 fn spawn_output_reader<R: Read + Send + 'static>(
     mut reader: R,
     running: Arc<AtomicBool>,
@@ -674,36 +685,66 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     current_log_size: Arc<Mutex<u64>>,
     logs_dir: PathBuf,
     subscribers: Subscribers,
+    source: nanosb_protocol::LogSource,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let source_name = log_source_str(source);
+        let mut source_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(logs_dir.join(format!("{source_name}.log")))
+            .ok();
+        let mut jsonl_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(logs_dir.join("console.jsonl"))
+            .ok();
+        let mut line_cursor: u64 = 0;
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             if !running.load(Ordering::SeqCst) {
-                // Drain remaining data before exit
                 let _ = reader.read(&mut buf);
                 break;
             }
 
             match reader.read(&mut buf) {
-                Ok(0) => break, // EOF
+                Ok(0) => break,
                 Ok(n) => {
                     let data = &buf[..n];
 
-                    // Write to scrollback
                     if let Ok(mut sb) = scrollback.lock() {
                         sb.push(data);
                     }
 
-                    // Write to log file with rotation
+                    if let Some(f) = source_file.as_mut() {
+                        let _ = f.write_all(data);
+                        let _ = f.flush();
+                    }
+
+                    pending.push_str(&String::from_utf8_lossy(data));
+                    while let Some(idx) = pending.find('\n') {
+                        let line: String = pending.drain(..=idx).collect();
+                        let line = line.trim_end_matches(['\n', '\r']);
+                        if let Some(j) = jsonl_file.as_mut() {
+                            let rec = serde_json::json!({
+                                "cursor": line_cursor,
+                                "source": source_name,
+                                "data": line,
+                            });
+                            let _ = writeln!(j, "{}", rec);
+                            let _ = j.flush();
+                        }
+                        line_cursor += 1;
+                    }
+
                     if let Ok(lf) = log_file.lock() {
                         if let Ok(mut size) = current_log_size.lock() {
                             *size += n as u64;
                             if *size >= LOG_MAX_BYTES {
                                 drop(lf);
                                 drop(size);
-                                // Rotate logs
                                 rotate_logs(&logs_dir);
-                                // Reopen log file
                                 let log_path = logs_dir.join("console.log");
                                 if let Ok(new_file) = std::fs::OpenOptions::new()
                                     .create(true)
@@ -721,7 +762,6 @@ fn spawn_output_reader<R: Read + Send + 'static>(
                             } else {
                                 drop(size);
                                 drop(lf);
-                                // Re-acquire and write
                                 if let Ok(mut lf2) = log_file.lock() {
                                     let _ = lf2.write_all(data);
                                     let _ = lf2.flush();

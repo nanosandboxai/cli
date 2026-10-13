@@ -189,10 +189,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             cursor,
             label,
         } => {
-            let sandboxes = list_sandboxes(all, label.as_deref(), limit, cursor.as_deref());
+            let (sandboxes, next_cursor) =
+                list_sandboxes(all, label.as_deref(), limit, cursor.as_deref());
             send(writer, &Response::List(SandboxList {
                     sandboxes,
-                    next_cursor: None,
+                    next_cursor,
                 }),
             )
         }
@@ -386,16 +387,16 @@ fn create(writer: &mut UnixStream, spec: nanosb_protocol::SandboxSpec) -> anyhow
             )
         }
     };
-    if sandboxes_dir()
-        .join(&name)
-        .join(nanosb_protocol::STATE_FILE)
-        .exists()
-        && !spec.replace
-    {
-        return send(writer, &Response::Error(ProtocolError::invalid_state(format!(
-                "sandbox '{name}' already exists (set replace=true)"
-            ))),
-        );
+    let dir = sandboxes_dir().join(&name);
+    if dir.join(nanosb_protocol::STATE_FILE).exists() {
+        if !spec.replace {
+            return send(writer, &Response::Error(ProtocolError::invalid_state(format!(
+                    "sandbox '{name}' already exists (set replace=true)"
+                ))),
+            );
+        }
+        stop_sandbox(&name);
+        let _ = std::fs::remove_dir_all(&dir);
     }
     nanosb_cli::helper::create_sandbox(&spec)?;
     send(writer, &Response::Ok {
@@ -531,8 +532,8 @@ fn list_sandboxes(
     all: bool,
     label: Option<&str>,
     limit: Option<usize>,
-    _cursor: Option<&str>,
-) -> Vec<SandboxInfo> {
+    cursor: Option<&str>,
+) -> (Vec<SandboxInfo>, Option<String>) {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(sandboxes_dir()) {
         for entry in entries.flatten() {
@@ -551,10 +552,22 @@ fn list_sandboxes(
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    if let Some(n) = limit {
-        out.truncate(n);
-    }
-    out
+    let start = match cursor {
+        Some(c) => out
+            .iter()
+            .position(|s| s.name.as_str() > c)
+            .unwrap_or(out.len()),
+        None => 0,
+    };
+    let mut page: Vec<SandboxInfo> = out[start..].to_vec();
+    let next_cursor = match limit {
+        Some(n) if page.len() > n => {
+            page.truncate(n);
+            page.last().map(|s| s.name.clone())
+        }
+        _ => None,
+    };
+    (page, next_cursor)
 }
 
 fn selector_matches(labels: &std::collections::HashMap<String, String>, selector: &str) -> bool {
@@ -586,6 +599,9 @@ fn sandbox_info(name: &str) -> Option<SandboxInfo> {
         .get("labels")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let pid = state.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32);
+    let live = matches!(state_enum, nanosb_protocol::SandboxState::Running)
+        && pid.map(|p| p > 0).unwrap_or(false);
     Some(SandboxInfo {
         name: name.to_string(),
         state: state_enum,
@@ -594,7 +610,7 @@ fn sandbox_info(name: &str) -> Option<SandboxInfo> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        pid: state.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32),
+        pid,
         exit_code: state
             .get("exit_code")
             .and_then(|v| v.as_i64())
@@ -607,7 +623,7 @@ fn sandbox_info(name: &str) -> Option<SandboxInfo> {
             .get("config_hash")
             .and_then(|v| v.as_str())
             .map(String::from),
-        detached: true,
+        detached: !live,
         ephemeral: config
             .get("ephemeral")
             .and_then(|v| v.as_bool())

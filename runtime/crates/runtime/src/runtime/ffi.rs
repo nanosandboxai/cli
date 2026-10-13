@@ -115,6 +115,59 @@ pub fn set_root(ctx_id: u32, root_path: &str) -> Result<(), String> {
     libkrun_sys::safe_set_root(ctx_id, root_path)
 }
 
+/// Map a disk-image format string to the libkrun `KRUN_DISK_FORMAT_*` code.
+///
+/// - `raw`   -> 0 (`KRUN_DISK_FORMAT_RAW`)
+/// - `qcow2` -> 1 (`KRUN_DISK_FORMAT_QCOW2`)
+/// - `vmdk`  -> 2 (`KRUN_DISK_FORMAT_VMDK`)
+pub fn disk_format(format: &str) -> Result<u32, String> {
+    match format {
+        "raw" => Ok(libkrun_sys::KRUN_DISK_FORMAT_RAW),
+        "qcow2" => Ok(libkrun_sys::KRUN_DISK_FORMAT_QCOW2),
+        "vmdk" => Ok(libkrun_sys::KRUN_DISK_FORMAT_VMDK),
+        other => Err(format!(
+            "unsupported disk format '{}' (expected raw, qcow2, or vmdk)",
+            other
+        )),
+    }
+}
+
+/// Attach a disk image as a block device.
+///
+/// `format` is one of `raw`, `qcow2`, or `vmdk` (mapped to the libkrun
+/// `KRUN_DISK_FORMAT_*` codes 0/1/2). `read_only` exposes the device
+/// read-only to the guest.
+pub fn add_disk(
+    ctx_id: u32,
+    block_id: &str,
+    path: &str,
+    format: &str,
+    read_only: bool,
+) -> Result<(), String> {
+    let fmt = disk_format(format)?;
+    libkrun_sys::safe_add_disk2(ctx_id, block_id, path, fmt, read_only)
+}
+
+/// Attach the root filesystem as a block device.
+///
+/// `krun_set_root_disk` only supports raw, read-write root disks. For
+/// non-raw formats or read-only roots, fall back to `krun_add_disk2` with
+/// the given block id (libkrun treats the first block device as the root).
+pub fn set_root_disk(
+    ctx_id: u32,
+    block_id: &str,
+    path: &str,
+    format: &str,
+    read_only: bool,
+) -> Result<(), String> {
+    let fmt = disk_format(format)?;
+    if fmt == libkrun_sys::KRUN_DISK_FORMAT_RAW && !read_only {
+        libkrun_sys::safe_set_root_disk(ctx_id, path)
+    } else {
+        libkrun_sys::safe_add_disk2(ctx_id, block_id, path, fmt, read_only)
+    }
+}
+
 pub fn add_virtiofs(ctx_id: u32, tag: &str, path: &str) -> Result<(), String> {
     libkrun_sys::safe_add_virtiofs(ctx_id, tag, path)
 }
