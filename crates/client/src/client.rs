@@ -92,6 +92,18 @@ impl SandboxClient {
         self.caps.contains(&cap)
     }
 
+    /// Ensure the connected helper supports `cap`, else return an error.
+    pub fn require(&self, cap: Capability) -> Result<()> {
+        if self.supports(cap) {
+            Ok(())
+        } else {
+            Err(Error::Unsupported(format!(
+                "helper does not advertise capability '{}'",
+                cap.as_str()
+            )))
+        }
+    }
+
     fn socket(&self) -> Result<(&PathBuf, &Option<String>)> {
         match &self.backend {
             Backend::Local { socket, sandbox } => Ok((socket, sandbox)),
@@ -292,7 +304,37 @@ impl Sandbox {
     pub fn kill(&self) -> Result<()> {
         self.ack(Kill {
             name: self.name_arg()?,
+            signal: None,
         })
+    }
+
+    /// Kill the sandbox with an explicit POSIX signal. `SIGTERM` requests a
+    /// graceful stop; `SIGKILL` force-stops. Requires the `signal` capability.
+    pub fn kill_with(&self, signal: i32) -> Result<()> {
+        self.client.require(Capability::Signal)?;
+        self.ack(Kill {
+            name: self.name_arg()?,
+            signal: Some(signal),
+        })
+    }
+
+    /// Block until the sandbox reaches a terminal state (`stopped`/`error`),
+    /// returning `(exit_code, exited_at_ms, state)`. `timeout` bounds the wait;
+    /// `None` waits indefinitely. Requires the `wait` capability.
+    pub fn wait(&self, timeout: Option<Duration>) -> Result<(i32, u64, SandboxState)> {
+        self.client.require(Capability::Wait)?;
+        let timeout_secs = timeout.map(|d| d.as_secs().max(1));
+        match self.client.call(&Wait {
+            name: self.name_arg()?,
+            timeout_secs,
+        })? {
+            Response::Wait {
+                exit_code,
+                exited_at_ms,
+                state,
+            } => Ok((exit_code, exited_at_ms, state)),
+            other => Err(Error::unexpected(format!("{other:?}"))),
+        }
     }
 
     pub fn remove(&self, force: bool) -> Result<()> {
@@ -522,6 +564,24 @@ impl Sandbox {
             name: self.name_arg()?,
         })?;
         Ok(AttachSession {
+            conn,
+            pending: std::collections::VecDeque::new(),
+        })
+    }
+
+    /// Open a tty `exec_stream` session: the command runs on a PTY and the
+    /// returned handle can send live stdin and resize frames on the same
+    /// connection while reading guest events. Requires the `exec_pty`
+    /// capability. The request's `tty` flag is forced on; set `cols`/`rows`
+    /// for the initial PTY size.
+    pub fn exec_pty(&self, mut req: ExecRequest) -> Result<ExecPtySession> {
+        self.client.require(Capability::ExecPty)?;
+        req.name = self.name_arg()?;
+        req.tty = true;
+        let mut conn = self.client.open()?;
+        conn.clear_read_timeout()?;
+        conn.call_stream(&ExecStream(Box::new(req)))?;
+        Ok(ExecPtySession {
             conn,
             pending: std::collections::VecDeque::new(),
         })
@@ -1035,6 +1095,66 @@ impl AttachSession {
     }
 }
 
+/// A live tty exec session: drive stdin/resize and read guest events on the
+/// same connection. `read_events` returns `None` once the stream ends.
+pub struct ExecPtySession {
+    conn: Connection,
+    pending: std::collections::VecDeque<GuestEvent>,
+}
+
+impl ExecPtySession {
+    /// Send raw bytes to the guest process's stdin.
+    pub fn send_input(&mut self, bytes: &[u8]) -> Result<()> {
+        let data = String::from_utf8_lossy(bytes).into_owned();
+        self.control(&ExecInput { data })
+    }
+
+    /// Resize the exec PTY.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.control(&ExecResize { cols, rows })
+    }
+
+    /// Send a control request and wait for its `ok` ack, buffering any
+    /// interleaved guest events so they are not lost or mistaken for the ack.
+    fn control(&mut self, req: &Request) -> Result<()> {
+        self.conn.send(req)?;
+        loop {
+            match self.conn.next_response()? {
+                None => return Err(Error::unexpected("exec pty stream closed before ack")),
+                Some(Response::Ok { .. }) => return Ok(()),
+                Some(Response::Error(e)) => return Err(Error::Protocol(e)),
+                Some(Response::Guest(ev)) => {
+                    if is_stream_end(&ev) {
+                        return Err(Error::unexpected("exec pty stream ended before ack"));
+                    }
+                    self.pending.push_back(ev);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// Read the next guest event, or `None` when the exec stream has ended.
+    pub fn read_events(&mut self) -> Result<Option<GuestEvent>> {
+        if let Some(ev) = self.pending.pop_front() {
+            return Ok(Some(ev));
+        }
+        while let Some(resp) = self.conn.next_response()? {
+            match resp {
+                Response::Guest(ev) => {
+                    if is_stream_end(&ev) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(ev));
+                }
+                Response::Error(e) => return Err(Error::Protocol(e)),
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// The default `$NANOSB_HOME` root, exposed for SDK parity.
 pub fn home() -> PathBuf {
     nanosb_home()
@@ -1149,6 +1269,52 @@ mod tests {
             }
         }
         assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn kill_with_sends_signal() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"ok","version":"1"}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        sb.kill_with(15).unwrap();
+    }
+
+    #[test]
+    fn wait_returns_terminal_exit() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"wait","exit_code":137,"exited_at_ms":1234,"state":"stopped"}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let (code, at, state) = sb.wait(Some(Duration::from_secs(30))).unwrap();
+        assert_eq!(code, 137);
+        assert_eq!(at, 1234);
+        assert_eq!(state, SandboxState::Stopped);
+    }
+
+    #[test]
+    fn exec_pty_session_drives_input_resize_and_reads_events() {
+        let h = FakeHelper::start();
+        h.push_script(r#"{"type":"ok","version":"1"}"#); // exec_stream ack
+        h.push_script(r#"{"type":"ok","version":"1"}"#); // send_input ack
+        h.push_script(r#"{"type":"ok","version":"1"}"#); // resize ack
+        h.push_script(r#"{"type":"guest","event":"stdout","data":"echo"}"#);
+        h.push_script(r#"{"type":"guest","event":"exit","code":0}"#);
+        let c = SandboxClient::connect(h.path()).unwrap();
+        let sb = c.sandbox("a");
+        let mut req = ExecRequest::new("cat");
+        req.cols = 120;
+        req.rows = 40;
+        let mut session = sb.exec_pty(req).unwrap();
+        session.send_input(b"x").unwrap();
+        session.resize(120, 40).unwrap();
+        let mut out = String::new();
+        while let Some(ev) = session.read_events().unwrap() {
+            if let GuestEvent::Stdout { data } = ev {
+                out.push_str(&data);
+            }
+        }
+        assert_eq!(out, "echo");
     }
 
     #[test]

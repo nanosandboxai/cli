@@ -151,6 +151,45 @@ pub struct ExecHandle {
     applied_timeout: Option<Duration>,
 }
 
+/// A write-only clone of an [`ExecHandle`]. Shares the underlying exec socket
+/// with the original handle, so it can be moved to another thread to feed
+/// stdin/resize/signal while the owner drains output events.
+pub struct ExecWriter {
+    stream: UnixStream,
+}
+
+impl ExecWriter {
+    /// Write bytes to the running process's stdin.
+    pub fn write_stdin(&mut self, data: &str) -> ExecResultT<()> {
+        let ctl = serde_json::json!({ "type": "stdin", "data": data });
+        write_frame_to(&mut self.stream, &serde_json::to_vec(&ctl).unwrap())
+    }
+
+    /// Close the process's stdin (signal EOF to the child).
+    pub fn close_stdin(&mut self) -> ExecResultT<()> {
+        let ctl = serde_json::json!({ "type": "stdin_close" });
+        write_frame_to(&mut self.stream, &serde_json::to_vec(&ctl).unwrap())
+    }
+
+    /// Send a POSIX signal number to the process.
+    pub fn signal(&mut self, signal: i32) -> ExecResultT<()> {
+        let ctl = serde_json::json!({ "type": "signal", "signal": signal });
+        write_frame_to(&mut self.stream, &serde_json::to_vec(&ctl).unwrap())
+    }
+
+    /// Resize the PTY.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> ExecResultT<()> {
+        let ctl = serde_json::json!({ "type": "resize", "cols": cols, "rows": rows });
+        write_frame_to(&mut self.stream, &serde_json::to_vec(&ctl).unwrap())
+    }
+
+    /// Kill the process.
+    pub fn kill(&mut self) -> ExecResultT<()> {
+        let ctl = serde_json::json!({ "type": "kill" });
+        write_frame_to(&mut self.stream, &serde_json::to_vec(&ctl).unwrap())
+    }
+}
+
 /// One decoded guest event.
 #[derive(Debug, Clone)]
 pub enum ExecEvent {
@@ -392,13 +431,28 @@ impl ExecHandle {
         self.write_frame(&serde_json::to_vec(&ctl).unwrap())
     }
 
-    fn write_frame(&mut self, body: &[u8]) -> ExecResultT<()> {
-        let len = (body.len() as u32).to_le_bytes();
-        self.stream.write_all(&len)?;
-        self.stream.write_all(body)?;
-        self.stream.flush()?;
-        Ok(())
+    /// Clone a write-only handle over the same exec socket. The clone shares
+    /// the underlying connection with this handle, so it can be moved to
+    /// another thread to feed stdin/resize/signal while this handle drains
+    /// output events.
+    pub fn try_clone_writer(&self) -> std::io::Result<ExecWriter> {
+        Ok(ExecWriter {
+            stream: self.stream.try_clone()?,
+        })
     }
+
+    fn write_frame(&mut self, body: &[u8]) -> ExecResultT<()> {
+        write_frame_to(&mut self.stream, body)
+    }
+}
+
+/// Write one length-prefixed JSON frame to an exec socket.
+fn write_frame_to(stream: &mut UnixStream, body: &[u8]) -> ExecResultT<()> {
+    let len = (body.len() as u32).to_le_bytes();
+    stream.write_all(&len)?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    Ok(())
 }
 
 /// Read a 4-byte little-endian length prefix; `None` on clean EOF.
@@ -774,6 +828,38 @@ mod tests {
         }
         assert!(out.contains("\"type\":\"stdin\""), "{}", out);
         assert!(out.contains("data-here"), "{}", out);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn writer_clone_feeds_stdin_and_resize_from_another_thread() {
+        let (path, h) = fake_agent(|s| {
+            let _req = read_frame(s);
+            let stdin = read_frame(s);
+            assert_eq!(stdin["type"], "stdin");
+            assert_eq!(stdin["data"], "typed");
+            let resize = read_frame(s);
+            assert_eq!(resize["type"], "resize");
+            assert_eq!(resize["cols"], 120);
+            assert_eq!(resize["rows"], 40);
+            write_frame(s, &serde_json::json!({"type":"exit","code":0}));
+        });
+        let client = ExecClient::new(&path);
+        let mut handle = client.start("cat", &[], ExecOptions::default()).unwrap();
+        let mut writer = handle.try_clone_writer().unwrap();
+        let t = std::thread::spawn(move || {
+            writer.write_stdin("typed").unwrap();
+            writer.resize(120, 40).unwrap();
+        });
+        // Drain until exit; the writer thread's frames are consumed by the agent.
+        loop {
+            match handle.next_event(None).unwrap() {
+                Some(ExecEvent::Exit { .. }) => break,
+                Some(_) => {}
+                None => break,
+            }
+        }
+        t.join().unwrap();
         h.join().unwrap();
     }
 

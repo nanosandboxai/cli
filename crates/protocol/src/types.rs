@@ -462,6 +462,47 @@ pub struct ModifySpec {
     pub labels: HashMap<String, String>,
 }
 
+/// In-guest OCI security context (Epic 9 C6 / #162).
+///
+/// This build enforces **no** in-guest seccomp / capabilities / apparmor, so
+/// the honest contract is fail-closed: any security-sensitive field the guest
+/// cannot enforce is rejected at create with a typed `unsupported` error.
+/// `run_as_user` is always allowed — the guest supports dropping to a user.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SecurityContext {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apparmor_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_new_privileges: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_user: Option<String>,
+}
+
+impl SecurityContext {
+    /// Fail-closed: return `Some(field_name)` for the first security-sensitive
+    /// field this runtime cannot enforce in-guest. An empty/default context
+    /// (`capabilities` empty, all others None) is accepted.
+    pub fn unenforced_field(&self) -> Option<&'static str> {
+        if !self.capabilities.is_empty() {
+            return Some("capabilities");
+        }
+        if self.seccomp_profile.as_deref().is_some_and(|s| !s.is_empty()) {
+            return Some("seccomp_profile");
+        }
+        if self.apparmor_profile.as_deref().is_some_and(|s| !s.is_empty()) {
+            return Some("apparmor_profile");
+        }
+        if self.no_new_privileges == Some(true) {
+            return Some("no_new_privileges");
+        }
+        None
+    }
+}
+
 /// A full sandbox creation specification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SandboxSpec {
@@ -532,6 +573,11 @@ pub struct SandboxSpec {
     /// Guest security profile.
     #[serde(default)]
     pub security_profile: SecurityProfile,
+    /// In-guest OCI security context. This build enforces no in-guest
+    /// seccomp/capabilities/apparmor; any unenforced field is rejected at
+    /// create (see [`SecurityContext::unenforced_field`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecurityContext>,
 }
 
 impl SandboxSpec {
@@ -565,6 +611,7 @@ impl SandboxSpec {
             registry: Vec::new(),
             stat_virtualization: None,
             security_profile: SecurityProfile::default(),
+            security: None,
         }
     }
 }
@@ -613,5 +660,71 @@ mod tests {
         let spec: SandboxSpec = serde_json::from_str(legacy).unwrap();
         assert_eq!(spec.hostname, None);
         assert!(spec.secret_env.is_empty());
+    }
+
+    #[test]
+    fn security_context_default_is_accepted() {
+        assert_eq!(SecurityContext::default().unenforced_field(), None);
+    }
+
+    #[test]
+    fn security_context_rejects_each_sensitive_field() {
+        let mut ctx = SecurityContext::default();
+        ctx.capabilities.push("NET_ADMIN".into());
+        assert_eq!(ctx.unenforced_field(), Some("capabilities"));
+
+        let mut ctx = SecurityContext::default();
+        ctx.seccomp_profile = Some("default".into());
+        assert_eq!(ctx.unenforced_field(), Some("seccomp_profile"));
+
+        let mut ctx = SecurityContext::default();
+        ctx.apparmor_profile = Some("docker-default".into());
+        assert_eq!(ctx.unenforced_field(), Some("apparmor_profile"));
+
+        let mut ctx = SecurityContext::default();
+        ctx.no_new_privileges = Some(true);
+        assert_eq!(ctx.unenforced_field(), Some("no_new_privileges"));
+    }
+
+    #[test]
+    fn security_context_run_as_user_is_allowed() {
+        let mut ctx = SecurityContext::default();
+        ctx.run_as_user = Some("1000".into());
+        assert_eq!(ctx.unenforced_field(), None);
+    }
+
+    #[test]
+    fn security_context_empty_profile_strings_are_accepted() {
+        let mut ctx = SecurityContext::default();
+        ctx.seccomp_profile = Some(String::new());
+        ctx.apparmor_profile = Some(String::new());
+        ctx.no_new_privileges = Some(false);
+        assert_eq!(ctx.unenforced_field(), None);
+    }
+
+    #[test]
+    fn sandbox_spec_security_roundtrips() {
+        let mut spec = SandboxSpec::new("alpine");
+        spec.security = Some(SecurityContext {
+            capabilities: vec!["NET_ADMIN".into()],
+            seccomp_profile: Some("default".into()),
+            apparmor_profile: None,
+            no_new_privileges: Some(true),
+            run_as_user: Some("1000".into()),
+        });
+        let s = serde_json::to_string(&spec).unwrap();
+        let back: SandboxSpec = serde_json::from_str(&s).unwrap();
+        let sec = back.security.as_ref().unwrap();
+        assert_eq!(sec.capabilities, vec!["NET_ADMIN"]);
+        assert_eq!(sec.seccomp_profile.as_deref(), Some("default"));
+        assert_eq!(sec.no_new_privileges, Some(true));
+        assert_eq!(sec.run_as_user.as_deref(), Some("1000"));
+    }
+
+    #[test]
+    fn sandbox_spec_legacy_json_without_security_still_parses() {
+        let legacy = r#"{"name":"a","image":"alpine","detached":true,"replace":false}"#;
+        let spec: SandboxSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(spec.security, None);
     }
 }

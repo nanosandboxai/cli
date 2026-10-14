@@ -195,7 +195,8 @@ canonical SDK operation name (reference: `nanosb-client` / `nanosandbox-python`)
 | `list` | lifecycle | `client.list(all)` |
 | `start` | lifecycle | `sandbox.start()` |
 | `stop` | lifecycle | `sandbox.stop(force)` |
-| `kill` | lifecycle | `sandbox.kill()` |
+| `kill` | lifecycle/signal | `sandbox.kill()` / `sandbox.kill_with(signal)` |
+| `wait` | wait | `sandbox.wait(timeout)` |
 | `remove` | lifecycle | `sandbox.remove(force)` |
 | `drain` | lifecycle | `sandbox.drain()` |
 | `touch` | lifecycle | `sandbox.touch()` |
@@ -205,7 +206,9 @@ canonical SDK operation name (reference: `nanosb-client` / `nanosandbox-python`)
 | `status` | lifecycle | `sandbox.state()` |
 | `ping` | lifecycle | `client.ping()` |
 | `exec` | exec | `sandbox.exec(command, args)` / `exec_with(req)` |
-| `exec_stream` | exec | `sandbox.exec_stream(req, on_event)` |
+| `exec_stream` | exec | `sandbox.exec_stream(req, on_event)` / `sandbox.exec_pty(req)` when `tty` |
+| `exec_input` | exec | tty `exec_stream` live stdin (raw if unwrapped) |
+| `exec_resize` | exec | tty `exec_stream` PTY resize (raw if unwrapped) |
 | `shell` | exec | `sandbox.shell(script)` |
 | `attach` | exec | `sandbox.attach(on_event)` / `attach_session()` |
 | `attach_input` | exec | `attach_session.send_input(bytes)` (raw if unwrapped) |
@@ -292,6 +295,7 @@ The driver interprets these keys (all optional; unknown keys ignored):
 | `snapshot_created`, `snapshots_contain` | Expected snapshot ids. |
 | `attach_events`, `attach_exit_code` | Expected guest event sequence and exit code of an attach. |
 | `error_code`, `second_error_code` | Expected error code(s) of the first/second erroring step. |
+| `wait_exit_code`, `wait_state` | Expected terminal exit code / state of the `wait` result. |
 | `error_message_contains` | Substring that must appear in the error message. |
 | `expects_timeout`, `timeout_code` | The driver must not send the timeout step's request and must observe a `timeout` error. |
 | `expects_unsupported`, `unsupported_verb` | The handshake must omit the capability and the verb must fail with `unsupported`. |

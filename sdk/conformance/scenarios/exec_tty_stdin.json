@@ -1,0 +1,19 @@
+{
+  "id": "exec_tty_stdin",
+  "description": "tty exec_stream is accepted, streams stdout, and exits with a code; the same-connection live stdin/resize frames (exec_input/exec_resize) cannot be modelled by the scripted request/response harness and are exercised end-to-end by runtime/scripts/linux-kvm-verbs-e2e.py on a live Linux/KVM VM",
+  "capabilities": ["exec", "exec_pty"],
+  "steps": [
+    {
+      "expect": { "type": "exec_stream", "name": "box", "command": "echo", "args": ["hi"], "tty": true },
+      "respond": [
+        { "type": "ok", "version": "1.0.0" },
+        { "type": "guest", "event": "stdout", "data": "hi\n" },
+        { "type": "guest", "event": "exit", "code": 0 }
+      ]
+    }
+  ],
+  "assert": {
+    "exit_code": 0,
+    "stdout_contains": ["hi"]
+  }
+}

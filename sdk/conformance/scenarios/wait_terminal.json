@@ -1,0 +1,15 @@
+{
+  "id": "wait_terminal",
+  "description": "blocking wait returns the terminal exit code and timestamp",
+  "capabilities": ["lifecycle", "wait"],
+  "steps": [
+    {
+      "expect": { "type": "wait", "name": "box" },
+      "respond": { "type": "wait", "exit_code": 137, "exited_at_ms": 1234, "state": "stopped" }
+    }
+  ],
+  "assert": {
+    "wait_exit_code": 137,
+    "wait_state": "stopped"
+  }
+}

@@ -33,6 +33,12 @@ pub enum Capability {
     Handles,
     /// ephemeral sandboxes.
     Ephemeral,
+    /// kill with an explicit signal (SIGTERM/SIGKILL).
+    Signal,
+    /// blocking wait verb.
+    Wait,
+    /// exec_stream with a PTY + live stdin/resize frames.
+    ExecPty,
 }
 
 impl Capability {
@@ -50,6 +56,9 @@ impl Capability {
             Capability::Networking,
             Capability::Handles,
             Capability::Ephemeral,
+            Capability::Signal,
+            Capability::Wait,
+            Capability::ExecPty,
         ]
     }
 
@@ -67,6 +76,9 @@ impl Capability {
             Capability::Networking => "networking",
             Capability::Handles => "handles",
             Capability::Ephemeral => "ephemeral",
+            Capability::Signal => "signal",
+            Capability::Wait => "wait",
+            Capability::ExecPty => "exec_pty",
         }
     }
 }

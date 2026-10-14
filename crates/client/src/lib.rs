@@ -26,7 +26,7 @@ pub mod error;
 pub mod testserver;
 
 pub use builder::{SandboxBuilder, VolumeBuilder};
-pub use client::{home, AttachSession, Backend, Sandbox, SandboxClient};
+pub use client::{home, AttachSession, Backend, ExecPtySession, Sandbox, SandboxClient};
 pub use connection::{default_helper_socket, sandbox_control_socket, sandbox_dir};
 pub use error::{Error, Result};
 

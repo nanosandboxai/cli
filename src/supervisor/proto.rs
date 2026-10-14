@@ -7,20 +7,20 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nanosb_protocol::{
     base64_encode, Capability, ExecResult, FsWriteStreamSpec, GuestEvent, HelloRequest,
     HelloResponse, LogLine, LogSource, Metrics, ModifySpec, Request, Response, SandboxInfo,
     SecretRef, SecretSetSpec, StreamEvent, PROTOCOL_VERSION,
 };
-use runtime::exec::{ExecClient, ExecHandle, ExecOptions};
+use runtime::exec::{ExecClient, ExecEvent, ExecHandle, ExecOptions};
 
 use crate::supervisor::secrets::SecretStore;
 use crate::supervisor::volumes::{VolumeError, VolumeRegistry};
-use crate::supervisor::{read_current_state, ScrollbackRing, Subscribers};
+use crate::supervisor::{read_current_state, now_ms, ScrollbackRing, Subscribers};
 
 fn map_state(s: crate::supervisor::SandboxState) -> nanosb_protocol::SandboxState {
     use crate::supervisor::SandboxState as S;
@@ -49,6 +49,8 @@ pub struct Ctx<'a> {
     pub secrets: &'a SecretStore,
     pub volumes: &'a VolumeRegistry,
     pub exec_session: &'a Mutex<Option<ExecHandle>>,
+    /// In-flight `wait` handlers; the supervisor drains them before exiting.
+    pub active_waiters: &'a AtomicUsize,
 }
 
 const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -65,6 +67,9 @@ fn capabilities() -> Vec<Capability> {
         Capability::Ephemeral,
         Capability::Secrets,
         Capability::Volumes,
+        Capability::Signal,
+        Capability::Wait,
+        Capability::ExecPty,
     ]
 }
 
@@ -129,10 +134,20 @@ pub fn serve(
 }
 
 fn send(stream: &mut UnixStream, resp: &Response) -> std::io::Result<()> {
-    let line = serde_json::to_string(resp).unwrap_or_default();
-    stream.write_all(line.as_bytes())?;
-    stream.write_all(b"\n")?;
+    let mut buf = serde_json::to_string(resp).unwrap_or_default().into_bytes();
+    buf.push(b'\n');
+    stream.write_all(&buf)?;
     stream.flush()
+}
+
+/// Write one frame while holding `out`'s lock, as a single `write_all`, so two
+/// threads sharing the client socket cannot splice frames on the wire.
+fn send_locked(out: &Mutex<UnixStream>, resp: &Response) -> std::io::Result<()> {
+    let mut buf = serde_json::to_string(resp).unwrap_or_default().into_bytes();
+    buf.push(b'\n');
+    let mut s = out.lock().unwrap_or_else(|e| e.into_inner());
+    s.write_all(&buf)?;
+    s.flush()
 }
 
 fn send_error(stream: &mut UnixStream, code: nanosb_protocol::ErrorCode, msg: impl Into<String>) {
@@ -198,7 +213,8 @@ fn handle(
             }),
         ),
         Request::Stop { force, .. } => ack_stop(stream, ctx, force),
-        Request::Kill { .. } => ack_stop(stream, ctx, true),
+        Request::Kill { signal, .. } => handle_kill(stream, ctx, signal),
+        Request::Wait { timeout_secs, .. } => handle_wait(stream, ctx, timeout_secs),
         Request::Remove { force, .. } => ack_stop(stream, ctx, force),
         Request::Drain { .. } => ack_stop(stream, ctx, false),
         Request::Touch { .. } => send(
@@ -250,11 +266,14 @@ fn handle(
                         )
                     })
                     .collect(),
+                tty: spec.tty,
+                cols: spec.cols,
+                rows: spec.rows,
                 ..ExecOptions::default()
             };
             let args: Vec<String> = spec.args.clone();
             let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-            stream_exec_stream(stream, ctx, &spec.command, &argrefs, opts)
+            stream_exec_stream(stream, reader, ctx, &spec.command, &argrefs, opts)
         }
         Request::Attach { .. } | Request::AttachDefault { .. } => {
             stream_attach(stream, reader, ctx)
@@ -405,6 +424,22 @@ fn handle(
         Request::MetricsStream { interval_ms, .. } => stream_metrics(stream, ctx, interval_ms),
         Request::AttachInput { data } => attach_input(stream, ctx, data),
         Request::AttachResize { cols, rows } => attach_resize(stream, ctx, cols, rows),
+        Request::ExecInput { .. } => {
+            send_error(
+                stream,
+                ErrorCode::InvalidState,
+                "exec_input frame without an open tty exec_stream",
+            );
+            Ok(())
+        }
+        Request::ExecResize { .. } => {
+            send_error(
+                stream,
+                ErrorCode::InvalidState,
+                "exec_resize frame without an open tty exec_stream",
+            );
+            Ok(())
+        }
     }
 }
 
@@ -423,6 +458,66 @@ fn ack_stop(stream: &mut UnixStream, ctx: &Ctx, force: bool) -> std::io::Result<
     }
     ctx.stop_requested.store(true, Ordering::SeqCst);
     ack_ok(stream)
+}
+
+/// `kill` with an optional signal. `None`/`SIGKILL` force-stop; `SIGTERM`
+/// requests a graceful stop; any other signal is `unsupported` (never silently
+/// ignored).
+fn handle_kill(stream: &mut UnixStream, ctx: &Ctx, signal: Option<i32>) -> std::io::Result<()> {
+    match signal {
+        None | Some(libc::SIGKILL) => ack_stop(stream, ctx, true),
+        Some(libc::SIGTERM) => ack_stop(stream, ctx, false),
+        Some(other) => {
+            send_error(
+                stream,
+                nanosb_protocol::ErrorCode::Unsupported,
+                format!(
+                    "kill signal {other} is not supported; use SIGTERM (15) or SIGKILL (9)"
+                ),
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Block until the sandbox reaches a terminal state (`stopped`/`error`),
+/// polling the persisted state every ~50ms. Returns the terminal exit code and
+/// exit timestamp; an already-terminal sandbox returns immediately. A
+/// `timeout_secs` budget that elapses answers `timeout`.
+fn handle_wait(
+    stream: &mut UnixStream,
+    ctx: &Ctx,
+    timeout_secs: Option<u64>,
+) -> std::io::Result<()> {
+    ctx.active_waiters.fetch_add(1, Ordering::SeqCst);
+    let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+    loop {
+        let state = read_current_state(ctx.sandbox_dir);
+        if matches!(
+            state.state,
+            crate::supervisor::SandboxState::Stopped | crate::supervisor::SandboxState::Error
+        ) {
+            let exited_at_ms = state.exited_at_ms.unwrap_or_else(now_ms);
+            let exit_code = state.exit_code.unwrap_or(255);
+            ctx.active_waiters.fetch_sub(1, Ordering::SeqCst);
+            return send(
+                stream,
+                &Response::Wait {
+                    exit_code,
+                    exited_at_ms,
+                    state: map_state(state.state),
+                },
+            );
+        }
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                ctx.active_waiters.fetch_sub(1, Ordering::SeqCst);
+                send_error(stream, nanosb_protocol::ErrorCode::Timeout, "wait timed out");
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn signal_vm(stream: &mut UnixStream, ctx: &Ctx, sig: i32) -> std::io::Result<()> {
@@ -768,6 +863,7 @@ fn exec_default(
 
 fn stream_exec_stream(
     stream: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
     ctx: &Ctx,
     command: &str,
     args: &[&str],
@@ -783,22 +879,142 @@ fn stream_exec_stream(
         return Ok(());
     }
     ack_ok(stream)?;
-    let writer = stream.try_clone()?;
-    let mut writer = writer;
-    let code = c.exec_stream(command, args, opts, |chunk| {
-        let ev = match chunk.stream {
-            runtime::exec::Stream::Stdout => GuestEvent::Stdout { data: chunk.data },
-            runtime::exec::Stream::Stderr => GuestEvent::Stderr { data: chunk.data },
+    let tty = opts.tty;
+    let mut handle = match c.start(command, args, opts) {
+        Ok(h) => h,
+        Err(e) => {
+            send_error(
+                stream,
+                nanosb_protocol::ErrorCode::Io,
+                format!("cannot start exec: {e}"),
+            );
+            return Ok(());
+        }
+    };
+
+    // All client-bound frames (guest output, input acks, terminal) go through
+    // one locked writer so the output loop and the tty input reader cannot
+    // interleave frames on the wire.
+    let out = Arc::new(Mutex::new(stream.try_clone()?));
+    let done = Arc::new(AtomicBool::new(false));
+
+    if tty {
+        let writer = match handle.try_clone_writer() {
+            Ok(w) => w,
+            Err(e) => {
+                send_error(
+                    stream,
+                    nanosb_protocol::ErrorCode::Io,
+                    format!("cannot clone exec writer: {e}"),
+                );
+                return Ok(());
+            }
         };
-        let _ = send(&mut writer, &Response::Guest(ev));
-    });
-    let exit = match code {
-        Ok(c) => GuestEvent::Exit { code: c },
-        Err(e) => GuestEvent::Error {
-            message: e.to_string(),
+        // Share `serve`'s BufReader so frames pipelined behind the exec_stream
+        // request (still in its buffer) are not lost to a raw-fd clone.
+        let _ = reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(200)));
+        let out_for_input = out.clone();
+        let done_for_input = done.clone();
+        let input_reader = &mut *reader;
+        std::thread::scope(|scope| -> std::io::Result<()> {
+            scope.spawn(move || {
+                exec_input_reader(input_reader, writer, &out_for_input, &done_for_input);
+            });
+            let result = exec_output_loop(&mut handle, &out);
+            done.store(true, Ordering::SeqCst);
+            result
+        })?;
+        let _ = reader.get_ref().set_read_timeout(None);
+    } else {
+        exec_output_loop(&mut handle, &out)?;
+    }
+    Ok(())
+}
+
+/// Stream guest output frames to the client until the exec terminates.
+fn exec_output_loop(handle: &mut ExecHandle, out: &Mutex<UnixStream>) -> std::io::Result<()> {
+    let (code, err_msg) = loop {
+        match handle.next_event(None) {
+            Ok(Some(ExecEvent::Output(chunk))) => {
+                let ev = match chunk.stream {
+                    runtime::exec::Stream::Stdout => GuestEvent::Stdout { data: chunk.data },
+                    runtime::exec::Stream::Stderr => GuestEvent::Stderr { data: chunk.data },
+                };
+                send_locked(out, &Response::Guest(ev))?;
+            }
+            Ok(Some(ExecEvent::Exit { code: c })) => break (Some(c), None),
+            Ok(Some(ExecEvent::Error { message })) => break (None, Some(message)),
+            Ok(Some(ExecEvent::Started { .. })) => {}
+            Ok(None) => break (None, None),
+            Err(e) => break (None, Some(e.to_string())),
+        }
+    };
+    let exit = match (code, err_msg) {
+        (Some(c), _) => GuestEvent::Exit { code: c },
+        (None, Some(m)) => GuestEvent::Error { message: m },
+        (None, None) => GuestEvent::Error {
+            message: "exec stream closed before exit".to_string(),
         },
     };
-    send(stream, &Response::Guest(exit))
+    send_locked(out, &Response::Guest(exit))
+}
+
+/// Forward `exec_input`/`exec_resize` frames from the shared control reader to
+/// the exec handle while [`exec_output_loop`] streams. Acks only a successful
+/// write; a failed write errors the client instead of a false `ok`.
+fn exec_input_reader(
+    reader: &mut BufReader<UnixStream>,
+    mut writer: runtime::exec::ExecWriter,
+    out: &Mutex<UnixStream>,
+    done: &AtomicBool,
+) {
+    let mut line = String::new();
+    loop {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let parsed = serde_json::from_str::<Request>(line.trim());
+                line.clear();
+                let Ok(req) = parsed else { continue };
+                let result = match req {
+                    Request::ExecInput { data } => writer.write_stdin(&data),
+                    Request::ExecResize { cols, rows } => writer.resize(cols, rows),
+                    _ => continue,
+                };
+                match result {
+                    Ok(()) => {
+                        let _ = send_locked(
+                            out,
+                            &Response::Ok {
+                                version: HELPER_VERSION.to_string(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        let _ = send_locked(
+                            out,
+                            &Response::Error(nanosb_protocol::ProtocolError::io(format!(
+                                "exec input failed: {e}"
+                            ))),
+                        );
+                        break;
+                    }
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 fn stream_attach(
@@ -1247,6 +1463,176 @@ fn send_agent_error(stream: &mut UnixStream, e: runtime::exec::ExecError) -> std
 mod tests {
     use super::*;
 
+    struct TestHarness {
+        dir: std::path::PathBuf,
+        stop_requested: AtomicBool,
+        force_stop: AtomicBool,
+        running: AtomicBool,
+        active_waiters: AtomicUsize,
+        scrollback: Arc<Mutex<ScrollbackRing>>,
+        subscribers: Subscribers,
+        stdin_writer: Arc<Mutex<std::io::PipeWriter>>,
+        next_subscriber_id: Arc<AtomicU64>,
+        secrets: SecretStore,
+        volumes: VolumeRegistry,
+        exec_session: Mutex<Option<ExecHandle>>,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("nsb-proto-{}-{}", std::process::id(), n));
+            let _ = std::fs::create_dir_all(&dir);
+            let scrollback = Arc::new(Mutex::new(ScrollbackRing::new(1024)));
+            let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+            let (_, stdin_writer) = std::io::pipe().unwrap();
+            let stop_requested = AtomicBool::new(false);
+            let force_stop = AtomicBool::new(false);
+            let running = AtomicBool::new(true);
+            let next_subscriber_id = Arc::new(AtomicU64::new(0));
+            let secrets = SecretStore::new();
+            let volumes = VolumeRegistry::with_root(dir.join("volumes"));
+            let exec_session = Mutex::new(None::<ExecHandle>);
+            let active_waiters = AtomicUsize::new(0);
+            Self {
+                dir,
+                stop_requested,
+                force_stop,
+                running,
+                active_waiters,
+                scrollback,
+                subscribers,
+                stdin_writer: Arc::new(Mutex::new(stdin_writer)),
+                next_subscriber_id,
+                secrets,
+                volumes,
+                exec_session,
+            }
+        }
+
+        fn ctx(&self) -> Ctx<'_> {
+            Ctx {
+                sandbox_dir: &self.dir,
+                sandbox_name: "t",
+                started_at: "now",
+                config_hash: "hash",
+                scrollback: &self.scrollback,
+                subscribers: &self.subscribers,
+                stdin_writer: self.stdin_writer.clone(),
+                stop_requested: &self.stop_requested,
+                force_stop: &self.force_stop,
+                running: &self.running,
+                next_subscriber_id: &self.next_subscriber_id,
+                secrets: &self.secrets,
+                volumes: &self.volumes,
+                exec_session: &self.exec_session,
+                active_waiters: &self.active_waiters,
+            }
+        }
+
+        fn write_state(&self, state: crate::supervisor::SandboxState, exit_code: Option<i32>) {
+            let s = crate::supervisor::SupervisorState {
+                sandbox_name: "t".into(),
+                state,
+                pid: None,
+                exit_code,
+                started_at: "now".into(),
+                config_hash: "hash".into(),
+                exited_at_ms: Some(1234),
+                supervisor_pid: None,
+            };
+            crate::supervisor::write_state(&self.dir, &s);
+        }
+    }
+
+    impl Drop for TestHarness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn pair() -> (UnixStream, UnixStream) {
+        UnixStream::pair().unwrap()
+    }
+
+    fn recv_resp(stream: &mut UnixStream) -> Response {
+        let mut line = String::new();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    #[test]
+    fn kill_with_unsupported_signal_errors() {
+        let h = TestHarness::new();
+        let ctx = h.ctx();
+        let (mut server, mut client) = pair();
+        handle_kill(&mut server, &ctx, Some(99)).unwrap();
+        let resp = recv_resp(&mut client);
+        assert!(matches!(
+            resp,
+            Response::Error(e) if e.code == nanosb_protocol::ErrorCode::Unsupported
+        ));
+        assert!(!h.stop_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn kill_with_sigterm_is_graceful() {
+        let h = TestHarness::new();
+        let ctx = h.ctx();
+        let (mut server, mut client) = pair();
+        handle_kill(&mut server, &ctx, Some(libc::SIGTERM)).unwrap();
+        assert!(matches!(recv_resp(&mut client), Response::Ok { .. }));
+        assert!(h.stop_requested.load(Ordering::SeqCst));
+        assert!(!h.force_stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn kill_without_signal_force_stops() {
+        let h = TestHarness::new();
+        let ctx = h.ctx();
+        let (mut server, mut client) = pair();
+        handle_kill(&mut server, &ctx, None).unwrap();
+        assert!(matches!(recv_resp(&mut client), Response::Ok { .. }));
+        assert!(h.stop_requested.load(Ordering::SeqCst));
+        assert!(h.force_stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn wait_on_already_terminal_state_returns_immediately() {
+        let h = TestHarness::new();
+        h.write_state(crate::supervisor::SandboxState::Stopped, Some(137));
+        let ctx = h.ctx();
+        let (mut server, mut client) = pair();
+        handle_wait(&mut server, &ctx, Some(5)).unwrap();
+        let resp = recv_resp(&mut client);
+        assert!(matches!(
+            resp,
+            Response::Wait {
+                exit_code: 137,
+                exited_at_ms: 1234,
+                state: nanosb_protocol::SandboxState::Stopped
+            }
+        ));
+        assert_eq!(h.active_waiters.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn wait_times_out_when_not_terminal() {
+        let h = TestHarness::new();
+        h.write_state(crate::supervisor::SandboxState::Running, None);
+        let ctx = h.ctx();
+        let (mut server, mut client) = pair();
+        handle_wait(&mut server, &ctx, Some(1)).unwrap();
+        let resp = recv_resp(&mut client);
+        assert!(matches!(
+            resp,
+            Response::Error(e) if e.code == nanosb_protocol::ErrorCode::Timeout
+        ));
+        assert_eq!(h.active_waiters.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn jsonl_logs_preserve_per_line_source() {
         let dir = std::env::temp_dir().join(format!("nsb-logsrc-{}", std::process::id()));
@@ -1403,6 +1789,7 @@ mod tests {
         let secrets = SecretStore::new();
         let volumes = VolumeRegistry::with_root(dir.join("volumes"));
         let exec_session = Mutex::new(None::<ExecHandle>);
+        let active_waiters = AtomicUsize::new(0);
         let ctx = Ctx {
             sandbox_dir: &dir,
             sandbox_name: "t",
@@ -1418,6 +1805,7 @@ mod tests {
             secrets: &secrets,
             volumes: &volumes,
             exec_session: &exec_session,
+            active_waiters: &active_waiters,
         };
 
         let (server, client) = UnixStream::pair().unwrap();

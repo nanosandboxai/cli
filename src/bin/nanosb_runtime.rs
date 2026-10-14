@@ -220,7 +220,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             require_name(name)?,
             Request::Stop { name: None, force },
         ),
-        Request::Kill { name } => proxy(writer, require_name(name)?, Request::Kill { name: None }),
+        Request::Kill { name, signal } => proxy(
+            writer,
+            require_name(name)?,
+            Request::Kill { name: None, signal },
+        ),
         Request::Drain { name } => {
             proxy(writer, require_name(name)?, Request::Drain { name: None })
         }
@@ -408,7 +412,27 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
     }
 }
 
+/// Fail-closed OCI security-context check (Epic 9 C6 / #162): name the first
+/// security-sensitive field this build cannot enforce in-guest, if any.
+fn security_rejection(spec: &nanosb_protocol::SandboxSpec) -> Option<ProtocolError> {
+    spec.security
+        .as_ref()
+        .and_then(|s| s.unenforced_field())
+        .map(|field| {
+            ProtocolError::unsupported(format!(
+                "security context field '{field}' is unsupported: this build enforces no in-guest security context"
+            ))
+        })
+}
+
 fn create(writer: &mut UnixStream, spec: nanosb_protocol::SandboxSpec) -> anyhow::Result<()> {
+    // This handler is the single central entry point where a protocol
+    // `SandboxSpec` becomes a boot; the CLI/supervisor create path
+    // (`cmd_run_next`/`cmd_apply`, `deploy_plan_for`) builds a
+    // `runtime::config::SandboxConfig` directly and has no `SandboxSpec` surface.
+    if let Some(err) = security_rejection(&spec) {
+        return send(writer, &Response::Error(err));
+    }
     let name = match spec.name.clone() {
         Some(n) => n,
         None => {
@@ -733,5 +757,34 @@ fn stop_sandbox(name: &str) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::security_rejection;
+    use nanosb_protocol::{ErrorCode, SandboxSpec, SecurityContext};
+
+    #[test]
+    fn security_rejection_names_the_unenforced_field() {
+        let mut spec = SandboxSpec::new("alpine");
+        spec.security = Some(SecurityContext {
+            seccomp_profile: Some("default".into()),
+            ..SecurityContext::default()
+        });
+        let err = security_rejection(&spec).expect("should reject");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert!(err.message.contains("seccomp_profile"), "{}", err.message);
+    }
+
+    #[test]
+    fn security_rejection_allows_default_and_run_as_user() {
+        let mut spec = SandboxSpec::new("alpine");
+        assert!(security_rejection(&spec).is_none());
+        spec.security = Some(SecurityContext {
+            run_as_user: Some("1000".into()),
+            ..SecurityContext::default()
+        });
+        assert!(security_rejection(&spec).is_none());
     }
 }
