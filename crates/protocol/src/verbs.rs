@@ -47,6 +47,18 @@ pub enum Request {
     Kill {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// POSIX signal to deliver. `None` (or `SIGKILL`) force-stops; `SIGTERM`
+        /// requests a graceful stop. Any other signal is `unsupported`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<i32>,
+    },
+    /// Block until the sandbox reaches a terminal state (`stopped`/`error`).
+    Wait {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Max seconds to wait; `None` waits indefinitely.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
     },
     Remove {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +118,15 @@ pub enum Request {
         data: String,
     },
     AttachResize {
+        cols: u16,
+        rows: u16,
+    },
+    /// Body frame for a tty `exec_stream`: live stdin bytes.
+    ExecInput {
+        data: String,
+    },
+    /// Body frame for a tty `exec_stream`: PTY resize.
+    ExecResize {
         cols: u16,
         rows: u16,
     },
@@ -202,6 +223,13 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config_hash: Option<String>,
     },
+    /// Answer to `wait`: the terminal exit code, when the sandbox exited, and
+    /// the terminal state.
+    Wait {
+        exit_code: i32,
+        exited_at_ms: u64,
+        state: SandboxState,
+    },
     Sandbox(SandboxInfo),
     List(SandboxList),
 
@@ -292,6 +320,15 @@ pub struct ExecRequest {
     pub stdin: Option<String>,
     #[serde(default)]
     pub rlimits: Vec<Rlimit>,
+    /// Allocate a PTY for the process (interactive programs).
+    #[serde(default)]
+    pub tty: bool,
+    /// Initial PTY columns when `tty` is set.
+    #[serde(default)]
+    pub cols: u16,
+    /// Initial PTY rows when `tty` is set.
+    #[serde(default)]
+    pub rows: u16,
 }
 
 impl ExecRequest {
@@ -307,6 +344,9 @@ impl ExecRequest {
             timeout_secs: None,
             stdin: None,
             rlimits: Vec::new(),
+            tty: false,
+            cols: 0,
+            rows: 0,
         }
     }
 }
@@ -531,6 +571,124 @@ mod tests {
         // The legacy CLI sends `{"type":"status"}` with no name.
         let req: Request = serde_json::from_str("{\"type\":\"status\"}").unwrap();
         assert_eq!(req, Request::Status { name: None });
+    }
+
+    #[test]
+    fn legacy_kill_frame_still_parses() {
+        // A kill frame written before the `signal` field must still decode.
+        let req: Request = serde_json::from_str("{\"type\":\"kill\"}").unwrap();
+        assert_eq!(
+            req,
+            Request::Kill {
+                name: None,
+                signal: None
+            }
+        );
+        let req: Request =
+            serde_json::from_str("{\"type\":\"kill\",\"name\":\"box\"}").unwrap();
+        assert_eq!(
+            req,
+            Request::Kill {
+                name: Some("box".into()),
+                signal: None
+            }
+        );
+    }
+
+    #[test]
+    fn kill_with_signal_roundtrips() {
+        let req = Request::Kill {
+            name: Some("box".into()),
+            signal: Some(15),
+        };
+        assert_eq!(roundtrip(&req), req);
+        // The signal is omitted when None (additive wire compatibility).
+        let json = serde_json::to_string(&Request::Kill {
+            name: None,
+            signal: None,
+        })
+        .unwrap();
+        assert!(!json.contains("signal"), "{json}");
+    }
+
+    #[test]
+    fn wait_request_roundtrips() {
+        for req in [
+            Request::Wait {
+                name: None,
+                timeout_secs: None,
+            },
+            Request::Wait {
+                name: Some("box".into()),
+                timeout_secs: Some(30),
+            },
+        ] {
+            assert_eq!(roundtrip(&req), req);
+        }
+        let req: Request = serde_json::from_str("{\"type\":\"wait\"}").unwrap();
+        assert_eq!(
+            req,
+            Request::Wait {
+                name: None,
+                timeout_secs: None
+            }
+        );
+    }
+
+    #[test]
+    fn exec_input_and_resize_roundtrip() {
+        for req in [
+            Request::ExecInput {
+                data: "ls\n".into(),
+            },
+            Request::ExecResize { cols: 120, rows: 40 },
+        ] {
+            assert_eq!(roundtrip(&req), req);
+        }
+    }
+
+    #[test]
+    fn exec_request_tty_fields_roundtrip_and_default() {
+        let mut e = ExecRequest::new("cat");
+        e.tty = true;
+        e.cols = 120;
+        e.rows = 40;
+        assert_eq!(roundtrip(&Request::Exec(Box::new(e))), Request::Exec(Box::new(
+            ExecRequest {
+                name: None,
+                command: "cat".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: std::collections::HashMap::new(),
+                user: None,
+                shell: false,
+                timeout_secs: None,
+                stdin: None,
+                rlimits: Vec::new(),
+                tty: true,
+                cols: 120,
+                rows: 40,
+            }
+        )));
+        // A legacy exec frame without tty/cols/rows must decode with defaults.
+        let legacy = r#"{"type":"exec","command":"echo","args":[]}"#;
+        let req: Request = serde_json::from_str(legacy).unwrap();
+        let Request::Exec(spec) = req else {
+            panic!("expected exec");
+        };
+        assert!(!spec.tty);
+        assert_eq!(spec.cols, 0);
+        assert_eq!(spec.rows, 0);
+    }
+
+    #[test]
+    fn wait_response_roundtrips() {
+        let resp = Response::Wait {
+            exit_code: 137,
+            exited_at_ms: 1234,
+            state: SandboxState::Stopped,
+        };
+        assert_eq!(roundtrip_resp(&resp), resp);
     }
 
     #[test]

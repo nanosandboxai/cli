@@ -220,7 +220,11 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
             require_name(name)?,
             Request::Stop { name: None, force },
         ),
-        Request::Kill { name } => proxy(writer, require_name(name)?, Request::Kill { name: None }),
+        Request::Kill { name, signal } => proxy(
+            writer,
+            require_name(name)?,
+            Request::Kill { name: None, signal },
+        ),
         Request::Drain { name } => {
             proxy(writer, require_name(name)?, Request::Drain { name: None })
         }

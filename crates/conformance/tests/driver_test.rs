@@ -72,6 +72,8 @@ struct DriverState {
     chunks_acked: usize,
     ping_ok: bool,
     timeout_code: Option<String>,
+    wait_exit_code: Option<i32>,
+    wait_state: Option<String>,
 }
 
 /// Run a client call, recording a protocol error into `state` instead of
@@ -149,6 +151,9 @@ fn exec_request(expect: &Value, name: &str) -> ExecRequest {
         })
         .unwrap_or_default();
     req.user = expect["user"].as_str().map(String::from);
+    req.tty = expect["tty"].as_bool().unwrap_or(false);
+    req.cols = expect["cols"].as_u64().unwrap_or(0) as u16;
+    req.rows = expect["rows"].as_u64().unwrap_or(0) as u16;
     req
 }
 
@@ -193,7 +198,22 @@ fn drive_step(
             let force = expect["force"].as_bool().unwrap_or(false);
             ack(state, || sb.unwrap().stop(force), "stop_acked")?;
         }
-        "kill" => ack(state, || sb.unwrap().kill(), "kill_acked")?,
+        "kill" => {
+            if let Some(sig) = expect["signal"].as_i64() {
+                ack(state, || sb.unwrap().kill_with(sig as i32), "kill_acked")?;
+            } else {
+                ack(state, || sb.unwrap().kill(), "kill_acked")?;
+            }
+        }
+        "wait" => {
+            let timeout = expect["timeout_secs"]
+                .as_u64()
+                .map(std::time::Duration::from_secs);
+            if let Some((code, _at, st)) = drive(state, || sb.unwrap().wait(timeout))? {
+                state.wait_exit_code = Some(code);
+                state.wait_state = Some(state_str(&st).to_string());
+            }
+        }
         "remove" => {
             let force = expect["force"].as_bool().unwrap_or(false);
             ack(state, || sb.unwrap().remove(force), "remove_acked")?;
@@ -274,6 +294,23 @@ fn drive_step(
             let rows = expect["rows"].as_u64().unwrap() as u16;
             let mut conn = Connection::dial(server_path).map_err(|e| e.to_string())?;
             conn.call(&Request::AttachResize { cols, rows })
+                .map_err(|e| e.to_string())?;
+            state.acked.insert("resize_acked");
+        }
+        "exec_input" => {
+            let data = expect["data"].as_str().unwrap();
+            let mut conn = Connection::dial(server_path).map_err(|e| e.to_string())?;
+            conn.call(&Request::ExecInput {
+                data: data.to_string(),
+            })
+            .map_err(|e| e.to_string())?;
+            state.acked.insert("input_acked");
+        }
+        "exec_resize" => {
+            let cols = expect["cols"].as_u64().unwrap() as u16;
+            let rows = expect["rows"].as_u64().unwrap() as u16;
+            let mut conn = Connection::dial(server_path).map_err(|e| e.to_string())?;
+            conn.call(&Request::ExecResize { cols, rows })
                 .map_err(|e| e.to_string())?;
             state.acked.insert("resize_acked");
         }
@@ -525,6 +562,20 @@ fn evaluate_assert(assert: &Value, state: &DriverState) -> Result<(), String> {
             .or(state.stream_exit.map(|c| c as i64))
             .ok_or("assert exit_code: no exec result recorded")?;
         check_eq("exit_code", expected, actual)?;
+    }
+    if let Some(expected) = a.get("wait_exit_code").and_then(Value::as_i64) {
+        let actual = state
+            .wait_exit_code
+            .map(|c| c as i64)
+            .ok_or("assert wait_exit_code: no wait result")?;
+        check_eq("wait_exit_code", expected, actual)?;
+    }
+    if let Some(expected) = a.get("wait_state").and_then(Value::as_str) {
+        let actual = state
+            .wait_state
+            .as_deref()
+            .ok_or("assert wait_state: no wait result")?;
+        check_eq("wait_state", expected, actual)?;
     }
     if let Some(expected) = a.get("stdout_equals").and_then(Value::as_str) {
         let actual = state

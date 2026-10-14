@@ -31,9 +31,9 @@ pub fn required_capability(ty: &str) -> Option<Capability> {
     Some(match ty {
         "hello" | "ping" | "status" | "create" | "start" | "stop" | "kill" | "remove"
         | "get" | "list" | "modify" | "drain" | "touch" => Capability::Lifecycle,
-        "exec" | "exec_stream" | "shell" | "attach" | "attach_input" | "attach_resize" => {
-            Capability::Exec
-        }
+        "exec" | "exec_stream" | "shell" | "attach" | "attach_input" | "attach_resize"
+        | "exec_input" | "exec_resize" => Capability::Exec,
+        "wait" => Capability::Wait,
         "fs_read" | "fs_read_to_string" | "fs_write" | "fs_write_stream" | "fs_data"
         | "fs_list" | "fs_stat" | "fs_exists" | "fs_mkdir" | "fs_remove" | "fs_remove_dir"
         | "fs_copy" | "fs_rename" | "fs_copy_from_host" | "fs_copy_to_host" => Capability::Fs,
@@ -84,6 +84,9 @@ mod tests {
     fn capability_mapping_covers_verb_groups() {
         assert_eq!(required_capability("create"), Some(Capability::Lifecycle));
         assert_eq!(required_capability("exec_stream"), Some(Capability::Exec));
+        assert_eq!(required_capability("exec_input"), Some(Capability::Exec));
+        assert_eq!(required_capability("exec_resize"), Some(Capability::Exec));
+        assert_eq!(required_capability("wait"), Some(Capability::Wait));
         assert_eq!(required_capability("fs_write"), Some(Capability::Fs));
         assert_eq!(required_capability("logs"), Some(Capability::Logs));
         assert_eq!(required_capability("metrics_stream"), Some(Capability::Metrics));

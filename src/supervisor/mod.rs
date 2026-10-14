@@ -16,6 +16,21 @@
 //!                           └── state.json (registry entry)
 //! ```
 //!
+//! # State machine
+//!
+//! A sandbox moves through exactly one deterministic path:
+//!
+//! ```text
+//! starting ──▶ running ──▶ (stopped | error)
+//! ```
+//!
+//! `starting` is written before the VM boots; `running` once the VM pid is
+//! known. A **terminal** state (`stopped`/`error`) MUST carry an `exit_code`
+//! and an `exited_at_ms` timestamp. The supervisor writes the terminal state
+//! before it exits, and [`reconcile`] recovers a stale `running` state whose VM
+//! pid is dead into a terminal `stopped` with a deterministic exit code, so a
+//! crash never leaves a sandbox stuck in `running`.
+//!
 //! # Protocol (control socket)
 //!
 //! Newline-delimited JSON over Unix stream socket.
@@ -37,7 +52,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -90,7 +105,7 @@ pub enum SandboxState {
 }
 
 /// Supervisor state persisted to `state.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SupervisorState {
     pub sandbox_name: String,
     pub state: SandboxState,
@@ -98,6 +113,9 @@ pub struct SupervisorState {
     pub exit_code: Option<i32>,
     pub started_at: String,
     pub config_hash: String,
+    /// Unix epoch milliseconds when the sandbox reached a terminal state.
+    #[serde(default)]
+    pub exited_at_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +386,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         exit_code: None,
         started_at: started_at.clone(),
         config_hash: config_hash.clone(),
+        exited_at_ms: None,
     };
     write_state(&sandbox_dir, &state);
 
@@ -413,6 +432,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         exit_code: None,
         started_at: started_at.clone(),
         config_hash: config_hash.clone(),
+        exited_at_ms: None,
     };
     write_state(&sandbox_dir, &state);
 
@@ -442,6 +462,9 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
     let secrets = Arc::new(secrets::SecretStore::new());
     let volumes = Arc::new(volumes::VolumeRegistry::new());
     let exec_session: Arc<Mutex<Option<ExecHandle>>> = Arc::new(Mutex::new(None));
+    // In-flight `wait` handlers; the supervisor drains them before exiting so a
+    // blocking wait always receives its terminal response.
+    let active_waiters = Arc::new(AtomicUsize::new(0));
 
     // Start control socket listener
     let control_sock_path = sandbox_dir.join("control.sock");
@@ -501,6 +524,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         let secrets = secrets.clone();
         let volumes = volumes.clone();
         let exec_session = exec_session.clone();
+        let active_waiters = active_waiters.clone();
         std::thread::spawn(move || {
             accept_connections(
                 &listener,
@@ -518,6 +542,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
                 secrets,
                 volumes,
                 exec_session,
+                active_waiters,
             );
         })
     });
@@ -562,7 +587,9 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
 
     let _ = rt.block_on(sandbox.destroy());
 
-    broadcast_exit(&subscribers, 0);
+    let exit_code = vm_exit_code.unwrap_or(0);
+
+    broadcast_exit(&subscribers, exit_code);
 
     // Clean up control socket
     let _ = std::fs::remove_file(&control_sock_path);
@@ -571,15 +598,23 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         sandbox_name: args.sandbox_name.clone(),
         state: SandboxState::Stopped,
         pid: None,
-        exit_code: vm_exit_code,
+        exit_code: Some(exit_code),
         started_at,
         config_hash,
+        exited_at_ms: Some(now_ms()),
     };
     write_state(&sandbox_dir, &final_state);
 
+    // Drain in-flight `wait` handlers so a blocking wait receives its terminal
+    // response before the process exits (bounded to avoid a wedged client).
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    while active_waiters.load(Ordering::SeqCst) > 0 && Instant::now() < drain_deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     cleanup_after_stop(&sandbox_dir, ephemeral);
 
-    std::process::exit(0);
+    std::process::exit(exit_code);
 }
 
 fn cleanup_after_stop(sandbox_dir: &Path, ephemeral: bool) {
@@ -599,8 +634,13 @@ fn cleanup_after_stop(sandbox_dir: &Path, ephemeral: bool) {
 fn write_state(sandbox_dir: &Path, state: &SupervisorState) {
     let state_path = sandbox_dir.join("state.json");
     if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(&state_path, &json);
-        let _ = std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600));
+        // Atomic write: a crash mid-write leaves the previous state.json intact
+        // rather than a truncated file.
+        let tmp_path = sandbox_dir.join("state.json.tmp");
+        if std::fs::write(&tmp_path, &json).is_ok() {
+            let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::rename(&tmp_path, &state_path);
+        }
     }
 }
 
@@ -612,8 +652,71 @@ fn write_error_state(sandbox_dir: &Path, name: &str, started_at: &str, config_ha
         exit_code: Some(-1),
         started_at: started_at.to_string(),
         config_hash: config_hash.to_string(),
+        exited_at_ms: Some(now_ms()),
     };
     write_state(sandbox_dir, &state);
+}
+
+/// Unix epoch milliseconds.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Whether a pid is alive (or exists but is not signalable, i.e. EPERM).
+fn pid_alive(pid: i32) -> bool {
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Decode a `waitpid` status into a deterministic exit code: `128 + signal`
+/// when the process was killed by a signal (SIGKILL → 137), the exit status
+/// when it exited, else 255.
+fn decode_status(status: libc::c_int) -> i32 {
+    if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        255
+    }
+}
+
+/// Reconcile a persisted state against the live VM pid. A `running` state whose
+/// pid is dead is terminal: return `stopped` with a deterministic exit code so
+/// a crashed supervisor never leaves a sandbox stuck in `running`.
+fn reconcile(state: SupervisorState) -> SupervisorState {
+    if state.state != SandboxState::Running {
+        return state;
+    }
+    let Some(pid) = state.pid.filter(|&p| p > 0) else {
+        return state;
+    };
+    if pid_alive(pid) {
+        // The process exists; a zombie is terminal and carries its real status.
+        let mut status: libc::c_int = 0;
+        let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if rc != pid {
+            return state;
+        }
+        let mut s = state;
+        s.state = SandboxState::Stopped;
+        s.exit_code = Some(decode_status(status));
+        s.exited_at_ms = Some(now_ms());
+        return s;
+    }
+    // kill(pid, 0) failed (ESRCH): the process is gone and already reaped, so
+    // the cause is unknowable — use the deterministic fallback.
+    let mut s = state;
+    s.state = SandboxState::Stopped;
+    s.exit_code = Some(255);
+    s.exited_at_ms = Some(now_ms());
+    s
 }
 
 fn broadcast_output(subscribers: &Subscribers, data: &[u8]) {
@@ -779,6 +882,7 @@ fn accept_connections(
     secrets: Arc<secrets::SecretStore>,
     volumes: Arc<volumes::VolumeRegistry>,
     exec_session: Arc<Mutex<Option<ExecHandle>>>,
+    active_waiters: Arc<AtomicUsize>,
 ) {
     listener.set_nonblocking(true).ok();
 
@@ -809,6 +913,7 @@ fn accept_connections(
                 let secrets = secrets.clone();
                 let volumes = volumes.clone();
                 let exec_session = exec_session.clone();
+                let active_waiters = active_waiters.clone();
 
                 std::thread::spawn(move || {
                     handle_connection(
@@ -827,6 +932,7 @@ fn accept_connections(
                         secrets,
                         volumes,
                         exec_session,
+                        active_waiters,
                     );
                 });
             }
@@ -859,6 +965,7 @@ fn handle_connection(
     secrets: Arc<secrets::SecretStore>,
     volumes: Arc<volumes::VolumeRegistry>,
     exec_session: Arc<Mutex<Option<ExecHandle>>>,
+    active_waiters: Arc<AtomicUsize>,
 ) {
     let _ = stream.set_nonblocking(false);
 
@@ -944,6 +1051,7 @@ fn handle_connection(
                             secrets: secrets.as_ref(),
                             volumes: volumes.as_ref(),
                             exec_session: exec_session.as_ref(),
+                            active_waiters: active_waiters.as_ref(),
                         };
                         proto::serve(stream, reader, &ctx, hello);
                         return;
@@ -1100,7 +1208,7 @@ fn handle_connection(
 
 fn read_current_state(sandbox_dir: &Path) -> SupervisorState {
     let state_path = sandbox_dir.join("state.json");
-    std::fs::read_to_string(&state_path)
+    let state = std::fs::read_to_string(&state_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(SupervisorState {
@@ -1110,7 +1218,9 @@ fn read_current_state(sandbox_dir: &Path) -> SupervisorState {
             exit_code: None,
             started_at: String::new(),
             config_hash: String::new(),
-        })
+            exited_at_ms: None,
+        });
+    reconcile(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,6 +1367,116 @@ mod tests {
         assert!(tmp.join("console.log.1").exists());
 
         // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn running_state(pid: i32) -> SupervisorState {
+        SupervisorState {
+            sandbox_name: "t".into(),
+            state: SandboxState::Running,
+            pid: Some(pid),
+            exit_code: None,
+            started_at: "now".into(),
+            config_hash: "h".into(),
+            exited_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn reconcile_keeps_live_running_state() {
+        let state = running_state(std::process::id() as i32);
+        let reconciled = reconcile(state.clone());
+        assert_eq!(reconciled.state, SandboxState::Running);
+        assert_eq!(reconciled.exit_code, None);
+    }
+
+    #[test]
+    fn reconcile_keeps_terminal_state() {
+        let state = SupervisorState {
+            sandbox_name: "t".into(),
+            state: SandboxState::Stopped,
+            pid: None,
+            exit_code: Some(3),
+            started_at: "now".into(),
+            config_hash: "h".into(),
+            exited_at_ms: Some(42),
+        };
+        let reconciled = reconcile(state.clone());
+        assert_eq!(reconciled, state);
+    }
+
+    #[test]
+    fn reconcile_marks_dead_running_pid_as_stopped() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        assert_eq!(child.wait().unwrap().code(), Some(7));
+        // The pid is now dead and reaped; kill(pid, 0) fails with ESRCH.
+        let reconciled = reconcile(running_state(pid));
+        assert_eq!(reconciled.state, SandboxState::Stopped);
+        assert_eq!(reconciled.exit_code, Some(255));
+        assert!(reconciled.exited_at_ms.is_some());
+    }
+
+    #[test]
+    fn reconcile_uses_128_plus_signal_for_killed_zombie() {
+        // A zombie killed by SIGKILL must reconcile to 137 (128 + SIGKILL).
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                libc::kill(libc::getpid(), libc::SIGKILL);
+                libc::_exit(1);
+            }
+        }
+        assert!(pid > 0, "fork failed");
+        let mut tries = 0;
+        while !is_zombie(pid) && tries < 200 {
+            std::thread::sleep(Duration::from_millis(10));
+            tries += 1;
+        }
+        assert!(is_zombie(pid), "child never became a zombie");
+        let reconciled = reconcile(running_state(pid));
+        assert_eq!(reconciled.state, SandboxState::Stopped);
+        assert_eq!(reconciled.exit_code, Some(137));
+        let mut status: libc::c_int = 0;
+        unsafe {
+            libc::waitpid(pid, &mut status, 0);
+        }
+    }
+
+    /// Whether `pid` is a zombie (exited but not yet reaped), via `ps`.
+    fn is_zombie(pid: i32) -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output();
+        match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'),
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn write_state_is_atomic_and_roundtrips() {
+        let tmp = std::env::temp_dir().join(format!("nsb-state-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let state = SupervisorState {
+            sandbox_name: "t".into(),
+            state: SandboxState::Stopped,
+            pid: None,
+            exit_code: Some(137),
+            started_at: "now".into(),
+            config_hash: "h".into(),
+            exited_at_ms: Some(99),
+        };
+        write_state(&tmp, &state);
+        assert!(!tmp.join("state.json.tmp").exists());
+        let read: SupervisorState =
+            serde_json::from_str(&std::fs::read_to_string(tmp.join("state.json")).unwrap())
+                .unwrap();
+        assert_eq!(read, state);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

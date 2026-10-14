@@ -63,7 +63,7 @@ check capabilities before calling an optional verb.
   "type": "hello_ok",
   "protocol": "1.0.0",
   "helper_version": "0.3.0",
-  "capabilities": ["lifecycle", "exec", "fs", "logs", "metrics", "volumes", "secrets", "snapshots", "networking", "handles", "ephemeral"]
+  "capabilities": ["lifecycle", "exec", "fs", "logs", "metrics", "volumes", "secrets", "snapshots", "networking", "handles", "ephemeral", "signal", "wait", "exec_pty"]
 }
 ```
 
@@ -84,6 +84,9 @@ Clients gate optional verbs on these. The full set (`Capability::all()`):
 | `networking` | publish TCP/UDP ports + policy passthrough |
 | `handles` | labels + handles |
 | `ephemeral` | ephemeral sandboxes |
+| `signal` | `kill` with an explicit signal (`SIGTERM`/`SIGKILL`) |
+| `wait` | blocking `wait` verb |
+| `exec_pty` | tty `exec_stream` + live stdin/`exec_resize` frames |
 
 Version comparison is numeric segment-by-segment (`cmp_version`); a client's
 range intersects a server version via `version_in_range`.
@@ -111,7 +114,8 @@ The complete inventory, matching `crates/protocol/src/verbs.rs` 1:1.
 | `create` | `CreateRequest { spec: SandboxSpec }` | lifecycle |
 | `start` | `{ name? }` | lifecycle |
 | `stop` | `{ name?, force }` | lifecycle |
-| `kill` | `{ name? }` | lifecycle |
+| `kill` | `{ name?, signal? }` | lifecycle (signal ⇒ `signal`) |
+| `wait` | `{ name?, timeout_secs? }` | wait |
 | `remove` | `{ name?, force }` | lifecycle |
 | `get` | `{ name }` | lifecycle |
 | `list` | `{ all, limit?, cursor?, label? }` | lifecycle |
@@ -122,6 +126,8 @@ The complete inventory, matching `crates/protocol/src/verbs.rs` 1:1.
 | `resume` | `{ name? }` | lifecycle/snapshots |
 | `exec` | `ExecRequest` | exec |
 | `exec_stream` | `ExecRequest` | exec |
+| `exec_input` | `{ data }` — live stdin for a tty `exec_stream` | exec |
+| `exec_resize` | `{ cols, rows }` — PTY resize for a tty `exec_stream` | exec |
 | `shell` | `ShellRequest` | exec |
 | `attach` | `{ name? }` | exec |
 | `attach_input` | `{ data }` | exec |
@@ -169,6 +175,7 @@ The complete inventory, matching `crates/protocol/src/verbs.rs` 1:1.
 | `ok` | `{ version }` |
 | `error` | `ProtocolError { code, message }` |
 | `status` | `{ state, pid?, exit_code?, started_at?, config_hash? }` |
+| `wait` | `{ exit_code, exited_at_ms, state }` |
 | `sandbox` | `SandboxInfo` |
 | `list` | `SandboxList` |
 | `exec_result` | `ExecResult` |
@@ -192,8 +199,9 @@ The complete inventory, matching `crates/protocol/src/verbs.rs` 1:1.
 These are the body types referenced above.
 
 **`ExecRequest`** — `{ name?, command, args, cwd?, env, user?, shell,
-timeout_secs?, stdin?, rlimits }`. `shell: true` runs the command through a
-shell.
+timeout_secs?, stdin?, rlimits, tty?, cols?, rows? }`. `shell: true` runs the
+command through a shell. `tty: true` allocates a PTY (initial size `cols`×
+`rows`) and makes `exec_stream` a bidirectional session (see §6).
 
 **`ShellRequest`** — `{ name?, script, cwd?, env, user?, timeout_secs? }`.
 
@@ -290,6 +298,23 @@ The contract:
    - `{"type":"event","event":"done"}` for logs-follow / metrics_stream.
 4. The client must not send another request on the same connection until the
    stream has terminated.
+
+**Interactive carve-out.** A tty `exec_stream` (`ExecRequest.tty: true`) is
+bidirectional: after the opening ack the client may interleave `exec_input`
+(live stdin) and `exec_resize` (PTY size) request frames, each answered with an
+`ok` ack, until the terminal `guest exit`/`error` frame. This is the same
+client→server-frame pattern already used by `fs_write_stream`. These frame
+types are only valid during a tty `exec_stream`; sent standalone they answer
+`invalid_state`.
+
+### Exit-code contract
+
+A sandbox is `starting → running → (stopped | error)`. A **terminal** state
+(`stopped`/`error`) always carries an `exit_code` and an exit timestamp; the
+`wait` response and the persisted `state.json` report both. A supervisor or VM
+that dies without a clean exit is reconciled to a deterministic terminal code
+(`128 + signal`, e.g. `137` for `SIGKILL`; `255` when unknowable) — a sandbox is
+never left stuck in `running`.
 
 `fs_write_stream` is the inverse: the client sends the opening request, reads
 the ack, then sends one `fs_data` frame per chunk (each answered with an `ok`
