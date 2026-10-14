@@ -1,6 +1,6 @@
 [package]
 name = "runtime"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "VM-based sandbox SDK using libkrun FFI"
 license = "Apache-2.0"

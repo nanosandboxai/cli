@@ -28,6 +28,7 @@ exclude = [
 ]
 
 [workspace.package]
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/nanosandboxai/nanosandbox"
@@ -35,7 +36,7 @@ authors = ["DevDone Labs"]
 
 [package]
 name = "nanosb-cli"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "CLI and TUI for nanosandbox"
 license = "Apache-2.0"
