@@ -116,6 +116,10 @@ pub struct SupervisorState {
     /// Unix epoch milliseconds when the sandbox reached a terminal state.
     #[serde(default)]
     pub exited_at_ms: Option<u64>,
+    /// The supervisor process that owns this state. `reconcile` uses it to
+    /// avoid finalizing a sandbox whose owner is still shutting it down.
+    #[serde(default)]
+    pub supervisor_pid: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +381,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
     };
 
     let started_at = chrono::Utc::now().to_rfc3339();
+    let supervisor_pid = Some(std::process::id() as i32);
 
     // Write initial state
     let state = SupervisorState {
@@ -387,6 +392,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         started_at: started_at.clone(),
         config_hash: config_hash.clone(),
         exited_at_ms: None,
+        supervisor_pid,
     };
     write_state(&sandbox_dir, &state);
 
@@ -433,6 +439,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         started_at: started_at.clone(),
         config_hash: config_hash.clone(),
         exited_at_ms: None,
+        supervisor_pid,
     };
     write_state(&sandbox_dir, &state);
 
@@ -602,6 +609,7 @@ pub fn run_supervisor(args: SuperviseArgs) -> ! {
         started_at,
         config_hash,
         exited_at_ms: Some(now_ms()),
+        supervisor_pid,
     };
     write_state(&sandbox_dir, &final_state);
 
@@ -653,6 +661,7 @@ fn write_error_state(sandbox_dir: &Path, name: &str, started_at: &str, config_ha
         started_at: started_at.to_string(),
         config_hash: config_hash.to_string(),
         exited_at_ms: Some(now_ms()),
+        supervisor_pid: Some(std::process::id() as i32),
     };
     write_state(sandbox_dir, &state);
 }
@@ -692,6 +701,11 @@ fn decode_status(status: libc::c_int) -> i32 {
 /// a crashed supervisor never leaves a sandbox stuck in `running`.
 fn reconcile(state: SupervisorState) -> SupervisorState {
     if state.state != SandboxState::Running {
+        return state;
+    }
+    // While the owning supervisor is alive it is mid-shutdown and will write the
+    // real terminal state; never synthesize one that races that write.
+    if state.supervisor_pid.map(pid_alive).unwrap_or(false) {
         return state;
     }
     let Some(pid) = state.pid.filter(|&p| p > 0) else {
@@ -1219,6 +1233,7 @@ fn read_current_state(sandbox_dir: &Path) -> SupervisorState {
             started_at: String::new(),
             config_hash: String::new(),
             exited_at_ms: None,
+            supervisor_pid: None,
         });
     reconcile(state)
 }
@@ -1379,6 +1394,7 @@ mod tests {
             started_at: "now".into(),
             config_hash: "h".into(),
             exited_at_ms: None,
+            supervisor_pid: None,
         }
     }
 
@@ -1400,7 +1416,16 @@ mod tests {
             started_at: "now".into(),
             config_hash: "h".into(),
             exited_at_ms: Some(42),
+            supervisor_pid: None,
         };
+        let reconciled = reconcile(state.clone());
+        assert_eq!(reconciled, state);
+    }
+
+    #[test]
+    fn reconcile_keeps_running_state_while_supervisor_alive() {
+        let mut state = running_state(999_999_999);
+        state.supervisor_pid = Some(std::process::id() as i32);
         let reconciled = reconcile(state.clone());
         assert_eq!(reconciled, state);
     }
@@ -1470,6 +1495,7 @@ mod tests {
             started_at: "now".into(),
             config_hash: "h".into(),
             exited_at_ms: Some(99),
+            supervisor_pid: None,
         };
         write_state(&tmp, &state);
         assert!(!tmp.join("state.json.tmp").exists());

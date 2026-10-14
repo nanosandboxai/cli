@@ -1527,6 +1527,7 @@ mod tests {
                 started_at: "now".into(),
                 config_hash: "hash".into(),
                 exited_at_ms: Some(1234),
+                supervisor_pid: None,
             };
             crate::supervisor::write_state(&self.dir, &s);
         }
