@@ -58,6 +58,26 @@ the harness on a self-hosted runner labelled `linux-kvm` (GitHub-hosted runners
 do not expose `/dev/kvm`). It is manual/scheduled only, so it never queues on
 pull requests for repos without such a runner.
 
+### Shim-facing verbs E2E (C2/C3/C4)
+
+[`runtime/scripts/linux-kvm-verbs-e2e.py`](../runtime/scripts/linux-kvm-verbs-e2e.py)
+drives the per-sandbox control socket of a live VM and asserts the Epic 9
+shim-facing verbs: tty `exec_stream` with live `exec_input`/`exec_resize`,
+blocking `wait` returning the real exit code, and signal `kill` (unsupported
+signal → typed `unsupported`; `SIGTERM` stops). It needs the guest exec-agent
+staged for the host arch:
+
+```bash
+rustup target add x86_64-unknown-linux-musl --toolchain 1.94.0
+( cd guest/crates/exec-agent && RUSTFLAGS="-C linker=rust-lld" \
+    cargo build --target x86_64-unknown-linux-musl --release )
+mkdir -p ~/.nanosandbox/guest-bin
+cp guest/crates/exec-agent/target/x86_64-unknown-linux-musl/release/exec-agent \
+   ~/.nanosandbox/guest-bin/exec-agent
+python3 runtime/scripts/linux-kvm-verbs-e2e.py
+```
+
+
 ## 3. Captured evidence (Linux x86_64, Ubuntu 24.04, kernel 6.17, `/dev/kvm`)
 
 ```
