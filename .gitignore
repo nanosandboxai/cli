@@ -2,6 +2,7 @@
 /target/
 **/*.rs.bk
 
+.env*
 # Cargo local config (contains path overrides for local dev)
 .cargo/config.toml
 
