@@ -1,0 +1,92 @@
+# =============================================================================
+# Linux/KVM Live E2E
+# =============================================================================
+#
+# Epic 9 · C1/C9b — a live microVM boot + workload run on Linux/KVM.
+#
+# This job requires a Linux host with `/dev/kvm` accessible. It is therefore
+# pinned to a SELF-HOSTED runner labelled `linux-kvm`; GitHub-hosted runners do
+# not expose `/dev/kvm`. On a repository with no such runner the job simply
+# never runs — it is manual/scheduled only, so it never creates a permanently
+# queued check on pull requests.
+#
+# Provisioning a runner (once):
+#   1. A Linux host with KVM and the user in the `kvm` group:
+#        sudo usermod -aG kvm $USER   # then re-login
+#   2. Rust toolchain + the runtime deps on that host:
+#        runtime/scripts/ci/install-deps-apt.sh
+#        LIBKRUN_OUTPUT_DIR=~/.nanosandbox/lib runtime/scripts/build-libkrun.sh
+#        ( cd runtime/deps/libkrunfw && make )
+#   3. Register the runner with labels `self-hosted, linux, kvm`.
+#
+# Alternatively run the harness directly on any Linux+KVM host:
+#        runtime/scripts/linux-kvm-e2e.sh
+#      (it self-skips with exit 0 when /dev/kvm is unavailable)
+# =============================================================================
+
+name: Linux/KVM E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Mondays 06:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-kvm-e2e:
+    name: Live microVM boot (Linux/KVM)
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: KVM preflight
+        id: kvm
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::warning::/dev/kvm not present; skipping live E2E"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::warning::/dev/kvm not accessible (user not in 'kvm' group); skipping"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build deps
+        if: steps.kvm.outputs.available == 'true'
+        run: runtime/scripts/ci/install-deps-apt.sh
+
+      - name: Build runtime dependencies
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          export PATH="$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
+          LIBKRUN_OUTPUT_DIR="$HOME/.nanosandbox/lib" runtime/scripts/build-libkrun.sh
+          ( cd runtime/deps/libkrunfw && make )
+          sudo cp runtime/deps/libkrunfw/libkrunfw.so.5.* /usr/local/lib/ 2>/dev/null || \
+            cp runtime/deps/libkrunfw/libkrunfw.so.5.* "$HOME/.nanosandbox/libs/" 2>/dev/null || true
+          sudo ldconfig 2>/dev/null || true
+          ( cd runtime/deps/gvproxy && GOWORK=off go build -o "$HOME/.nanosandbox/bin/gvproxy" ./cmd/gvproxy )
+
+      - name: Build nanosb
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          LIBKRUN_LIB_DIR="$HOME/.nanosandbox/lib" cargo build --release -p nanosb-cli
+
+      - name: Live E2E harness
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          export PATH="$HOME/.nanosandbox/bin:$HOME/.cargo/bin:$PATH"
+          NANOSB_BINARY="$PWD/target/release/nanosb" runtime/scripts/linux-kvm-e2e.sh
+
+      - name: Skipped (no KVM)
+        if: steps.kvm.outputs.available != 'true'
+        run: |
+          echo "Live Linux/KVM E2E skipped: runner has no usable /dev/kvm"
