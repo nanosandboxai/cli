@@ -413,6 +413,22 @@ fn dispatch(writer: &mut UnixStream, req: Request) -> anyhow::Result<()> {
 }
 
 fn create(writer: &mut UnixStream, spec: nanosb_protocol::SandboxSpec) -> anyhow::Result<()> {
+    // Security-context validation (Epic 9 C6 / #162): this build enforces no
+    // in-guest seccomp/capabilities/apparmor, so any security-sensitive field
+    // the guest cannot enforce is rejected fail-closed at create. This handler
+    // is the single central entry point where a protocol `SandboxSpec` becomes
+    // a boot: the CLI/supervisor create path (`cmd_run_next`/`cmd_apply` in
+    // main.rs, `deploy_plan_for` in deploy.rs) builds `runtime::config::SandboxConfig`
+    // directly and never constructs a `SandboxSpec`, so it has no security-context
+    // surface to reject.
+    if let Some(field) = spec.security.as_ref().and_then(|s| s.unenforced_field()) {
+        return send(
+            writer,
+            &Response::Error(ProtocolError::unsupported(format!(
+                "security context field '{field}' is unsupported: this build enforces no in-guest security context"
+            ))),
+        );
+    }
     let name = match spec.name.clone() {
         Some(n) => n,
         None => {

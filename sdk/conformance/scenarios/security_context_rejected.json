@@ -1,0 +1,25 @@
+{
+  "id": "security_context_rejected",
+  "description": "create with an in-guest security context is rejected as unsupported",
+  "capabilities": ["lifecycle"],
+  "steps": [
+    {
+      "expect": {
+        "type": "create",
+        "spec": {
+          "name": "box",
+          "image": "alpine:latest",
+          "security": { "seccomp_profile": "default" }
+        }
+      },
+      "respond": {
+        "type": "error",
+        "code": "unsupported",
+        "message": "security context field 'seccomp_profile' is unsupported: this build enforces no in-guest security context"
+      }
+    }
+  ],
+  "assert": {
+    "error_code": "unsupported"
+  }
+}
