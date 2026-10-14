@@ -3,7 +3,6 @@
 crates/*/target/
 
 # Submodule build artifacts
-deps/libkrun/target/
 deps/libkrunfw/linux-*/
 deps/libkrunfw/*.o
 deps/libkrunfw/*.so*
@@ -15,11 +14,6 @@ deps/gvproxy/bin/
 *.swp
 *.swo
 *~
-
-docs/plans/**
-docs/superpowers/**
-
-agent-gateway/agent-gateway
 
 .env
 
