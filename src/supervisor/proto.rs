@@ -134,10 +134,20 @@ pub fn serve(
 }
 
 fn send(stream: &mut UnixStream, resp: &Response) -> std::io::Result<()> {
-    let line = serde_json::to_string(resp).unwrap_or_default();
-    stream.write_all(line.as_bytes())?;
-    stream.write_all(b"\n")?;
+    let mut buf = serde_json::to_string(resp).unwrap_or_default().into_bytes();
+    buf.push(b'\n');
+    stream.write_all(&buf)?;
     stream.flush()
+}
+
+/// Write one frame while holding `out`'s lock, as a single `write_all`, so two
+/// threads sharing the client socket cannot splice frames on the wire.
+fn send_locked(out: &Mutex<UnixStream>, resp: &Response) -> std::io::Result<()> {
+    let mut buf = serde_json::to_string(resp).unwrap_or_default().into_bytes();
+    buf.push(b'\n');
+    let mut s = out.lock().unwrap_or_else(|e| e.into_inner());
+    s.write_all(&buf)?;
+    s.flush()
 }
 
 fn send_error(stream: &mut UnixStream, code: nanosb_protocol::ErrorCode, msg: impl Into<String>) {
@@ -882,12 +892,13 @@ fn stream_exec_stream(
         }
     };
 
-    // A tty exec is bidirectional: a reader thread forwards ExecInput/ExecResize
-    // frames to a write-only clone of the exec handle (each acked `ok`) while
-    // this thread streams guest output. The writer is a cloned socket so the two
-    // threads never share one blocking handle.
+    // All client-bound frames (guest output, input acks, terminal) go through
+    // one locked writer so the output loop and the tty input reader cannot
+    // interleave frames on the wire.
+    let out = Arc::new(Mutex::new(stream.try_clone()?));
     let done = Arc::new(AtomicBool::new(false));
-    let input_thread = if tty {
+
+    if tty {
         let writer = match handle.try_clone_writer() {
             Ok(w) => w,
             Err(e) => {
@@ -899,96 +910,47 @@ fn stream_exec_stream(
                 return Ok(());
             }
         };
-        let input_stream = match reader.get_ref().try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                send_error(
-                    stream,
-                    nanosb_protocol::ErrorCode::Io,
-                    format!("cannot clone control stream: {e}"),
-                );
-                return Ok(());
-            }
-        };
-        let _ = input_stream.set_read_timeout(Some(Duration::from_millis(200)));
-        let mut input_reader = BufReader::new(input_stream);
-        let mut writer = writer;
-        let mut output = stream.try_clone()?;
-        let done = done.clone();
-        Some(std::thread::spawn(move || {
-            let mut line = String::new();
-            loop {
-                if done.load(Ordering::SeqCst) {
-                    break;
-                }
-                line.clear();
-                match input_reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let req: Request = match serde_json::from_str(trimmed) {
-                            Ok(r) => r,
-                            Err(_) => continue,
-                        };
-                        let result = match req {
-                            Request::ExecInput { data } => writer.write_stdin(&data),
-                            Request::ExecResize { cols, rows } => writer.resize(cols, rows),
-                            _ => continue,
-                        };
-                        let _ = send(
-                            &mut output,
-                            &Response::Ok {
-                                version: HELPER_VERSION.to_string(),
-                            },
-                        );
-                        if result.is_err() {
-                            break;
-                        }
-                    }
-                    Err(ref e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        continue
-                    }
-                    Err(_) => break,
-                }
-            }
-        }))
+        // Share `serve`'s BufReader so frames pipelined behind the exec_stream
+        // request (still in its buffer) are not lost to a raw-fd clone.
+        let _ = reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(200)));
+        let out_for_input = out.clone();
+        let done_for_input = done.clone();
+        let input_reader = &mut *reader;
+        std::thread::scope(|scope| -> std::io::Result<()> {
+            scope.spawn(move || {
+                exec_input_reader(input_reader, writer, &out_for_input, &done_for_input);
+            });
+            let result = exec_output_loop(&mut handle, &out);
+            done.store(true, Ordering::SeqCst);
+            result
+        })?;
+        let _ = reader.get_ref().set_read_timeout(None);
     } else {
-        None
-    };
+        exec_output_loop(&mut handle, &out)?;
+    }
+    Ok(())
+}
 
-    let mut code = None;
-    let mut err_msg = None;
-    loop {
+/// Stream guest output frames to the client until the exec terminates.
+fn exec_output_loop(handle: &mut ExecHandle, out: &Mutex<UnixStream>) -> std::io::Result<()> {
+    let (code, err_msg) = loop {
         match handle.next_event(None) {
             Ok(Some(ExecEvent::Output(chunk))) => {
                 let ev = match chunk.stream {
                     runtime::exec::Stream::Stdout => GuestEvent::Stdout { data: chunk.data },
                     runtime::exec::Stream::Stderr => GuestEvent::Stderr { data: chunk.data },
                 };
-                send(stream, &Response::Guest(ev))?;
+                send_locked(out, &Response::Guest(ev))?;
             }
-            Ok(Some(ExecEvent::Exit { code: c })) => {
-                code = Some(c);
-                break;
-            }
-            Ok(Some(ExecEvent::Error { message })) => {
-                err_msg = Some(message);
-                break;
-            }
+            Ok(Some(ExecEvent::Exit { code: c })) => break (Some(c), None),
+            Ok(Some(ExecEvent::Error { message })) => break (None, Some(message)),
             Ok(Some(ExecEvent::Started { .. })) => {}
-            Ok(None) => break,
-            Err(e) => {
-                err_msg = Some(e.to_string());
-                break;
-            }
+            Ok(None) => break (None, None),
+            Err(e) => break (None, Some(e.to_string())),
         }
-    }
+    };
     let exit = match (code, err_msg) {
         (Some(c), _) => GuestEvent::Exit { code: c },
         (None, Some(m)) => GuestEvent::Error { message: m },
@@ -996,12 +958,63 @@ fn stream_exec_stream(
             message: "exec stream closed before exit".to_string(),
         },
     };
-    send(stream, &Response::Guest(exit))?;
-    done.store(true, Ordering::SeqCst);
-    if let Some(t) = input_thread {
-        let _ = t.join();
+    send_locked(out, &Response::Guest(exit))
+}
+
+/// Forward `exec_input`/`exec_resize` frames from the shared control reader to
+/// the exec handle while [`exec_output_loop`] streams. Acks only a successful
+/// write; a failed write errors the client instead of a false `ok`.
+fn exec_input_reader(
+    reader: &mut BufReader<UnixStream>,
+    mut writer: runtime::exec::ExecWriter,
+    out: &Mutex<UnixStream>,
+    done: &AtomicBool,
+) {
+    let mut line = String::new();
+    loop {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let parsed = serde_json::from_str::<Request>(line.trim());
+                line.clear();
+                let Ok(req) = parsed else { continue };
+                let result = match req {
+                    Request::ExecInput { data } => writer.write_stdin(&data),
+                    Request::ExecResize { cols, rows } => writer.resize(cols, rows),
+                    _ => continue,
+                };
+                match result {
+                    Ok(()) => {
+                        let _ = send_locked(
+                            out,
+                            &Response::Ok {
+                                version: HELPER_VERSION.to_string(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        let _ = send_locked(
+                            out,
+                            &Response::Error(nanosb_protocol::ProtocolError::io(format!(
+                                "exec input failed: {e}"
+                            ))),
+                        );
+                        break;
+                    }
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
     }
-    Ok(())
 }
 
 fn stream_attach(
