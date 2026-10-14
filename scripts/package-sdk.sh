@@ -6,8 +6,10 @@
 #   bin/nanosb-runtime     the slim helper (pre-signed)
 #   bin/gvproxy            networking sidecar
 #   libs/libkrunfw.5.dylib kernel firmware
+#   guest-bin/exec-agent   in-guest exec agent
 #   sdk/<lang>/            the SDK sources
 #   install.sh             lays the runtime into $NANOSB_HOME (lazy re-sign)
+#   LICENSE                the repository license (Apache-2.0)
 #   README.md              what this package is
 #
 # Usage:
@@ -65,6 +67,13 @@ for sdk in "${SDKS[@]}"; do
   out="$DIST/nanosandbox-sdk-$sdk"
   rm -rf "$out"
   mkdir -p "$out/bin" "$out/libs" "$out/sdk" "$out/guest-bin"
+
+  # Every distributable bundle carries the repository LICENSE.
+  if [ -f "$REPO_ROOT/LICENSE" ]; then
+    cp "$REPO_ROOT/LICENSE" "$out/LICENSE"
+  else
+    echo "warning: $REPO_ROOT/LICENSE not found; bundle omits the license" >&2
+  fi
 
   cp "$HELPER" "$out/bin/nanosb-runtime"; chmod +x "$out/bin/nanosb-runtime"
   if [ -n "$LIBKRUNFW" ]; then cp "$LIBKRUNFW" "$out/libs/"; fi

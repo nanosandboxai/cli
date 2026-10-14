@@ -5,8 +5,8 @@
 # with zero extra setup.
 #
 # Exercises the WS9/AC9 path: scripts/package-sdk.sh → bundle install.sh →
-# $NANOSB_HOME/{bin,libs} → ManagedRuntime resolves the installed helper →
-# supervisor resolves libkrunfw/gvproxy from the installed NANOSB_HOME.
+# $NANOSB_HOME/{bin,libs,guest-bin} → ManagedRuntime resolves the installed
+# helper → supervisor resolves libkrunfw/gvproxy from the installed NANOSB_HOME.
 #
 # Requires: macOS arm64, libkrun/gvproxy in the source home, a cached image.
 #
@@ -31,7 +31,7 @@ BUNDLE="$DIST/nanosandbox-sdk-rust"
 
 echo "==> 2/5 install into a fresh NANOSB_HOME ($HOME_NEW)"
 NANOSB_HOME="$HOME_NEW" "$BUNDLE/install.sh"
-for f in bin/nanosb-runtime bin/gvproxy libs/libkrunfw.5.dylib guest-bin/exec-agent; do
+for f in bin/nanosb-runtime bin/gvproxy libs/libkrunfw.5.dylib guest-bin/exec-agent LICENSE; do
   [ -e "$HOME_NEW/$f" ] || { echo "FAIL: not installed: $f"; exit 1; }
   echo "    installed: $f"
 done
