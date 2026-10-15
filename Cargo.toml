@@ -111,7 +111,9 @@ assert_cmd = "2"
 predicates = "3"
 
 [profile.release]
-lto = true
+# LTO must stay off: the CLI statically links libkrun.a (a Rust staticlib that
+# bundles non-bitcode compiler-rt objects), which fat/thin LTO cannot link.
+lto = false
 codegen-units = 1
 opt-level = "s"
 strip = true
