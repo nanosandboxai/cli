@@ -620,28 +620,38 @@ mod cli {
                     sandbox_configs
                 };
 
-                // Always use CWD as project path so non-git directories get session
-                // persistence and project mounting (git is initialised in source on first use).
-                let project_path = cli
-                    .project
-                    .map(std::path::PathBuf::from)
-                    .or_else(|| std::env::current_dir().ok());
+                #[cfg(feature = "tui")]
+                {
+                    // Always use CWD as project path so non-git directories get session
+                    // persistence and project mounting (git is initialised in source on first use).
+                    let project_path = cli
+                        .project
+                        .map(std::path::PathBuf::from)
+                        .or_else(|| std::env::current_dir().ok());
 
-                let session_start = if let Some(session_id) = cli.session {
-                    nanosb_cli::tui::run::SessionStartMode::ResumeById(session_id)
-                } else if cli.resume {
-                    nanosb_cli::tui::run::SessionStartMode::ResumeLatest
-                } else {
-                    nanosb_cli::tui::run::SessionStartMode::Fresh
-                };
+                    let session_start = if let Some(session_id) = cli.session {
+                        nanosb_cli::tui::run::SessionStartMode::ResumeById(session_id)
+                    } else if cli.resume {
+                        nanosb_cli::tui::run::SessionStartMode::ResumeLatest
+                    } else {
+                        nanosb_cli::tui::run::SessionStartMode::Fresh
+                    };
 
-                nanosb_cli::tui::run::run_tui(
-                    project_path,
-                    sandbox_configs,
-                    session_start,
-                    runtime_env_pool,
-                )
-                .await
+                    nanosb_cli::tui::run::run_tui(
+                        project_path,
+                        sandbox_configs,
+                        session_start,
+                        runtime_env_pool,
+                    )
+                    .await
+                }
+                #[cfg(not(feature = "tui"))]
+                {
+                    let _ = (&sandbox_configs, &runtime_env_pool);
+                    anyhow::bail!(
+                        "TUI support is not compiled in this build; use a subcommand (e.g. `nanosb run`)"
+                    )
+                }
             }
             Some(Commands::Supervise { .. }) => {
                 anyhow::bail!(
@@ -2378,7 +2388,7 @@ mod cli {
                         );
                         continue;
                     }
-                    if !nanosb_cli::tui::gitcmd::has_real_git_dir(&clone_path) {
+                    if !nanosb_cli::gitcmd::has_real_git_dir(&clone_path) {
                         println!(
                             "Skipping clone with non-real .git (symlink/corrupt): {}",
                             entry.file_name().to_string_lossy()
@@ -2391,7 +2401,7 @@ mod cli {
                     );
 
                     // Detect the branch name from the clone
-                    let branch_output = nanosb_cli::tui::gitcmd::host_git()
+                    let branch_output = nanosb_cli::gitcmd::host_git()
                         .args(["rev-parse", "--abbrev-ref", "HEAD"])
                         .current_dir(&clone_path)
                         .output();
@@ -2401,7 +2411,7 @@ mod cli {
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
                     // Auto-commit any uncommitted changes
-                    let status_output = nanosb_cli::tui::gitcmd::host_git()
+                    let status_output = nanosb_cli::gitcmd::host_git()
                         .args(["status", "--porcelain"])
                         .current_dir(&clone_path)
                         .output();
@@ -2409,11 +2419,11 @@ mod cli {
                         let status_text = String::from_utf8_lossy(&status_out.stdout);
                         if !status_text.trim().is_empty() {
                             println!("  Auto-committing uncommitted changes...");
-                            let _ = nanosb_cli::tui::gitcmd::host_git()
+                            let _ = nanosb_cli::gitcmd::host_git()
                                 .args(["add", "-A"])
                                 .current_dir(&clone_path)
                                 .output();
-                            let _ = nanosb_cli::tui::gitcmd::host_git()
+                            let _ = nanosb_cli::gitcmd::host_git()
                                 .args(["commit", "-m", "nanosb: auto-save on cleanup"])
                                 .current_dir(&clone_path)
                                 .env("GIT_AUTHOR_NAME", "nanosandbox")
@@ -2432,7 +2442,7 @@ mod cli {
                             .trim_start_matches("nanosb/");
                         let nanosb_ref = format!("refs/nanosb/{}", short_id);
                         let refspec = format!("+refs/heads/{}:{}", branch, nanosb_ref);
-                        let _ = nanosb_cli::tui::gitcmd::host_git()
+                        let _ = nanosb_cli::gitcmd::host_git()
                             .args(["fetch", &clone_path.to_string_lossy(), &refspec])
                             .current_dir(&project_path)
                             .output();
@@ -2454,7 +2464,7 @@ mod cli {
         }
 
         // List nanosb branches
-        let output = nanosb_cli::tui::gitcmd::host_git()
+        let output = nanosb_cli::gitcmd::host_git()
             .args(["branch", "--list", "nanosb/*"])
             .current_dir(&project_path)
             .output();
