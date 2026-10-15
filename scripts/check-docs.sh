@@ -33,6 +33,10 @@ hasnt "install-deps README: no ~/.local/bin"   "\.local/bin" install-deps/README
 
 has   "AGENTS.md: docs-sync policy"     "Documentation is part of the change" AGENTS.md
 has   "AGENTS.md: version SOT convention" "version.workspace" AGENTS.md
+has   "AGENTS.md: host layer crate"     "crates/host" AGENTS.md
+has   "README: host layer crate"        "crates/host" README.md
+hasfile() { if [ -f "$1" ]; then pass "$1 exists"; else bad "$1 missing"; fi; }
+hasfile crates/host/Cargo.toml
 
 hasnt "runtime README: no 'in development'" "in development" runtime/README.md
 hasnt "runtime README: no 'separate repo'"  "separate repo" runtime/README.md

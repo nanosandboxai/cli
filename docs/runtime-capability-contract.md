@@ -69,18 +69,21 @@ Target consumer dependencies: **`nanosb-protocol` + `nanosb-host` only**.
 - ✅ **H1** — `runtime::config` types extracted into the FFI-free
   `runtime-config` crate (`runtime/crates/runtime-config`); `runtime` re-exports
   it as `runtime::config`.
-- ⬜ **H2/H3** — `nanosb-host` crate (move `deploy`, `supervisor::client`/state,
-  `spec_to_config` out of `nanosb-cli`; re-export for compatibility).
-- ⬜ **H4** — TUI deps gated behind an optional `tui` feature.
-- ⬜ **H5** — supported `nanosb supervise --foreground --name <n> --spec <json>`
-  entrypoint that spawns the supervisor in the caller's process tree and reports
-  the child pid.
-- ⬜ **H7** — CI proves `nanosb-host` builds TUI-free and FFI-free, and the shim
-  builds against protocol + host only.
+- ✅ **H2/H3** — `nanosb-host` crate (`crates/host`) with the FFI-free supervisor
+  client + state types; `nanosb-cli` re-exports them under `nanosb_cli::supervisor`.
+  Moving `deploy` and `spec_to_config` into the host additionally requires first
+  splitting the engine-coupled `sandbox` crate (it still depends on `runtime`/libkrun).
+- ✅ **H4** — TUI deps gated behind the optional `tui` feature; the `runtime-host`
+  profile builds with no TUI dependencies.
+- ✅ **H5** — `nanosb supervise --foreground --name <n> --spec <file|->` spawns the
+  supervisor in the caller's process tree and prints the child pid.
+- ✅ **H7** — CI (`host-layer` job) asserts `nanosb-host` and the slim helper build
+  without the engine or TUI dependencies.
 
-Until H2–H5 land, a consumer that needs the protocol can depend on
-`nanosb-protocol` directly and drive `nanosb-runtime`; depending on `nanosb-cli`
-still transitively pulls the TUI and engine.
+A consumer that needs the protocol + supervisor state can depend on
+`nanosb-protocol` + `nanosb-host` today. Full `deploy`/`spec_to_config` hosting
+and dropping `nanosb-cli` entirely additionally requires decoupling `sandbox`
+from the VM engine.
 
 ## 5. Where the source of truth lives
 
