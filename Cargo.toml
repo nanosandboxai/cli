@@ -2,6 +2,7 @@
 members = [
     # Nanosandbox runtime (VM engine) and libkrun bindings.
     "runtime/crates/runtime",
+    "runtime/crates/runtime-config",
     "runtime/crates/libkrun-sys",
     # Agent-aware sandbox SDK and its gateway client.
     "sandbox/crates/sandbox",

@@ -1,0 +1,16 @@
+[package]
+name = "runtime-config"
+version.workspace = true
+edition = "2021"
+description = "Types-only sandbox configuration for nanosandbox (no FFI)"
+license = "Apache-2.0"
+repository = "https://github.com/nanosandboxai/nanosandbox"
+authors = ["DevDone Labs"]
+
+[lib]
+name = "runtime_config"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

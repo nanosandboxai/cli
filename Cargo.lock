@@ -3145,6 +3145,7 @@ dependencies = [
  "oci-client",
  "oci-spec",
  "openssl",
+ "runtime-config",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3157,6 +3158,14 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "xattr",
+]
+
+[[package]]
+name = "runtime-config"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
