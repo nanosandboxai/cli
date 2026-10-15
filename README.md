@@ -11,7 +11,7 @@ sandboxes (via [libkrun](https://github.com/containers/libkrun)).
 | `crates/protocol` | Versioned NDJSON protocol types (source of truth for the wire) |
 | `crates/client` | `SandboxClient` + live conformance tests |
 | `crates/conformance` | CI-safe protocol conformance harness |
-| `runtime/` | MicroVM engine (libkrun FFI), OCI images, config defaults |
+| `runtime/` | MicroVM engine (libkrun FFI), OCI images; `runtime/crates/runtime-config` holds the FFI-free config types |
 | `sandbox/` | Agent-aware sandbox SDK + `deploy` module + `sandbox.yml` parsing |
 | `sdk/` | Eight language SDKs + conformance harness (see [`sdk/README.md`](sdk/README.md)) |
 | `agents-registry/` | Agent definitions, skills, MCP sources, model catalog, Docker images |

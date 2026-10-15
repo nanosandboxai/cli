@@ -16,7 +16,7 @@ tooling.
 | `crates/protocol` | Versioned NDJSON protocol types (source of truth for the wire) |
 | `crates/client` | `SandboxClient` + live conformance tests |
 | `crates/conformance` | CI-safe protocol conformance harness |
-| `runtime/` | MicroVM engine (libkrun FFI), OCI images, config defaults |
+| `runtime/` | MicroVM engine (libkrun FFI), OCI images; `runtime/crates/runtime-config` is the FFI-free config-types crate (re-exported as `runtime::config`) |
 | `sandbox/` | Agent-aware sandbox SDK + `deploy` module + `sandbox.yml` parsing |
 | `sdk/` | 8 language SDKs (Rust, Python, TypeScript/Node, Go, Ruby, Java, C#/.NET, Kotlin) + `conformance/` |
 | `agents-registry/` | Agent definitions, skills, MCP sources, model catalog, Docker images |
