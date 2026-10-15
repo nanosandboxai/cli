@@ -54,3 +54,34 @@ jobs:
       - name: Unit tests (runtime)
         run: cargo test -p runtime --lib
 
+  host-layer:
+    name: Host layer (FFI/TUI-free)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build nanosb-host
+        run: cargo build -p nanosb-host
+
+      - name: Assert nanosb-host is engine/TUI-free
+        run: |
+          tree="$(cargo tree -p nanosb-host -e normal)"
+          if echo "$tree" | grep -qE 'libkrun-sys|ratatui|tui-term|arboard'; then
+            echo "::error::nanosb-host must not depend on the VM engine or the TUI"
+            echo "$tree" | grep -E 'libkrun-sys|ratatui|tui-term|arboard'
+            exit 1
+          fi
+
+      - name: Assert slim helper pulls no TUI deps
+        run: |
+          tree="$(cargo tree -p nanosb-cli --no-default-features --features runtime-host -e normal)"
+          if echo "$tree" | grep -qE 'ratatui|tui-term|arboard'; then
+            echo "::error::the slim helper (runtime-host) must not pull TUI deps"
+            echo "$tree" | grep -E 'ratatui|tui-term|arboard'
+            exit 1
+          fi
+

@@ -2,32 +2,38 @@
 
 VM-based sandbox engine using libkrun FFI.
 
-> **Platform Status**: Currently, only **macOS Apple Silicon** is fully tested and stable.
-> Linux support is in development. Windows support has been archived (see `archive/windows-track` branch).
+> **Platform Status**: **macOS Apple Silicon** is stable. **Linux x86_64 (KVM)** is
+> live-verified (see [`../docs/live-verification-linux.md`](../docs/live-verification-linux.md));
+> Linux aarch64 uses the same code path but is not yet exercised. Windows support
+> has been archived (see the `archive/windows-track` branch).
 
 ## Overview
 
-Nanosandbox Runtime is a pure VM engine providing hardware-isolated execution environments. Each sandbox runs in its own microVM, delivering stronger security guarantees than traditional containers that share the host kernel.
+Nanosandbox Runtime is a VM engine providing hardware-isolated execution
+environments. Each sandbox runs in its own microVM, delivering stronger security
+guarantees than traditional containers that share the host kernel.
 
-This crate handles VM lifecycle, OCI image management, and containerization. It does **not** contain agent logic -- agent-specific functionality lives in the [Sandbox SDK](https://github.com/nanosandboxai/sandbox).
+This crate handles VM lifecycle, OCI image management, and containerization. It
+does **not** contain agent logic — agent-specific functionality lives in the
+in-repo [Sandbox SDK](../sandbox).
 
 ## Key Features
 
-- **VM-Level Isolation** -- Each sandbox runs in its own microVM via libkrun (KVM/HVF)
-- **OCI Image Support** -- Use any container image from Docker Hub, GHCR, or private registries
-- **Sub-Second Boot Times** -- Optimized VM startup using libkrun
-- **TSI Networking** -- Transparent Socket Impersonation for seamless network access
-- **Next-Mode Console Boot** -- console I/O fds, extra virtiofs mounts, and microVM-layer network bring-up for vanilla images
-- **Cross-Platform** -- macOS Apple Silicon (stable), Linux (in development)
+- **VM-Level Isolation** — Each sandbox runs in its own microVM via libkrun (KVM/HVF)
+- **OCI Image Support** — Use any container image from Docker Hub, GHCR, or private registries
+- **Sub-Second Boot Times** — Optimized VM startup using libkrun
+- **TSI Networking** — Transparent Socket Impersonation for seamless network access
+- **Next-Mode Console Boot** — console I/O fds, extra virtiofs mounts, and microVM-layer network bring-up for vanilla images
+- **Cross-Platform** — macOS Apple Silicon (stable), Linux x86_64 KVM (live-verified)
 
 ## Architecture
 
 ```
-Application (CLI, SDKs)
+Application (CLI, SDKs)  [../src, ../sdk]
        |
-   Sandbox SDK (separate repo)
+   Sandbox SDK  [../sandbox]
        |
-   Nanosandbox Runtime (this repo)
+   Nanosandbox Runtime (this crate)
        |
    +-------+-------+
    |               |
@@ -37,41 +43,45 @@ Application (CLI, SDKs)
    OCI             libkrun + libkrunfw
    Registry        |
                    Hardware Virtualization
-                   (KVM / HVF / WHPX)
+                   (KVM / HVF)
 ```
 
 ## Public API
 
-Key exports from the `nanosandbox` crate:
+Key exports from the `runtime` crate:
 
 | Export | Description |
 |--------|-------------|
 | `Sandbox` | Lifecycle management: create, start, stop, destroy, exec |
-| `SandboxConfig` | Builder pattern for VM configuration (CPUs, memory, image, mounts, networking) |
+| `SandboxConfig` | Builder for VM configuration (CPUs, memory, image, mounts, networking) |
 | `ImageManager` | OCI image operations: pull, list, remove, prune |
 | `Runtime` | Low-level platform abstraction over libkrun FFI |
-| `Sandbox::start_next` | Next-mode start with console fds and extra virtiofs mounts |
 
-Additional re-exports: `SandboxConfig`, `ExecResult`, `ExecOptions`, `SandboxStatus`, `SandboxRegistry`, `SandboxInfo`, `OciBundle`, `CredentialStore`, `NetworkConfig`, `NetworkMode`, `NetworkScope`, `Mount`, `MountType`, `PortMapping`, `ImageRef`, `PulledImage`, `PruneResult`.
+Additional re-exports include `SandboxConfig`, `ExecResult`, `ExecOptions`,
+`SandboxStatus`, `SandboxRegistry`, `SandboxInfo`, `OciBundle`, `CredentialStore`,
+`NetworkConfig`, `NetworkMode`, `NetworkScope`, `Mount`, `MountType`,
+`PortMapping`, `ImageRef`, `PulledImage`, `PruneResult`. The exact set is defined
+in `crates/runtime/src/lib.rs`.
 
 ## Platform Support
 
 | Platform | Runtime | Hypervisor | Status |
 |----------|---------|------------|--------|
 | **macOS** | libkrun FFI | HVF (Hypervisor.framework) | **Stable** |
-| **Linux** | libkrun FFI | KVM | In Development |
+| **Linux** | libkrun FFI | KVM | **Live-verified (x86_64)** |
 
 ### Platform Notes
 
-- **macOS Apple Silicon (M1/M2/M3/M4)**: Fully tested and stable. Use the install script for easy setup.
-- **Linux**: Not fully supported/tested yet. Requires libkrun installation.
+- **macOS Apple Silicon (M1/M2/M3/M4)**: Stable. Use the install script for setup.
+- **Linux x86_64**: Live-verified on KVM. Requires `/dev/kvm` accessible to the user.
+- **Windows**: archived (see the `archive/windows-track` branch).
 
 ## Build Instructions
 
 ### Prerequisites
 
-- Rust 1.70+
-- libkrunfw (guest firmware) — built from submodule
+- Rust (see `rust-toolchain.toml`)
+- libkrunfw (guest firmware) — built from the submodule
 - macOS: `brew install lld llvm` (for cross-compiling libkrun's init blob)
 - Linux: KVM enabled (`/dev/kvm` accessible)
 
@@ -91,72 +101,51 @@ nanosandbox customizations (next-mode init, macOS virtiofs hardening) as commits
 ### Build
 
 ```bash
-cargo build -p nanosandbox
+cargo build -p runtime
 ```
 
 ### Test
 
 ```bash
-cargo test -p nanosandbox
+cargo test -p runtime --lib
 ```
 
 ### Custom libkrun path
 
 ```bash
 export LIBKRUN_LIB_DIR=/path/to/libkrun.a/dir
-cargo build -p nanosandbox
+cargo build -p runtime
 ```
 
-## SDK Usage
+## Driving the runtime
 
-```rust
-use nanosandbox::{Sandbox, SandboxConfig};
+The runtime is driven in-process by the `nanosb` supervisor and out-of-process
+through the `nanosb-runtime` helper over the versioned NDJSON protocol (`exec`,
+`wait`, `kill`, PTY). See [`../docs/protocol/protocol.md`](../docs/protocol/protocol.md)
+and the [`../sdk`](../sdk) clients.
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Create sandbox configuration
-    let config = SandboxConfig::builder()
-        .name("my-sandbox")
-        .image("python:3.12-slim")
-        .cpus(2)
-        .memory_mb(4096)
-        .build();
-
-    // Create and start sandbox
-    let mut sandbox = Sandbox::create(config).await?;
-    sandbox.start().await?;
-
-    // Execute a command
-    let result = sandbox.exec("python", &["-c", "print('Hello!')"]).await?;
-    println!("Output: {}", result.stdout);
-
-    // Clean up
-    sandbox.destroy().await?;
-    Ok(())
-}
-```
-
-## This Repo Does NOT Contain
+## This Crate Does NOT Contain
 
 | Concern | Where to find it |
 |---------|-----------------|
-| Console streaming / logs | CLI (`nanosb`) |
-| MCP server management | [Sandbox SDK](https://github.com/nanosandboxai/sandbox) |
-| Agent configuration / sandbox.yml parsing | [Sandbox SDK](https://github.com/nanosandboxai/sandbox) |
-| Docker images for agents | [Agents Registry](https://github.com/nanosandboxai/agents-registry) |
-| Session management | [Sandbox SDK](https://github.com/nanosandboxai/sandbox) |
+| Console streaming / logs | CLI ([`../src`](../src), `nanosb`) |
+| MCP server management | [Sandbox SDK](../sandbox) |
+| Agent configuration / `sandbox.yml` parsing | [Sandbox SDK](../sandbox) |
+| Docker images for agents | [Agents Registry](../agents-registry) |
+| Session management | [Sandbox SDK](../sandbox) |
 
-## Related Repos
+## Related Components (monorepo)
 
-- [Sandbox SDK](https://github.com/nanosandboxai/sandbox) -- Agent-aware SDK with FFI bindings for multi-language SDKs
-- [Agents Registry](https://github.com/nanosandboxai/agents-registry) -- Agent definitions, skills, Docker images
-- [Nanosandbox monorepo](https://github.com/nanosandboxai/nanosandbox) -- CLI, runtime, sandbox SDK, registry, and releases
+- [Sandbox SDK](../sandbox) — Agent-aware SDK and `sandbox.yml` parsing
+- [Language SDKs](../sdk) — Eight protocol clients + conformance harness
+- [Agents Registry](../agents-registry) — Agent definitions, skills, Docker images
+- [CLI](../src) — `nanosb` CLI + TUI
 
 ## Comparison with Alternatives
 
 | Feature | Nanosandbox | Microsandbox | Docker | gVisor |
 |---------|-------------|--------------|--------|--------|
-| Isolation | VM (KVM/HVF/HCS) | VM (libkrun) | Namespace | User-space kernel |
+| Isolation | VM (KVM/HVF) | VM (libkrun) | Namespace | User-space kernel |
 | OCI Registry Support | Any | Own registry | Any | Any |
 | Linux Support | Yes (KVM) | Yes | Yes | Yes |
 | macOS Support | Apple Silicon | Apple Silicon | Yes | No |

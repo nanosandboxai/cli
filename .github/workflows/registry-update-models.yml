@@ -7,8 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   update-models:
@@ -48,18 +47,9 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v6
+      - name: Upload synced models
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: sync models.json from OpenRouter"
-          title: "chore: sync models.json"
-          body: |
-            Automated sync of `agents-registry/models/models.json` from [OpenRouter](https://openrouter.ai/api/v1/models) public model catalog.
-
-            ${{ steps.summary.outputs.body }}
-
-            This PR was created by the daily `update-models` workflow.
-          branch: chore/update-models
-          delete-branch: true
-          labels: automated
+          name: registry-models
+          path: agents-registry/models/models.json
+          retention-days: 30

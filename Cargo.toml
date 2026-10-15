@@ -2,6 +2,7 @@
 members = [
     # Nanosandbox runtime (VM engine) and libkrun bindings.
     "runtime/crates/runtime",
+    "runtime/crates/runtime-config",
     "runtime/crates/libkrun-sys",
     # Agent-aware sandbox SDK and its gateway client.
     "sandbox/crates/sandbox",
@@ -11,6 +12,8 @@ members = [
     "crates/client",
     # CI-safe protocol conformance harness for every SDK driver.
     "crates/conformance",
+    # Thin host layer (supervisor client/state; no TUI, no FFI).
+    "crates/host",
     # Language SDKs.
     "sdk/rust",
 ]
@@ -28,6 +31,7 @@ exclude = [
 ]
 
 [workspace.package]
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/nanosandboxai/nanosandbox"
@@ -35,7 +39,7 @@ authors = ["DevDone Labs"]
 
 [package]
 name = "nanosb-cli"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "CLI and TUI for nanosandbox"
 license = "Apache-2.0"
@@ -51,9 +55,10 @@ name = "nanosb-runtime"
 path = "src/bin/nanosb_runtime.rs"
 
 [features]
-default = []
-# The slim helper profile (WS1). Selects the supervisor + protocol substrate
-# without pulling in TUI-only functionality at runtime.
+default = ["tui"]
+# Full CLI + interactive TUI (ratatui/tui-term/arboard/png).
+tui = ["dep:ratatui", "dep:vt100", "dep:tui-term", "dep:arboard", "dep:png"]
+# The slim helper profile (WS1): supervisor + protocol substrate, no TUI deps.
 runtime-host = []
 
 [dependencies]
@@ -61,6 +66,7 @@ sandbox = { path = "sandbox/crates/sandbox" }
 runtime = { path = "runtime/crates/runtime" }
 nanosb-protocol = { path = "crates/protocol" }
 nanosb-client = { path = "crates/client" }
+nanosb-host = { path = "crates/host" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -82,12 +88,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-appender = "0.2"
 
-# TUI
-ratatui = "0.30"
-vt100 = "0.16"
-tui-term = "0.3"
-arboard = "3.6.1"
-png = "0.18"
+# TUI (optional; enabled by the `tui` feature)
+ratatui = { version = "0.30", optional = true }
+vt100 = { version = "0.16", optional = true }
+tui-term = { version = "0.3", optional = true }
+arboard = { version = "3.6.1", optional = true }
+png = { version = "0.18", optional = true }
 
 # Utilities
 base64 = "0.23"
@@ -110,7 +116,9 @@ assert_cmd = "2"
 predicates = "3"
 
 [profile.release]
-lto = true
+# LTO must stay off: the CLI statically links libkrun.a (a Rust staticlib that
+# bundles non-bitcode compiler-rt objects), which fat/thin LTO cannot link.
+lto = false
 codegen-units = 1
 opt-level = "s"
 strip = true

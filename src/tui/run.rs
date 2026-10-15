@@ -2240,7 +2240,7 @@ pub(crate) async fn handle_command(app: &mut App, cmd: Command, tx: &mpsc::Unbou
             if let Some(dir) = project_dir {
                 let dir = dir.clone();
                 let msg = tokio::task::spawn_blocking(move || {
-                    let output = super::gitcmd::host_git()
+                    let output = crate::gitcmd::host_git()
                         .args(["branch", "--list", "nanosb/*"])
                         .current_dir(&dir)
                         .output();
@@ -2393,7 +2393,7 @@ pub(crate) async fn handle_command(app: &mut App, cmd: Command, tx: &mpsc::Unbou
                                     let wt = wt_base.clone();
                                     let src = source.clone();
                                     let ok = tokio::task::spawn_blocking(move || {
-                                        super::gitcmd::host_git()
+                                        crate::gitcmd::host_git()
                                             .args([
                                                 "fetch",
                                                 &wt.to_string_lossy(),
@@ -2709,7 +2709,7 @@ fn handle_apply(app: &mut App, force: bool) {
             return;
         }
     };
-    let mut cmd = super::gitcmd::host_git();
+    let mut cmd = crate::gitcmd::host_git();
     if force {
         cmd.args(["merge", &nanosb_ref]);
     } else {
@@ -2862,7 +2862,7 @@ fn handle_diff(app: &mut App, stat: bool) {
         app.set_status_message("No project clone for this panel.");
         return;
     };
-    if !super::gitcmd::has_real_git_dir(&wt) {
+    if !crate::gitcmd::has_real_git_dir(&wt) {
         app.set_status_message("Refusing: clone .git is not a real directory.");
         return;
     }
@@ -2876,7 +2876,7 @@ fn handle_diff(app: &mut App, stat: bool) {
     // Never let the agent-writable clone run an external diff or `textconv`
     // driver (`diff.<driver>.textconv` executes an agent-controlled command).
     let run_diff = |repo: &std::path::Path, range: &str| -> Option<String> {
-        let mut cmd = super::gitcmd::host_git();
+        let mut cmd = crate::gitcmd::host_git();
         if stat {
             cmd.args(["diff", "--no-ext-diff", "--no-textconv", "--stat", range]);
         } else {
@@ -2916,11 +2916,11 @@ fn handle_git_status(app: &mut App) {
         app.set_status_message("No project clone for this panel.");
         return;
     };
-    if !super::gitcmd::has_real_git_dir(&wt) {
+    if !crate::gitcmd::has_real_git_dir(&wt) {
         app.set_status_message("Refusing: clone .git is not a real directory.");
         return;
     }
-    let branch = super::gitcmd::host_git()
+    let branch = crate::gitcmd::host_git()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&wt)
         .output()
@@ -2928,7 +2928,7 @@ fn handle_git_status(app: &mut App) {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "?".to_string());
-    let dirty = super::gitcmd::host_git()
+    let dirty = crate::gitcmd::host_git()
         .args(["status", "--porcelain"])
         .current_dir(&wt)
         .output()
@@ -2994,11 +2994,11 @@ fn handle_discard(app: &mut App) {
         }
     }
 
-    if !super::gitcmd::has_real_git_dir(&wt) {
+    if !crate::gitcmd::has_real_git_dir(&wt) {
         app.set_status_message("Refusing: clone .git is not a real directory.");
         return;
     }
-    let out = super::gitcmd::host_git()
+    let out = crate::gitcmd::host_git()
         .args(["reset", "--hard", &base])
         .current_dir(&wt)
         .output();

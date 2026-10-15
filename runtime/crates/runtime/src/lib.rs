@@ -40,7 +40,7 @@
 #![warn(clippy::all)]
 
 pub mod auth;
-pub mod config;
+pub use runtime_config as config;
 pub mod error;
 pub mod exec;
 pub mod image;
@@ -51,7 +51,7 @@ pub mod sandbox;
 
 // Re-exports
 pub use auth::CredentialStore;
-pub use config::{
+pub use runtime_config::{
     ConsoleSpec, ExtraMount, Mount, MountType, NetworkConfig, NetworkMode, NetworkScope,
     PortMapping, ProjectConfig, RegistryConfig, RuntimeMode, SandboxConfig, WorkspaceMode,
 };
@@ -65,7 +65,7 @@ pub use sandbox::{ProgressFn, Sandbox, SandboxStatus};
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::auth::CredentialStore;
-    pub use crate::config::*;
+    pub use runtime_config::*;
     pub use crate::error::{Error, Result};
     pub use crate::image::{ImageManager, ImageRef, PulledImage};
     pub use crate::oci::OciBundle;

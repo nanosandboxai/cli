@@ -1,5 +1,7 @@
 # Agents Registry Implementation Plan
 
+> **Superseded** — this design predates the current architecture (the in-VM `agent-gateway` was removed). Kept for historical record; see `sandbox/README.md` and `docs/` for the current source of truth.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Populate the agents-registry with agent definitions (Python, Rust, React, DevOps), reusable skills, MCP source references, a JSON Schema for validation, and a GitHub Actions workflow to generate `index.json`.

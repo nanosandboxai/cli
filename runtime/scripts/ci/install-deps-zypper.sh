@@ -2,14 +2,21 @@
 # Install build dependencies on openSUSE (zypper)
 set -euo pipefail
 
-zypper --non-interactive install \
+zypper --non-interactive --gpg-auto-import-keys refresh
+
+# Tumbleweed packages pyelftools under a versioned python3xx name.
+PYELFTOOLS="python3-pyelftools"
+if ! zypper --non-interactive install --no-recommends "$PYELFTOOLS" 2>/dev/null; then
+    PYELFTOOLS="python311-pyelftools"
+fi
+
+zypper --non-interactive install --no-recommends \
     gcc \
     make \
     curl \
     ca-certificates \
     git \
     python3 \
-    python3-pyelftools \
     bc \
     flex \
     bison \
@@ -23,7 +30,8 @@ zypper --non-interactive install \
     clang-devel \
     glibc-devel-static \
     rust \
-    cargo
+    cargo \
+    "$PYELFTOOLS"
 
 # Install Go from upstream (distro Go may be too old for deps)
 if ! command -v go >/dev/null 2>&1 || ! go version 2>/dev/null | grep -qE 'go1\.(2[4-9]|[3-9])'; then

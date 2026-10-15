@@ -1,5 +1,7 @@
 # Non-Git Project Support Design
 
+> **Superseded** — this design predates the current architecture (the in-VM `agent-gateway` was removed). Kept for historical record; see `sandbox/README.md` and `docs/` for the current source of truth.
+
 **Date:** 2026-05-03  
 **Issue:** nanosandboxai/cli#11  
 **Repos affected:** `sandbox` (primary), `cli` (follow-up)  

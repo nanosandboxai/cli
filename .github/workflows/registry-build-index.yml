@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-index
@@ -37,14 +37,9 @@ jobs:
       - name: Validate index.json
         run: python3 -m json.tool agents-registry/index.json > /dev/null
 
-      - name: Commit updated index
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add agents-registry/index.json
-          if git diff --cached --quiet; then
-            echo "No changes to index.json"
-          else
-            git commit -m "chore: regenerate index.json"
-            git push
-          fi
+      - name: Upload generated index
+        uses: actions/upload-artifact@v4
+        with:
+          name: registry-index
+          path: agents-registry/index.json
+          retention-days: 30

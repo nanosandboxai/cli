@@ -2,6 +2,8 @@
 # Install build dependencies on Fedora (dnf)
 set -euo pipefail
 
+dnf -y makecache
+
 dnf install -y \
     gcc \
     make \

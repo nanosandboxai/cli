@@ -1,5 +1,7 @@
 # GitSync Settings & External Tool Integration — Implementation Plan
 
+> **Superseded / historical** — this document predates the current monorepo architecture (the in-VM `agent-gateway` was removed; the layout and commands have changed). Kept for historical record; see `runtime/README.md`, `docs/protocol/protocol.md`, and `src/` for the current source of truth.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add user settings for git sync safety control, `/gitsync` and `/open` TUI commands, and suspend-and-launch external tool integration.

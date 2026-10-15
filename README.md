@@ -1,16 +1,25 @@
 # Nanosandbox
 
-Monorepo for the Nanosandbox platform — run AI coding agents in isolated microVM sandboxes.
+Monorepo for the Nanosandbox platform — run AI coding agents in hardware-isolated microVM
+sandboxes (via [libkrun](https://github.com/containers/libkrun)).
 
 ## Repository layout
 
 | Path | Contents |
 |------|----------|
-| `.` (`src/`, `config/`, `scripts/`, `test/`) | `nanosb` CLI + TUI |
-| `runtime/` | MicroVM engine (libkrun), libkrunfw/gvproxy dependencies |
-| `sandbox/` | Agent-aware sandbox SDK + host-side deploy module |
-| `agents-registry/` | Agent definitions, skills, MCP sources, Docker images |
-| `install-deps/` | Runtime dependency installer scripts |
+| `src/` | `nanosb` CLI + TUI (clap surface in `src/main.rs`, TUI in `src/tui/`) |
+| `crates/protocol` | Versioned NDJSON protocol types (source of truth for the wire) |
+| `crates/client` | `SandboxClient` + live conformance tests |
+| `crates/conformance` | CI-safe protocol conformance harness |
+| `crates/host` | Thin host layer: supervisor client + state (no TUI, no FFI) |
+| `runtime/` | MicroVM engine (libkrun FFI), OCI images; `runtime/crates/runtime-config` holds the FFI-free config types |
+| `sandbox/` | Agent-aware sandbox SDK + `deploy` module + `sandbox.yml` parsing |
+| `sdk/` | Eight language SDKs + conformance harness (see [`sdk/README.md`](sdk/README.md)) |
+| `agents-registry/` | Agent definitions, skills, MCP sources, model catalog, Docker images |
+| `install-deps/` | Runtime dependency (libkrunfw + gvproxy) installer |
+| `guest/` | In-guest exec agent (linux/aarch64, cross-compiled) |
+| `docs/` | Protocol spec, ADRs, epics/plans, live-verification reports |
+| `scripts/`, `test/` | Install/packaging scripts and shell-based CLI/config tests |
 
 ## Install
 
@@ -18,13 +27,15 @@ Monorepo for the Nanosandbox platform — run AI coding agents in isolated micro
 curl -fsSL https://github.com/nanosandboxai/nanosandbox/releases/latest/download/install.sh | bash
 ```
 
-This installs the `nanosb` binary along with runtime dependencies (libkrun, gvproxy) and codesigns the binary on macOS.
+This installs the `nanosb` binary, the runtime dependencies (libkrunfw + gvproxy), and the
+guest `exec-agent`, then codesigns the binary on macOS.
 
 ### Requirements
 
-- macOS Apple Silicon (arm64)
-- Linux is not yet supported
-- Windows support has been archived (see `archive/windows-track` branch)
+- **macOS Apple Silicon (arm64)** — stable.
+- **Linux x86_64 (KVM)** — live-verified (see [`docs/live-verification-linux.md`](docs/live-verification-linux.md));
+  aarch64 uses the same code path but is not yet exercised. Requires `/dev/kvm`.
+- **Windows** — support has been archived (see the `archive/windows-track` branch).
 
 ### Build from Source
 
@@ -73,6 +84,10 @@ nanosb --cpus 4 --memory 8192 --timeout 1200
 
 # Provide runtime env pool for this TUI run
 nanosb --env OPENAI_API_KEY=... --env-file .env.local
+
+# Resume the most recent session, or a specific one
+nanosb --resume
+nanosb --session <session-id>
 ```
 
 Notes:
@@ -91,6 +106,25 @@ Notes:
 # Add panel and import selected startup env keys
 /add claude --use-env OPENAI_API_KEY --use-env GITHUB_TOKEN
 ```
+
+### Language SDKs
+
+Eight protocol clients — **Rust, Python, TypeScript/Node, Go, Ruby, Java, C#/.NET, Kotlin** —
+plus a language-agnostic conformance harness, all speaking protocol **v1.0.0**
+(35 conformance scenarios). See [`sdk/README.md`](sdk/README.md) and the per-language
+READMEs under `sdk/<lang>/`.
+
+```bash
+# Run the conformance harness
+cargo build -p nanosb-conformance
+```
+
+### containerd / CRI
+
+The runtime exposes a shim-facing surface over the same protocol: `exec` with an optional
+PTY (tty/cols/rows), a blocking `wait` returning the exit code, and `kill` with a signal.
+This is the substrate for containerd/CRI integration on Linux/KVM. See
+[`docs/protocol/protocol.md`](docs/protocol/protocol.md).
 
 ### Testing the TUI
 
@@ -113,16 +147,25 @@ scripts/tui-smoke.sh
 ### CLI Commands
 
 ```bash
-nanosb pull <image>          # Pull an image (full registry path required)
-nanosb images                # List cached images
-nanosb run <image> [cmd]     # Run a command in a new sandbox
-nanosb exec <sandbox> <cmd>  # Execute a command in a running sandbox
-nanosb ps [-a]               # List sandboxes (running, or all with -a)
-nanosb stop <sandbox>        # Stop a running sandbox
-nanosb rm [-f] <sandbox>     # Remove a sandbox
-nanosb doctor                # Check runtime prerequisites
-nanosb cleanup               # Clean up stale project clones
-nanosb cache prune [--all]   # Reclaim disk space from image cache
+nanosb pull <image>            # Pull an image (full registry path required)
+nanosb images                  # List cached images
+nanosb run <image> [cmd]       # Run a command in a new sandbox
+nanosb exec <sandbox> <cmd>    # Execute a command in a running sandbox
+nanosb ps [-a]                 # List sandboxes (running, or all with -a)
+nanosb logs <sandbox> [-f]     # Tail a sandbox console log
+nanosb attach <sandbox>        # Attach to a running sandbox
+nanosb stop <sandbox>          # Stop a running sandbox
+nanosb restart <sandbox>       # Restart a sandbox
+nanosb rm [-f] <sandbox>       # Remove a sandbox
+nanosb describe <sandbox>      # Show a sandbox's resolved configuration
+nanosb apply [-f sandbox.yml]  # Apply sandbox.yml (redeploy); supports --dry-run/--prune
+nanosb doctor                  # Check runtime prerequisites
+nanosb cleanup [--dry-run]     # Clean up stale project clones
+nanosb sessions [--project P]  # List saved sessions
+nanosb projects                # List registered projects
+nanosb projects-forget <path>  # Forget a registered project
+nanosb gc [--dry-run]          # Reclaim dead supervisor state
+nanosb cache prune [--all]     # Reclaim disk space from image cache
 ```
 
 ### Global Flags
@@ -130,7 +173,7 @@ nanosb cache prune [--all]   # Reclaim disk space from image cache
 | Flag | Description |
 |---|---|
 | `--format text\|json` | Output format (default: text) |
-| `--verbose` | Enable debug logging |
+| `-v, --verbose` | Enable debug logging |
 | `--config <path>` | Path to sandbox.yml (repeatable) |
 | `--sandbox <name>` | Start only the named sandbox |
 | `--project <path>` | Project directory to mount |
@@ -140,13 +183,24 @@ nanosb cache prune [--all]   # Reclaim disk space from image cache
 | `--permissions <level>` | Agent permissions: default, accept-edits, allow-all |
 | `-e KEY=VALUE` | Inject environment variable |
 | `--env-file <path>` | Load env vars from file |
+| `-r, --resume` | Resume the most recent saved session |
+| `--session <id>` | Resume a specific session from history |
 
 ### Environment Variables
 
 | Variable | Description |
 |---|---|
+| `NANOSANDBOX_HOME` | Base install directory (default: `~/.nanosandbox`) |
+| `INSTALL_DIR` | CLI binary directory (default: `$NANOSANDBOX_HOME/bin`) |
 | `NANOSB_VERSION` | Version to install (default: latest) |
-| `INSTALL_DIR` | Binary install directory (default: `~/.local/bin`) |
+| `DEPS_VERSION` | Runtime-deps version to install (default: latest) |
+| `NANOSB_BINARY` | Path to a local `nanosb` binary to install (skips download) |
+| `NANOSB_EXEC_AGENT` | Path to a local `exec-agent` binary to install (skips download) |
+| `NANOSB_HOME` | Runtime state root (default: `~/.nanosandbox`) |
+| `NANOSB_LOG` | Log level for the file log |
+| `NANOSB_REGISTRY_PATH` | Path to the agents registry (default: `~/.nanosandbox/agents-registry`) |
+| `NANOSB_GUEST_BIN_DIR` | Directory holding `exec-agent` (default: `$NANOSB_HOME/guest-bin`) |
+| `NANOSB_BINARY_PATH` | Path to the `nanosb` binary used to spawn the supervisor |
 
 ## sandbox.yml
 
@@ -157,22 +211,54 @@ defaults:
   cpus: 2
   memory: 4096
   timeout: 600
+  permissions: default
+  workspace:
+    mode: isolated        # isolated (default) | shared
+    fresh_rootfs: false
 
 sandboxes:
   claude:
     image: claude
     env:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    env_file: .env.claude
+    agent: python-developer
+    skills: [git-workflow, tdd]
+    model: claude-sonnet-4
+    permissions: accept-edits
     mcp:
       github:
         command: npx
         args: ["-y", "@modelcontextprotocol/server-github"]
+    network:
+      enabled: true
+      mode: tsi             # tsi (default) | bridge
+      scope: public         # public (default) | private
+      ports: ["8080:80"]
+      dns: ["1.1.1.1"]
+    mounts:
+      - host: ./data
+        container: /data
+        readonly: true
+    project:
+      path: .
+      branch: main
+      mount_point: /workspace
+      auto_sync: false
 
   codex:
     image: codex
     cpus: 4
+    run_as_root: false
     env:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+    auto_mode: true
+    prompt: "Refactor the module in /workspace."
+
+  cursor:
+    type: cursor
+    image: cursor
+    interactive: true
 ```
 
 Bare image names (e.g., `claude`, `codex`) are automatically resolved to `ghcr.io/nanosandboxai/agents-registry/<name>:latest`.
@@ -224,6 +310,24 @@ sandbox, keep the panel), `/exec <cmd>` (run in an exec-channel sandbox),
 `/mounts`, and `/apply` (fast-forward-merge `refs/nanosb/<id>` into your
 branch). Registered projects can be listed and switched with `/projects` and
 `/project <n|path>` — panels from different projects coexist in one TUI.
+
+## Advanced sandbox surface
+
+Beyond a single container, a sandbox can expose persistent volumes, disk
+snapshots, published ports, and an explicit security context. Design decisions:
+
+- [Snapshots](docs/decisions/snapshots.md) — disk-only snapshots.
+- [Volume backings](docs/decisions/volume-backings.md) — directory-backed volumes.
+- [Networking & dynamic publish scope](docs/decisions/networking-dynamic-publish-scope.md).
+- [Security context contract](docs/decisions/security-context-contract.md).
+- [Multi-container-per-VM](docs/decisions/multi-container-per-vm.md) — v1 keeps one container per VM.
+
+## Packaging
+
+Self-contained per-language runtime bundles (helper + libkrunfw + gvproxy +
+`exec-agent` + SDK sources + `LICENSE`) can be produced with
+[`scripts/package-sdk.sh`](scripts/package-sdk.sh); see
+[`docs/runtime-setup.md`](docs/runtime-setup.md) for the runtime setup and bundle layout.
 
 ## License
 

@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "libkrun-sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
 ]
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nanosb-client",
 ]
@@ -2169,6 +2169,7 @@ dependencies = [
  "libc",
  "log",
  "nanosb-client",
+ "nanosb-host",
  "nanosb-protocol",
  "png",
  "predicates",
@@ -2193,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "nanosb-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nanosb-protocol",
  "serde_json",
@@ -2202,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "nanosb-conformance"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nanosb-client",
  "nanosb-protocol",
@@ -2211,8 +2212,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanosb-host"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "nanosb-protocol",
+ "runtime-config",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nanosb-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3129,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3145,6 +3157,7 @@ dependencies = [
  "oci-client",
  "oci-spec",
  "openssl",
+ "runtime-config",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3157,6 +3170,14 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "xattr",
+]
+
+[[package]]
+name = "runtime-config"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3302,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3310,6 +3331,7 @@ dependencies = [
  "gateway",
  "git2",
  "runtime",
+ "runtime-config",
  "serde",
  "serde_json",
  "sha2 0.11.0",

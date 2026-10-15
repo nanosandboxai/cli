@@ -1,5 +1,7 @@
 # Nanosandbox Design Document
 
+> **Superseded / historical** — this document predates the current monorepo architecture (the in-VM `agent-gateway` was removed; the layout and commands have changed). Kept for historical record; see `runtime/README.md`, `docs/protocol/protocol.md`, and `src/` for the current source of truth.
+
 ## Executive Summary
 
 Nanosandbox is a Rust SDK for managing VM-isolated sandboxes using libkrun via direct FFI. It provides a simple, async API for creating and managing secure execution environments with full OCI image support.

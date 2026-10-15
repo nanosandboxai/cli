@@ -61,7 +61,7 @@ jobs:
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: |
           cd runtime/deps/libkrunfw
-          make kernel.c -j$(nproc)
+          make kernel.c -j"$(nproc)"
           cp kernel.c ../../../kernel-x86_64.c
           echo "=== x86_64 kernel.c ==="
           ls -lh ../../../kernel-x86_64.c
@@ -71,7 +71,7 @@ jobs:
         run: |
           cd runtime/deps/libkrunfw
           make clean
-          make kernel.c ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
+          make kernel.c ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
           cp kernel.c ../../../kernel-aarch64.c
           echo "=== aarch64 kernel.c ==="
           ls -lh ../../../kernel-aarch64.c
@@ -186,7 +186,7 @@ jobs:
           rm -rf dist/deps-staging
 
           # Checksums
-          cd dist && sha256sum *.tar.gz > checksums-linux-${{ matrix.arch }}.sha256
+          cd dist && sha256sum ./*.tar.gz > checksums-linux-${{ matrix.arch }}.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -199,6 +199,8 @@ jobs:
     name: Runtime deps macOS arm64
     runs-on: macos-latest
     needs: build-kernels
+    env:
+      HAS_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -249,6 +251,24 @@ jobs:
           cd runtime/deps/gvproxy
           CGO_ENABLED=0 go build -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
 
+      - name: Sign helper binaries (Developer ID, gated)
+        if: env.HAS_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          echo "$MACOS_CERT_P12" | openssl base64 -d -A -out "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk 'NR==1{print $2}')"
+          codesign --sign "$IDENTITY" --options runtime --timestamp --force runtime/deps/libkrunfw/libkrunfw.5.dylib
+          codesign --sign "$IDENTITY" --options runtime --timestamp --force runtime/deps/gvproxy/gvproxy
+
       - name: Package artifacts
         run: |
           mkdir -p dist
@@ -268,7 +288,7 @@ jobs:
           tar czf dist/deps-darwin-arm64.tar.gz -C dist/deps-staging .
           rm -rf dist/deps-staging
 
-          cd dist && shasum -a 256 *.tar.gz > checksums-darwin-arm64.sha256
+          cd dist && shasum -a 256 ./*.tar.gz > checksums-darwin-arm64.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -340,6 +360,8 @@ jobs:
   build-cli-macos:
     name: Build CLI (macOS arm64)
     runs-on: macos-latest
+    env:
+      HAS_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -371,12 +393,47 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p nanosb-cli --target aarch64-apple-darwin
 
-      - name: Codesign binary
+      - name: Sign (Developer ID, gated)
+        if: env.HAS_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          echo "$MACOS_CERT_P12" | openssl base64 -d -A -out "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk 'NR==1{print $2}')"
+          codesign --sign "$IDENTITY" --options runtime --timestamp \
+            --entitlements entitlements.plist --force \
+            target/aarch64-apple-darwin/release/nanosb
+          codesign --verify --verbose=2 target/aarch64-apple-darwin/release/nanosb
+
+      - name: Sign (ad-hoc fallback)
+        if: env.HAS_SIGNING != 'true'
         run: |
           codesign --sign - \
             --entitlements entitlements.plist \
             --force \
             target/aarch64-apple-darwin/release/nanosb
+
+      - name: Notarize and staple (gated)
+        if: env.HAS_SIGNING == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_ID" ]; then echo "notarization secrets absent; skipping"; exit 0; fi
+          ditto -c -k --keepParent target/aarch64-apple-darwin/release/nanosb "$RUNNER_TEMP/nanosb.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/nanosb.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple target/aarch64-apple-darwin/release/nanosb
+          spctl -a -vv target/aarch64-apple-darwin/release/nanosb || true
 
       - name: Verify binary
         run: |
@@ -394,6 +451,105 @@ jobs:
           path: nanosb
           retention-days: 7
 
+  # ─── Job 5: Guest exec-agent (aarch64 + x86_64 musl) ───
+  # The CLI deploy path requires $NANOSB_HOME/guest-bin/exec-agent; build it for
+  # every guest arch (macOS arm64 and Linux arm64 -> aarch64; Linux x86_64 -> x86_64).
+  build-exec-agent:
+    name: Build exec-agent (musl)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+
+      - name: Build exec-agent (aarch64)
+        working-directory: guest/crates/exec-agent
+        run: |
+          rustup target add aarch64-unknown-linux-musl
+          RUSTFLAGS="-C linker=rust-lld" cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: Build exec-agent (x86_64)
+        working-directory: guest/crates/exec-agent
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          RUSTFLAGS="-C linker=rust-lld" cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Stage executables
+        run: |
+          cp guest/crates/exec-agent/target/aarch64-unknown-linux-musl/release/exec-agent exec-agent-aarch64
+          cp guest/crates/exec-agent/target/x86_64-unknown-linux-musl/release/exec-agent exec-agent-x86_64
+          file exec-agent-aarch64 exec-agent-x86_64
+
+      - name: Upload exec-agent artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: exec-agent
+          path: |
+            exec-agent-aarch64
+            exec-agent-x86_64
+          retention-days: 7
+
+  # ─── Job 5b: Self-contained SDK bundles (macOS arm64) ───
+  # Non-blocking: optional per-language bundles assembled from the built runtime.
+  build-sdk-bundles:
+    name: Build SDK bundles (macOS arm64)
+    runs-on: macos-latest
+    continue-on-error: true
+    needs:
+      - build-runtime-macos
+      - build-exec-agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-darwin-arm64
+          path: artifacts/release-darwin-arm64
+
+      - name: Download exec-agent artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: exec-agent
+          path: artifacts/exec-agent
+
+      - name: Assemble NANOSB_HOME
+        run: |
+          H="$RUNNER_TEMP/home/.nanosandbox"
+          mkdir -p "$H/bin" "$H/libs" "$H/guest-bin"
+          tar xzf artifacts/release-darwin-arm64/gvproxy-darwin-arm64.tar.gz -C "$H/bin"
+          tar xzf artifacts/release-darwin-arm64/deps-darwin-arm64.tar.gz -C "$H"
+          mv "$H"/lib/libkrunfw*.dylib "$H/libs/" 2>/dev/null || true
+          cp artifacts/exec-agent/exec-agent-aarch64 "$H/guest-bin/exec-agent"
+          chmod +x "$H/guest-bin/exec-agent" "$H/bin/gvproxy" 2>/dev/null || true
+          echo "NANOSB_HOME=$H" >> "$GITHUB_ENV"
+
+      - name: Package SDK bundles
+        run: scripts/package-sdk.sh
+
+      - name: Archive bundles
+        run: |
+          mkdir -p dist-archives
+          for d in dist/nanosandbox-sdk-*; do
+            tar czf "dist-archives/$(basename "$d").tar.gz" -C dist "$(basename "$d")"
+          done
+          ls -la dist-archives
+
+      - name: Upload SDK bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-bundles
+          path: dist-archives/*.tar.gz
+          retention-days: 7
+
   # ─── Job 6: Publish — one GitHub release with everything ───
   publish:
     name: Publish release
@@ -402,6 +558,8 @@ jobs:
       - build-runtime-macos
       - build-cli-linux
       - build-cli-macos
+      - build-exec-agent
+      - build-sdk-bundles
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -417,7 +575,6 @@ jobs:
 
       - name: Stage release files
         run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
           mkdir -p release
 
           # CLI binaries
@@ -433,6 +590,21 @@ jobs:
           cp install-deps/install.sh release/install-deps.sh
           cp install-deps/uninstall.sh release/uninstall-deps.sh
 
+          # Guest exec-agent (per guest arch)
+          if [ -d artifacts/exec-agent ]; then
+            cp artifacts/exec-agent/exec-agent-aarch64 release/exec-agent-aarch64
+            cp artifacts/exec-agent/exec-agent-x86_64 release/exec-agent-x86_64
+            chmod +x release/exec-agent-aarch64 release/exec-agent-x86_64
+          fi
+
+          # License text
+          cp LICENSE release/LICENSE
+
+          # Self-contained SDK bundles (runtime + SDK sources)
+          if [ -d artifacts/sdk-bundles ]; then
+            find artifacts/sdk-bundles -type f -name '*.tar.gz' -exec cp {} release/ \;
+          fi
+
           # Runtime deps bundles + standalone runtime/gvproxy archives
           find artifacts/release-linux-amd64 artifacts/release-linux-arm64 artifacts/release-darwin-arm64 \
             -type f \( -name '*.tar.gz' -o -name 'checksums-*.sha256' \) -exec cp {} release/ \;
@@ -440,7 +612,7 @@ jobs:
           chmod +x release/install.sh release/uninstall.sh release/install-deps.sh release/uninstall-deps.sh
 
           # Final combined checksums
-          (cd release && sha256sum *.tar.gz *.sh > checksums.sha256)
+          (cd release && sha256sum ./*.tar.gz ./*.sh > checksums.sha256)
 
           echo "=== Release files ==="
           ls -la release/

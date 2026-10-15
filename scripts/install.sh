@@ -243,6 +243,48 @@ PLIST
     rm -f "$entitlements"
 }
 
+# ─── Step 5: exec-agent (guest binary) ───────────────────────────────────────
+
+install_exec_agent() {
+    header "Installing exec-agent"
+
+    local dest_dir="${NANOSANDBOX_HOME}/guest-bin"
+    local dest="${dest_dir}/exec-agent"
+    mkdir -p "$dest_dir"
+
+    if [[ -n "${NANOSB_EXEC_AGENT:-}" ]]; then
+        [[ -f "$NANOSB_EXEC_AGENT" ]] || { warn "NANOSB_EXEC_AGENT not found: $NANOSB_EXEC_AGENT"; return 0; }
+        cp -f "$NANOSB_EXEC_AGENT" "$dest"; chmod +x "$dest"
+        success "Installed at ${dest}"
+        return 0
+    fi
+
+    local arch
+    case "${ARCH}" in
+        arm64|aarch64) arch="aarch64" ;;
+        x86_64|amd64)  arch="x86_64" ;;
+        *) warn "No pre-built exec-agent for arch ${ARCH}"; return 0 ;;
+    esac
+
+    local asset="exec-agent-${arch}"
+    local url
+    if [[ "$NANOSB_VERSION" == "latest" ]]; then
+        url="https://github.com/${RELEASE_REPO}/releases/latest/download/${asset}"
+    else
+        url="https://github.com/${RELEASE_REPO}/releases/download/v${NANOSB_VERSION}/${asset}"
+    fi
+
+    info "Downloading ${asset}..."
+    if curl -fsSL "$url" -o "$dest"; then
+        chmod +x "$dest"
+        success "Installed at ${dest}"
+    else
+        warn "Could not download ${asset} (release may not include it yet)"
+        rm -f "$dest"
+        info "Sandboxes need it at ${dest} to run."
+    fi
+}
+
 # ─── /usr/local/bin symlink ──────────────────────────────────────────────────
 
 # Symlinks ~/.nanosandbox/bin/nanosb into /usr/local/bin so it's on PATH in
@@ -284,6 +326,7 @@ install_symlink() {
 install_deps
 download_binary
 install_config
+install_exec_agent
 [[ "$OS" == "Darwin" ]] && { header "Codesigning nanosb"; codesign_binary; }
 install_symlink
 
@@ -326,6 +369,7 @@ cat <<EOF
   symlink    → /usr/local/bin/nanosb
   libkrunfw  → ${NANOSANDBOX_HOME}/libs/
   gvproxy    → ${INSTALL_DIR}/gvproxy
+  exec-agent → ${NANOSANDBOX_HOME}/guest-bin/exec-agent
   backend    → ${backend}
 
   Run 'nanosb doctor' to verify the installation.
