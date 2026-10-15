@@ -1,5 +1,7 @@
 # Testing Guide
 
+> **Partly superseded** — most of this document describes an older Makefile-based harness; current test commands are in the root `README.md` and `AGENTS.md`. The "Testing the TUI" section remains current.
+
 This document covers how to run tests for Nanosandbox, including unit tests, integration tests, and end-to-end (E2E) tests.
 
 ## Test Categories

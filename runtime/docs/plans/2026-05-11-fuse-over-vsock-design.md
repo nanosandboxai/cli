@@ -1,5 +1,7 @@
 # FUSE-over-vsock for Windows HCS Filesystem Sharing — Design
 
+> **Superseded / historical** — this document predates the current monorepo architecture (the in-VM `agent-gateway` was removed; the layout and commands have changed). Kept for historical record; see `runtime/README.md`, `docs/protocol/protocol.md`, and `src/` for the current source of truth.
+
 Issue: [runtime#134](https://github.com/nanosandboxai/runtime/issues/134)
 
 ## Problem

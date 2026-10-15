@@ -1,5 +1,7 @@
 # Upstream Issues and Patches
 
+> **Superseded / historical** — version numbers and mechanisms here reference an older libkrun/libkrunfw stack (now built from the nanosandbox/libkrun fork, base upstream v1.19.5). Kept for historical record.
+
 This document tracks issues we've identified and patches we've applied to upstream
 dependencies (libkrun, libkrunfw) in our submodules.
 

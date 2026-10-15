@@ -1,5 +1,7 @@
 # Sandbox Config File Design
 
+> **Superseded / historical** — this document predates the current monorepo architecture (the in-VM `agent-gateway` was removed; the layout and commands have changed). Kept for historical record; see `runtime/README.md`, `docs/protocol/protocol.md`, and `src/` for the current source of truth.
+
 ## Overview
 
 Project-level `sandbox.yml` files that define sandbox configurations for automatic detection and startup. When `nanosb` is invoked in a directory containing `sandbox.yml`, it parses the config and auto-starts all defined sandboxes as TUI panels.

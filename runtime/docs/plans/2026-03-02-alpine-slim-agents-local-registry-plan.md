@@ -1,5 +1,7 @@
 # Alpine Slim Agents + Local Registry Implementation Plan
 
+> **Superseded / historical** — this document predates the current monorepo architecture (the in-VM `agent-gateway` was removed; the layout and commands have changed). Kept for historical record; see `runtime/README.md`, `docs/protocol/protocol.md`, and `src/` for the current source of truth.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Replace the monolithic 1GB+ Debian agent image with per-agent Alpine images (~180-250MB each), add a local registry workflow for fast dev iteration, enable MCP memory-based context sharing between agents, and validate the full pipeline with nanosandbox E2E tests.

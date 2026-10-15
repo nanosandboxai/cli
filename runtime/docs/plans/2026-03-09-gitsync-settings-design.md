@@ -1,5 +1,7 @@
 # GitSync Settings & External Tool Integration
 
+> **Superseded / historical** — this document predates the current monorepo architecture (the in-VM `agent-gateway` was removed; the layout and commands have changed). Kept for historical record; see `runtime/README.md`, `docs/protocol/protocol.md`, and `src/` for the current source of truth.
+
 ## Problem
 
 Auto-sync (`sync_project_commits()`) automatically fetches agent commits from the sandbox clone to the user's local repo branch. This is convenient but dangerous:
