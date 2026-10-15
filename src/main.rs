@@ -108,6 +108,21 @@ mod cli {
             timeout_secs: u64,
         },
 
+        /// Spawn a supervisor for a sandbox spec in the caller's process tree
+        /// (host-side / shim entrypoint). Prints the child supervisor pid.
+        #[clap(name = "supervise")]
+        HostSupervise {
+            /// Run in the foreground (do not daemonize).
+            #[arg(long)]
+            foreground: bool,
+            /// Sandbox name.
+            #[arg(long)]
+            name: String,
+            /// Path to a SandboxSpec JSON file, or '-' to read stdin.
+            #[arg(long)]
+            spec: String,
+        },
+
         /// View sandbox console logs
         Logs {
             /// Sandbox name or ID
@@ -725,6 +740,11 @@ mod cli {
             Some(Commands::ProjectsForget { path }) => {
                 cmd_projects_forget(&path, cli.format).await
             }
+            Some(Commands::HostSupervise {
+                foreground,
+                name,
+                spec,
+            }) => cmd_supervise(&name, &spec, foreground).await,
             Some(Commands::Gc { dry_run }) => cmd_gc(dry_run).await,
         }
     }
@@ -2055,6 +2075,37 @@ mod cli {
     }
 
     /// Check runtime prerequisites and display status
+    async fn cmd_supervise(
+        name: &str,
+        spec_path: &str,
+        _foreground: bool,
+    ) -> anyhow::Result<()> {
+        let raw = if spec_path == "-" {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            s
+        } else {
+            std::fs::read_to_string(spec_path)?
+        };
+        let spec: nanosb_protocol::SandboxSpec = serde_json::from_str(&raw)?;
+        let config = nanosb_cli::helper::spec_to_config(&spec)?;
+        let (config_json, boot_env_json) =
+            nanosb_cli::deploy::extract_boot_env(&serde_json::to_string(&config)?)?;
+        let origin =
+            nanosb_cli::deploy::Origin::cli(spec.env.keys().cloned().collect(), Vec::new());
+        let pid = nanosb_cli::deploy::spawn_supervisor_with_pid(
+            name,
+            &config_json,
+            "[]",
+            &boot_env_json,
+            &origin.to_json(),
+            3600,
+        )?;
+        println!("{}", pid);
+        Ok(())
+    }
+
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
         use sandbox::validation::validate_runtime_prerequisites_detailed;
 

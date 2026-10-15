@@ -129,6 +129,26 @@ pub fn spawn_supervisor(
     origin_json: &str,
     timeout_secs: u32,
 ) -> anyhow::Result<()> {
+    spawn_supervisor_with_pid(
+        sandbox_name,
+        config_json,
+        extra_mounts_json,
+        boot_env_json,
+        origin_json,
+        timeout_secs,
+    )
+    .map(|_| ())
+}
+
+/// Like [`spawn_supervisor`], but returns the spawned supervisor's pid.
+pub fn spawn_supervisor_with_pid(
+    sandbox_name: &str,
+    config_json: &str,
+    extra_mounts_json: &str,
+    boot_env_json: &str,
+    origin_json: &str,
+    timeout_secs: u32,
+) -> anyhow::Result<u32> {
     use std::os::unix::fs::PermissionsExt;
     // Tests run under the cargo test harness binary, which does not know the
     // `__supervise` subcommand. Honor NANOSB_BINARY_PATH (as the runtime does)
@@ -177,8 +197,9 @@ pub fn spawn_supervisor(
     let child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to spawn supervisor: {}", e))?;
+    let pid = child.id();
     drop(child);
-    Ok(())
+    Ok(pid)
 }
 
 /// Poll until the supervisor reports `Running`, `Error`, or the timeout elapses.
