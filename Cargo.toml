@@ -12,6 +12,8 @@ members = [
     "crates/client",
     # CI-safe protocol conformance harness for every SDK driver.
     "crates/conformance",
+    # Thin host layer (supervisor client/state; no TUI, no FFI).
+    "crates/host",
     # Language SDKs.
     "sdk/rust",
 ]
@@ -64,6 +66,7 @@ sandbox = { path = "sandbox/crates/sandbox" }
 runtime = { path = "runtime/crates/runtime" }
 nanosb-protocol = { path = "crates/protocol" }
 nanosb-client = { path = "crates/client" }
+nanosb-host = { path = "crates/host" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
