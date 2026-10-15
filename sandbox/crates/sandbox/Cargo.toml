@@ -18,6 +18,8 @@ default = []
 [dependencies]
 # Runtime (VM engine) — local path inside the monorepo workspace.
 runtime = { path = "../../../runtime/crates/runtime" }
+# FFI-free config/types (image normalization, SandboxConfig, ...).
+runtime-config = { path = "../../../runtime/crates/runtime-config" }
 
 # Legacy gateway client (legacy-mode sandboxes only)
 gateway = { path = "../gateway" }

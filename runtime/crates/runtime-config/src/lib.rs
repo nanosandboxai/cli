@@ -1219,3 +1219,35 @@ mod tests {
         assert!(config.extra_mounts.is_empty());
     }
 }
+
+/// Default OCI registry for agent images.
+pub const DEFAULT_AGENTS_REGISTRY: &str = "ghcr.io/nanosandboxai/agents-registry";
+
+/// Known code-agent image names hosted in the agents registry.
+const AGENT_IMAGES: &[&str] = &["base", "claude", "codex", "cursor", "goose", "legacy"];
+
+/// Normalize an image reference: known agent names get the agents-registry
+/// prefix, other bare names get `docker.io/library/`, fully-qualified refs are
+/// returned unchanged.
+pub fn normalize_image(image: &str) -> String {
+    if image.is_empty() {
+        return image.to_string();
+    }
+    let name_part = image.split(':').next().unwrap_or(image);
+    let has_registry =
+        name_part.contains('/') || name_part.contains('.') || image.starts_with("localhost");
+    if has_registry {
+        image.to_string()
+    } else {
+        let (name, tag) = if let Some((n, t)) = image.split_once(':') {
+            (n, t)
+        } else {
+            (image, "latest")
+        };
+        if AGENT_IMAGES.contains(&name) {
+            format!("{}/{}:{}", DEFAULT_AGENTS_REGISTRY, name, tag)
+        } else {
+            format!("docker.io/library/{}:{}", name, tag)
+        }
+    }
+}

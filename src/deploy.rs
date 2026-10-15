@@ -1,126 +1,15 @@
 //! Deploy planning and supervisor spawning, shared by the CLI and TUI.
 //!
-//! These helpers were extracted from the `main.rs` binary crate so the TUI
-//! (which lives in the `nanosb_cli` library crate) can spawn supervisor-managed
-//! sandboxes through the exact same code path as `nanosb run`/`nanosb apply`.
+//! The FFI-free pieces (exec-agent staging, origin tracking, boot-env splitting)
+//! now live in `nanosb-host` and are re-exported here for compatibility.
 
 use crate::supervisor::client::SupervisorClient;
 
-/// Guest vsock port the exec agent listens on (bridged to a host socket).
-pub const EXEC_VSOCK_PORT: u32 = 1024;
-
-/// Host directory holding the cross-compiled guest binaries (exec agent).
-///
-/// Resolution order: `NANOSB_GUEST_BIN_DIR`, then `$NANOSB_HOME/guest-bin`,
-/// then `~/.nanosandbox/guest-bin`.
-pub fn guest_bin_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("NANOSB_GUEST_BIN_DIR") {
-        return std::path::PathBuf::from(dir);
-    }
-    if let Ok(dir) = std::env::var("NANOSB_HOME") {
-        return std::path::PathBuf::from(dir).join("guest-bin");
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home)
-        .join(".nanosandbox")
-        .join("guest-bin")
-}
-
-/// Path to the guest exec-agent binary for the host architecture.
-///
-/// The agent is cross-compiled for the guest (aarch64-linux-musl) and staged
-/// here. Returns `None` if it has not been built/staged yet.
-pub fn exec_agent_path() -> Option<std::path::PathBuf> {
-    let name = "exec-agent";
-    let p = guest_bin_dir().join(name);
-    p.exists().then_some(p)
-}
-
-/// Stage the exec agent into `dest` for injection into the guest.
-///
-/// `dest` is a host directory added to the deploy plan as a read-only virtiofs
-/// mount at `/agent`. Returns the guest-visible path to run as PID 1.
-pub fn stage_exec_agent(dest: &std::path::Path) -> anyhow::Result<String> {
-    let src = exec_agent_path().ok_or_else(|| {
-        anyhow::anyhow!(
-            "exec agent not found at {}; build it with:\n  \
-             cd guest/crates/exec-agent && \
-             RUSTFLAGS=\"-C linker=rust-lld\" cargo build \
-             --target aarch64-unknown-linux-musl --release\n  \
-             then copy it to {}",
-            guest_bin_dir().join("exec-agent").display(),
-            guest_bin_dir().display()
-        )
-    })?;
-    std::fs::create_dir_all(dest)?;
-    let target = dest.join("exec-agent");
-    std::fs::copy(&src, &target)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
-    }
-    Ok("/agent/exec-agent".to_string())
-}
-
-/// Where a sandbox's env/secrets came from, recorded so `restart` can
-/// re-resolve them without persisting any secret values.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct Origin {
-    /// `"manifest"` (declared in sandbox.yml) or `"cli"` (`nanosb run` flags).
-    pub source: String,
-    /// Env **key names** only (never values) to re-resolve on restart.
-    #[serde(default)]
-    pub env_keys: Vec<String>,
-    /// `--env-file` path(s) to re-read on restart.
-    #[serde(default)]
-    pub env_files: Vec<String>,
-    /// Path to the declaring `sandbox.yml`, when `source == "manifest"`.
-    #[serde(default)]
-    pub manifest_path: Option<String>,
-}
-
-impl Origin {
-    pub fn cli(env_keys: Vec<String>, env_files: Vec<String>) -> Self {
-        Self {
-            source: "cli".to_string(),
-            env_keys,
-            env_files,
-            manifest_path: None,
-        }
-    }
-
-    pub fn manifest(manifest_path: Option<String>, env_keys: Vec<String>) -> Self {
-        Self {
-            source: "manifest".to_string(),
-            env_keys,
-            env_files: Vec::new(),
-            manifest_path,
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
-    }
-}
-
-/// Split a serialized sandbox config into (config without env, env JSON object).
-///
-/// Secrets must not be persisted to `config.json`/`deploy.json` nor placed on
-/// the supervisor command line; the caller passes the env separately so it can
-/// be delivered via the supervisor's process environment instead.
-pub fn extract_boot_env(config_json: &str) -> anyhow::Result<(String, String)> {
-    let mut cfg: runtime::config::SandboxConfig = serde_json::from_str(config_json)?;
-    let env = std::mem::take(&mut cfg.env);
-    Ok((serde_json::to_string(&cfg)?, serde_json::to_string(&env)?))
-}
+pub use nanosb_host::deploy::{
+    exec_agent_path, extract_boot_env, guest_bin_dir, stage_exec_agent, Origin, EXEC_VSOCK_PORT,
+};
 
 /// Spawn a detached supervisor process for `sandbox_name`.
-///
-/// Writes `config.json`, `deploy.json`, `origin.json`, and `logs/supervisor.log`
-/// (all 0600) into the sandbox dir, then execs the current binary as
-/// `__supervise`. `boot_env_json` is passed via the child's environment (never
-/// argv or disk) and merged into the guest boot env by the supervisor.
 pub fn spawn_supervisor(
     sandbox_name: &str,
     config_json: &str,

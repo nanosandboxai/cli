@@ -417,41 +417,7 @@ impl AgentSandboxConfigBuilder {
     }
 }
 
-/// Default OCI registry for agent images.
-pub const DEFAULT_AGENTS_REGISTRY: &str = "ghcr.io/nanosandboxai/agents-registry";
-
-/// Known code-agent image names hosted in the agents registry.
-const AGENT_IMAGES: &[&str] = &["base", "claude", "codex", "cursor", "goose", "legacy"];
-
-/// Normalize an image reference.
-///
-/// - Known agent names (claude, codex, cursor, ...) are prefixed with the
-///   agents registry (`ghcr.io/nanosandboxai/agents-registry/`).
-/// - Other bare names (alpine, ubuntu, ...) are prefixed with Docker Hub
-///   (`docker.io/library/`), matching standard Docker behaviour.
-/// - Fully qualified references are returned as-is.
-pub fn normalize_image(image: &str) -> String {
-    if image.is_empty() {
-        return image.to_string();
-    }
-    let name_part = image.split(':').next().unwrap_or(image);
-    let has_registry =
-        name_part.contains('/') || name_part.contains('.') || image.starts_with("localhost");
-    if has_registry {
-        image.to_string()
-    } else {
-        let (name, tag) = if let Some((n, t)) = image.split_once(':') {
-            (n, t)
-        } else {
-            (image, "latest")
-        };
-        if AGENT_IMAGES.contains(&name) {
-            format!("{}/{}:{}", DEFAULT_AGENTS_REGISTRY, name, tag)
-        } else {
-            format!("docker.io/library/{}:{}", name, tag)
-        }
-    }
-}
+pub use runtime_config::{normalize_image, DEFAULT_AGENTS_REGISTRY};
 
 #[cfg(test)]
 mod tests {

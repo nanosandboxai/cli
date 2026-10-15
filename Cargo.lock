@@ -2215,6 +2215,9 @@ dependencies = [
 name = "nanosb-host"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "nanosb-protocol",
+ "runtime-config",
  "serde",
  "serde_json",
 ]
@@ -3328,6 +3331,7 @@ dependencies = [
  "gateway",
  "git2",
  "runtime",
+ "runtime-config",
  "serde",
  "serde_json",
  "sha2 0.11.0",
