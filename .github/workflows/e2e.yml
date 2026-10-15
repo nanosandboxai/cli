@@ -2,12 +2,12 @@
 # E2E Tests Workflow
 # =============================================================================
 #
-# NOTICE: Linux E2E tests are currently DISABLED.
+# Epic 6 · R4 — real microVM boot/exec/teardown E2E checks.
 #
-# Only macOS Apple Silicon is fully tested and stable at this time.
-# - Linux: Requires libkrun stack setup (libkrunfw + libkrun)
-#
-# These tests are commented out until Linux is stable.
+# - macOS (arm64): REQUIRED. Boots a real microVM through the `nanosb-runtime`
+#   helper (libkrun/HVF) and runs the ignored live conformance + Epic 5 suites.
+# - Linux: allow-failure. GitHub-hosted runners do not expose /dev/kvm, so the
+#   job is best-effort until a KVM-capable runner is available.
 # =============================================================================
 
 name: E2E Tests
@@ -25,38 +25,191 @@ env:
 
 jobs:
   # ==========================================================================
-  # Placeholder job (workflow requires at least one job)
+  # Build the aarch64 kernel bundle once; the macOS job compiles libkrunfw
+  # from it (mirrors release.yml — libkrunfw cannot be built natively on
+  # macOS CI because its Makefile requires a krunvm guest).
   # ==========================================================================
-  notice:
-    name: E2E Tests Status
-    runs-on: ubuntu-latest
+  build-kernels:
+    name: Build kernel bundle (aarch64)
+    runs-on: ubuntu-24.04
     steps:
-      - name: Platform Status Notice
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache kernel bundle
+        id: kernel-cache
+        uses: actions/cache@v4
+        with:
+          path: kernel-aarch64.c
+          key: kernel-bundle-aarch64-${{ hashFiles('runtime/deps/libkrunfw/**') }}
+
+      - name: Install kernel build dependencies
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: |
-          echo "========================================"
-          echo "  Nanosandbox E2E Tests"
-          echo "========================================"
-          echo ""
-          echo "Platform Status:"
-          echo "  - macOS Apple Silicon: STABLE (tested locally)"
-          echo "  - Linux (KVM):         DISABLED (runtime setup in progress)"
-          echo ""
-          echo "To run E2E tests locally on macOS:"
-          echo "  1. Run: ./runtime/scripts/install/macos.sh"
-          echo "  2. Run: cargo test -p runtime --test agents_e2e_test"
-          echo ""
-          echo "========================================"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates git \
+            python3 python3-pyelftools \
+            bc flex bison libelf-dev cpio libssl-dev xz-utils \
+            gcc-aarch64-linux-gnu
+
+      - name: Build aarch64 kernel bundle (cross-compile)
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        run: |
+          cd runtime/deps/libkrunfw
+          make kernel.c ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
+          cp kernel.c ../../../kernel-aarch64.c
+          echo "=== aarch64 kernel.c ==="
+          ls -lh ../../../kernel-aarch64.c
+
+      - name: Upload kernel bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-bundles
+          path: kernel-aarch64.c
+          retention-days: 7
 
   # ==========================================================================
-  # Linux E2E Tests - DISABLED
+  # macOS E2E — REQUIRED. Real microVM boot/exec/teardown via libkrun/HVF.
   # ==========================================================================
-  # Requires: libkrunfw + libkrun
-  # See commented code below for implementation reference
-  # ==========================================================================
+  e2e-macos:
+    name: Live microVM boot (macOS arm64)
+    runs-on: macos-latest
+    needs: build-kernels
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: Install macOS build dependencies
+        run: |
+          brew install lld llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Download kernel bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-bundles
+          path: .
+
+      - name: Build libkrunfw from kernel bundle
+        run: |
+          cd runtime/deps/libkrunfw
+          cc -fPIC -DABI_VERSION=5 -shared -o libkrunfw.5.dylib ../../../kernel-aarch64.c
+          ln -sf libkrunfw.5.dylib libkrunfw.dylib
+          echo "=== libkrunfw ==="
+          ls -lh libkrunfw*.dylib
+
+      - name: Install libkrunfw
+        run: |
+          sudo mkdir -p /usr/local/lib
+          sudo cp runtime/deps/libkrunfw/libkrunfw*.dylib /usr/local/lib/
+          ls -la /usr/local/lib/libkrunfw*
+
+      - name: Build upstream libkrun
+        run: bash runtime/scripts/build-libkrun.sh
+
+      - name: Build gvproxy
+        run: |
+          mkdir -p "$HOME/.nanosandbox/bin"
+          cd runtime/deps/gvproxy
+          CGO_ENABLED=0 go build -o "$HOME/.nanosandbox/bin/gvproxy" ./cmd/gvproxy
+
+      - name: Build nanosb CLI (release)
+        run: cargo build --release -p nanosb-cli
+
+      - name: Build nanosb-runtime helper
+        run: cargo build --release -p nanosb-cli --bin nanosb-runtime --no-default-features --features runtime-host
+
+      - name: Codesign nanosb-runtime helper
+        run: |
+          codesign --force --sign - \
+            --entitlements runtime/entitlements.plist \
+            target/release/nanosb-runtime
+
+      - name: Live conformance (Epic 1 AC5/AC6/AC9)
+        env:
+          NANOSB_RUNTIME_BIN: ${{ github.workspace }}/target/release/nanosb-runtime
+          NANOSB_TEST_IMAGE: library/alpine:latest
+        run: cargo test -p nanosb-client --test live_conformance -- --ignored --nocapture
+
+      - name: Epic 5 live assertions (S1-S9)
+        env:
+          NANOSB_RUNTIME_BIN: ${{ github.workspace }}/target/release/nanosb-runtime
+          NANOSB_TEST_IMAGE: library/alpine:latest
+        run: cargo test -p nanosb-client --test epic5_live -- --ignored --nocapture
 
   # ==========================================================================
-  # Windows E2E Tests - DISABLED
+  # Linux E2E — allow-failure. GitHub-hosted runners do not expose /dev/kvm,
+  # so this job is best-effort: it self-skips when KVM is unavailable and its
+  # failure never blocks the workflow. Reuses linux-kvm.yml's approach.
   # ==========================================================================
-  # Requires: WHPX + HCS + libkrunfw kernel artifact
-  # Uses microVM approach (libkrun HCS backend), not Windows containers
-  # ==========================================================================
+  e2e-linux:
+    name: Live microVM boot (Linux/KVM)
+    runs-on: ubuntu-latest
+    # GitHub-hosted runners have no /dev/kvm; keep this job non-blocking until
+    # a KVM-capable runner is available.
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: KVM preflight
+        id: kvm
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::warning::/dev/kvm not present; skipping live E2E"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::warning::/dev/kvm not accessible (user not in 'kvm' group); skipping"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build deps
+        if: steps.kvm.outputs.available == 'true'
+        run: runtime/scripts/ci/install-deps-apt.sh
+
+      - name: Build runtime dependencies
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          export PATH="$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
+          LIBKRUN_OUTPUT_DIR="$HOME/.nanosandbox/lib" runtime/scripts/build-libkrun.sh
+          ( cd runtime/deps/libkrunfw && make )
+          sudo cp runtime/deps/libkrunfw/libkrunfw.so.5.* /usr/local/lib/ 2>/dev/null || \
+            cp runtime/deps/libkrunfw/libkrunfw.so.5.* "$HOME/.nanosandbox/libs/" 2>/dev/null || true
+          sudo ldconfig 2>/dev/null || true
+          ( cd runtime/deps/gvproxy && GOWORK=off go build -o "$HOME/.nanosandbox/bin/gvproxy" ./cmd/gvproxy )
+
+      - name: Build nanosb
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          LIBKRUN_LIB_DIR="$HOME/.nanosandbox/lib" cargo build --release -p nanosb-cli
+
+      - name: Live E2E harness
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          export PATH="$HOME/.nanosandbox/bin:$HOME/.cargo/bin:$PATH"
+          NANOSB_BINARY="$PWD/target/release/nanosb" runtime/scripts/linux-kvm-e2e.sh
+
+      - name: Skipped (no KVM)
+        if: steps.kvm.outputs.available != 'true'
+        run: |
+          echo "Live Linux/KVM E2E skipped: runner has no usable /dev/kvm"
