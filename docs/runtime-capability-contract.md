@@ -68,11 +68,12 @@ Target consumer dependencies: **`nanosb-protocol` + `nanosb-host` only**.
 
 - ✅ **H1** — `runtime::config` types extracted into the FFI-free
   `runtime-config` crate (`runtime/crates/runtime-config`); `runtime` re-exports
-  it as `runtime::config`.
-- ✅ **H2/H3** — `nanosb-host` crate (`crates/host`) with the FFI-free supervisor
-  client + state types; `nanosb-cli` re-exports them under `nanosb_cli::supervisor`.
-  Moving `deploy` and `spec_to_config` into the host additionally requires first
-  splitting the engine-coupled `sandbox` crate (it still depends on `runtime`/libkrun).
+  it as `runtime::config`. Image normalization (`normalize_image`) also moved there.
+- ✅ **H2/H3** — `nanosb-host` (`crates/host`) provides the supervisor client +
+  state, `spec::spec_to_config` (+ `mount_spec_to_mount`), and the FFI-free
+  `deploy` helpers (`EXEC_VSOCK_PORT`, `stage_exec_agent`, `Origin`,
+  `extract_boot_env`). `nanosb-cli` re-exports them for compatibility. The
+  engine-coupled `sandbox` (`AgentSandbox`, `runtime::Sandbox`) stays in the CLI.
 - ✅ **H4** — TUI deps gated behind the optional `tui` feature; the `runtime-host`
   profile builds with no TUI dependencies.
 - ✅ **H5** — `nanosb supervise --foreground --name <n> --spec <file|->` spawns the
@@ -80,10 +81,9 @@ Target consumer dependencies: **`nanosb-protocol` + `nanosb-host` only**.
 - ✅ **H7** — CI (`host-layer` job) asserts `nanosb-host` and the slim helper build
   without the engine or TUI dependencies.
 
-A consumer that needs the protocol + supervisor state can depend on
-`nanosb-protocol` + `nanosb-host` today. Full `deploy`/`spec_to_config` hosting
-and dropping `nanosb-cli` entirely additionally requires decoupling `sandbox`
-from the VM engine.
+A host-side consumer (the shim) can depend on **`nanosb-protocol` +
+`nanosb-host` only** — for spec→config conversion, exec-agent staging, and
+supervisor control — with no TUI and no libkrun.
 
 ## 5. Where the source of truth lives
 
@@ -92,5 +92,4 @@ from the VM engine.
 | Wire protocol | `docs/protocol/protocol.md`, `crates/protocol` |
 | Capabilities / handshake | `crates/protocol/src/hello.rs` |
 | Config types (FFI-free) | `runtime/crates/runtime-config/src/lib.rs` |
-| Supervisor client | `src/supervisor/client.rs` |
-| Deploy / spec→config | `src/deploy.rs`, `src/helper.rs` |
+| Host layer (client/state/spec/deploy) | `crates/host/src/` |

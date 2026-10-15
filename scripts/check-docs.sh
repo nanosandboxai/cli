@@ -37,6 +37,8 @@ has   "AGENTS.md: host layer crate"     "crates/host" AGENTS.md
 has   "README: host layer crate"        "crates/host" README.md
 hasfile() { if [ -f "$1" ]; then pass "$1 exists"; else bad "$1 missing"; fi; }
 hasfile crates/host/Cargo.toml
+hasfile crates/host/src/spec.rs
+hasfile crates/host/src/deploy.rs
 
 hasnt "runtime README: no 'in development'" "in development" runtime/README.md
 hasnt "runtime README: no 'separate repo'"  "separate repo" runtime/README.md
