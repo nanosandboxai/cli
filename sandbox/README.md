@@ -4,12 +4,12 @@
 
 ## Overview
 
-Wraps the [nanosandbox](https://github.com/nanosandboxai/runtime) runtime crate with agent-specific functionality. Language SDKs talk to the `nanosb-runtime` helper over the versioned NDJSON protocol (`nanosb-protocol` / `nanosb-client`) rather than a C ABI. It provides sandbox lifecycle management, `sandbox.yml` configuration, and host-side config delivery (MCP servers, skills, agent commands) via the `deploy` module.
+Wraps the in-repo [`runtime`](../runtime) crate with agent-specific functionality. Language SDKs talk to the `nanosb-runtime` helper over the versioned NDJSON protocol (`nanosb-protocol` / `nanosb-client`) rather than a C ABI. It provides sandbox lifecycle management, `sandbox.yml` configuration, and host-side config delivery (MCP servers, skills, agent commands) via the `deploy` module.
 
 ## Architecture
 
 ```
-Language SDKs (Rust, Python, Node, Go, Ruby, Java, C#)
+Language SDKs (Rust, Python, TypeScript/Node, Go, Ruby, Java, C#/.NET, Kotlin)
        | (NDJSON protocol over a local socket)
    nanosb-runtime helper  (nanosb-protocol + nanosb-client)
        | (Rust dependency)
@@ -106,11 +106,12 @@ The SDK supports the following agent types, selectable via `sandbox.yml` or CLI 
 | Goose     | `goose`       |
 | Cursor    | `cursor`      |
 
-## Related Repos
+## Related Components (monorepo)
 
-- [Runtime](https://github.com/nanosandboxai/runtime) -- Pure VM engine (libkrun FFI, OCI images, containerization)
-- [Agents Registry](https://github.com/nanosandboxai/agents-registry) -- Agent definitions, Docker images
-- [Nanosandbox monorepo](https://github.com/nanosandboxai/nanosandbox) -- CLI, runtime, agent-gateway, registry, and releases
+- [Runtime](../runtime) -- VM engine (libkrun FFI, OCI images, containerization)
+- [Language SDKs](../sdk) -- Eight protocol clients + conformance harness
+- [Agents Registry](../agents-registry) -- Agent definitions, Docker images
+- [CLI](../src) -- `nanosb` CLI + TUI
 
 ## License
 

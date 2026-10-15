@@ -1,5 +1,7 @@
 # Agents Registry Design
 
+> **Superseded** — this design predates the current architecture (the in-VM `agent-gateway` was removed). Kept for historical record; see `sandbox/README.md` and `docs/` for the current source of truth.
+
 ## Overview
 
 A definition-only registry for agent definitions, skills, and MCP references. Provides a catalog of reusable, composable agent templates that nanosandbox consumes to configure sandboxed AI coding agents.

@@ -1,5 +1,7 @@
 # Rootless Package Installation — Implementation Plan
 
+> **Superseded** — this design predates the current architecture (the in-VM `agent-gateway` was removed). Kept for historical record; see `sandbox/README.md` and `docs/` for the current source of truth.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enable code agents to install dev tools without root by confining all installs to `/home/developer/.local/`, hardening the VM with seccomp, reduced capabilities, read-only rootfs, and additional resource limits.

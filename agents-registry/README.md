@@ -1,6 +1,6 @@
 # Agents Registry
 
-A registry of agent definitions, reusable skills, and MCP references for [nanosandbox](https://github.com/devdone-labs/nanosandbox).
+A registry of agent definitions, reusable skills, and MCP references for [nanosandbox](https://github.com/nanosandboxai/nanosandbox).
 
 ## Overview
 
@@ -35,7 +35,7 @@ Reference a registry agent in your `sandbox.yml`:
 
 ```yaml
 defaults:
-  image: ghcr.io/devdone-labs/dd-agent-claude:latest
+  image: ghcr.io/nanosandboxai/agents-registry/claude:latest
 
 sandboxes:
   my-env:
@@ -47,7 +47,7 @@ Or compose your own agent using registry skills:
 ```yaml
 sandboxes:
   custom-env:
-    image: ghcr.io/devdone-labs/dd-agent-claude:latest
+    image: ghcr.io/nanosandboxai/agents-registry/claude:latest
     agent:
       skills: [git-workflow, tdd]
       mcps:

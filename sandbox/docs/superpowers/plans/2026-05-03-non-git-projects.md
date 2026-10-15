@@ -1,5 +1,7 @@
 # Non-Git Project Support Implementation Plan
 
+> **Superseded** — this design predates the current architecture (the in-VM `agent-gateway` was removed). Kept for historical record; see `sandbox/README.md` and `docs/` for the current source of truth.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Allow sandboxes to mount directories that have no git repository by auto-initialising one in the source directory on first use.
