@@ -137,6 +137,7 @@ Vendored content under `runtime/deps/**` is out of scope.
 | Wire protocol | `docs/protocol/protocol.md` + `crates/protocol` |
 | Environment variables | `src/deploy.rs`, `src/supervisor/mod.rs`, `src/tui/run.rs`, `sandbox/crates/sandbox/src/agents_registry.rs`, `scripts/install.sh` |
 | Install paths / bundles | `scripts/install.sh`, `install-deps/install.sh`, `scripts/package-sdk.sh` |
+| Host/shim supervisor entrypoint (`nanosb supervise`) | `src/main.rs` (`cmd_supervise`), `crates/host/src/deploy.rs`, `docs/runtime-capability-contract.md` |
 
 ## License
 
