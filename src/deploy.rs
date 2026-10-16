@@ -6,7 +6,8 @@
 use crate::supervisor::client::SupervisorClient;
 
 pub use nanosb_host::deploy::{
-    exec_agent_path, extract_boot_env, guest_bin_dir, stage_exec_agent, Origin, EXEC_VSOCK_PORT,
+    exec_agent_path, extract_boot_env, guest_bin_dir, prepare_supervisor_spawn, stage_exec_agent,
+    wait_for_exec_channel, wait_for_running, Origin, SupervisorSpawn, EXEC_VSOCK_PORT,
 };
 
 /// Spawn a detached supervisor process for `sandbox_name`.
@@ -29,7 +30,9 @@ pub fn spawn_supervisor(
     .map(|_| ())
 }
 
-/// Like [`spawn_supervisor`], but returns the spawned supervisor's pid.
+/// Spawn a detached supervisor process and return its pid. The child is
+/// re-parented to init; use [`spawn_supervisor_foreground`] when the caller
+/// must own and reap it.
 pub fn spawn_supervisor_with_pid(
     sandbox_name: &str,
     config_json: &str,
@@ -38,6 +41,52 @@ pub fn spawn_supervisor_with_pid(
     origin_json: &str,
     timeout_secs: u32,
 ) -> anyhow::Result<u32> {
+    let sp = SupervisorSpawn {
+        name: sandbox_name.to_string(),
+        sandbox_dir: SupervisorClient::new(sandbox_name)
+            .sandbox_dir()
+            .to_path_buf(),
+        config_json: config_json.to_string(),
+        extra_mounts_json: extra_mounts_json.to_string(),
+        boot_env_json: boot_env_json.to_string(),
+        origin_json: origin_json.to_string(),
+        timeout_secs,
+    };
+    let child = spawn_supervisor_child(&sp, false)?;
+    let pid = child.id();
+    drop(child);
+    Ok(pid)
+}
+
+/// Spawn the supervisor as a live child of the caller (no `setsid`, no `drop`),
+/// so an external parent (the shim) owns and reaps it. Used by
+/// `nanosb supervise --foreground`.
+pub fn spawn_supervisor_foreground(
+    sp: &SupervisorSpawn,
+) -> anyhow::Result<std::process::Child> {
+    spawn_supervisor_child(sp, true)
+}
+
+/// Map a `wait()` status to the task exit code: the exit code, or `128 + signal`
+/// when the process was killed by a signal (the #164 contract).
+pub fn exit_code_from_status(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    -1
+}
+
+fn spawn_supervisor_child(
+    sp: &SupervisorSpawn,
+    foreground: bool,
+) -> anyhow::Result<std::process::Child> {
     use std::os::unix::fs::PermissionsExt;
     // Tests run under the cargo test harness binary, which does not know the
     // `__supervise` subcommand. Honor NANOSB_BINARY_PATH (as the runtime does)
@@ -46,21 +95,18 @@ pub fn spawn_supervisor_with_pid(
         Ok(path) if !path.is_empty() => std::path::PathBuf::from(path),
         _ => std::env::current_exe()?,
     };
-    let sandbox_dir = SupervisorClient::new(sandbox_name)
-        .sandbox_dir()
-        .to_path_buf();
-    std::fs::create_dir_all(sandbox_dir.join("logs"))?;
-    let config_path = sandbox_dir.join("config.json");
-    std::fs::write(&config_path, config_json)?;
+    std::fs::create_dir_all(sp.sandbox_dir.join("logs"))?;
+    let config_path = sp.sandbox_dir.join("config.json");
+    std::fs::write(&config_path, &sp.config_json)?;
     let deploy = serde_json::json!({
-        "config_json": config_json,
-        "extra_mounts_json": extra_mounts_json,
+        "config_json": sp.config_json,
+        "extra_mounts_json": sp.extra_mounts_json,
     });
-    let deploy_path = sandbox_dir.join("deploy.json");
+    let deploy_path = sp.sandbox_dir.join("deploy.json");
     std::fs::write(&deploy_path, deploy.to_string())?;
-    let origin_path = sandbox_dir.join("origin.json");
-    std::fs::write(&origin_path, origin_json)?;
-    let supervisor_log_path = sandbox_dir.join("logs").join("supervisor.log");
+    let origin_path = sp.sandbox_dir.join("origin.json");
+    std::fs::write(&origin_path, &sp.origin_json)?;
+    let supervisor_log_path = sp.sandbox_dir.join("logs").join("supervisor.log");
     let supervisor_log = std::fs::File::create(&supervisor_log_path)?;
     for path in [
         &config_path,
@@ -73,22 +119,21 @@ pub fn spawn_supervisor_with_pid(
     let supervisor_log_err = supervisor_log.try_clone()?;
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("__supervise")
-        .arg(sandbox_name)
-        .arg(config_json)
+        .arg(&sp.name)
+        .arg(&sp.config_json)
         .arg("--extra-mounts-json")
-        .arg(extra_mounts_json)
+        .arg(&sp.extra_mounts_json)
         .arg("--timeout-secs")
-        .arg(timeout_secs.to_string())
-        .env("NANOSB_BOOT_ENV", boot_env_json)
+        .arg(sp.timeout_secs.to_string())
+        .env("NANOSB_BOOT_ENV", &sp.boot_env_json)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(supervisor_log))
         .stderr(std::process::Stdio::from(supervisor_log_err));
-    let child = cmd
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn supervisor: {}", e))?;
-    let pid = child.id();
-    drop(child);
-    Ok(pid)
+    if foreground {
+        cmd.arg("--foreground");
+    }
+    cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn supervisor: {}", e))
 }
 
 /// Poll until the supervisor reports `Running`, `Error`, or the timeout elapses.
@@ -311,6 +356,35 @@ mod tests {
         let dir = std::env::temp_dir().join("nanosb-deploy-test-explicit");
         let (_plan, rc) = deploy_plan_for(&config, &dir);
         assert_eq!(rc.user.as_deref(), Some("2000"));
+    }
+
+    #[test]
+    fn foreground_spawn_is_reapable_and_maps_exit_code() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("nanosb-fg-spawn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fake = tmp.join("fake-supervisor.sh");
+        std::fs::write(&fake, "#!/bin/sh\nexit 7\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var("NANOSB_BINARY_PATH", &fake);
+        let sp = SupervisorSpawn {
+            name: "fg-spawn-test".to_string(),
+            sandbox_dir: tmp.join("sandbox"),
+            config_json: "{}".to_string(),
+            extra_mounts_json: "[]".to_string(),
+            boot_env_json: "{}".to_string(),
+            origin_json: "{}".to_string(),
+            timeout_secs: 1,
+        };
+        let mut child = spawn_supervisor_foreground(&sp).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(exit_code_from_status(status), 7);
+        assert!(sp.sandbox_dir.join("logs/supervisor.log").exists());
+
+        std::env::remove_var("NANOSB_BINARY_PATH");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

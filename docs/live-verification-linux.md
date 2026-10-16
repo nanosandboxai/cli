@@ -78,6 +78,32 @@ python3 runtime/scripts/linux-kvm-verbs-e2e.py
 ```
 
 
+### Epic 11 · M4 — non-OCI rootfs + ownable entrypoint
+
+The harness additionally covers the Epic 11 surfaces:
+
+- a **`local_dir` rootfs** sandbox booted via `nanosb supervise --foreground`
+  (no OCI bundle), asserting the real exit code (a static `/init` returning 42)
+  and that `<sandbox_dir>/supervisor.pid` is written;
+- the exec channel (`exec.sock`) being wired through `nanosb supervise` (needs a
+  host-arch guest `exec-agent`; otherwise covered by unit tests).
+
+Both self-skip (exit 0) when `gcc -static` or the exec-agent is unavailable.
+
+Live result (Linux x86_64, Ubuntu 24.04, kernel 6.17, `/dev/kvm`):
+
+```
+$ runtime/scripts/linux-kvm-e2e.sh
+-- non-OCI (local_dir) rootfs via 'nanosb supervise --foreground' --
+188678
+PASS: local_dir rootfs booted (no OCI bundle) and propagated exit 42
+PASS: supervisor.pid written (188678)
+PASS: exec channel (exec.sock) wired through 'nanosb supervise'
+boot+exec wall time: 1817 ms
+PASS: live Linux/KVM VM booted, ran the workload, stdout + exit code propagated
+HARNESS_EXIT=0
+```
+
 ## 3. Captured evidence (Linux x86_64, Ubuntu 24.04, kernel 6.17, `/dev/kvm`)
 
 ```

@@ -308,10 +308,9 @@ impl Sandbox {
             self.runtime.as_ref().expect("runtime was just assigned")
         };
 
-        let bundle = self.bundle.as_ref().ok_or_else(|| {
-            error!(sandbox_id = %self.id, "No bundle available for sandbox start");
-            Error::SandboxCreationFailed("No bundle available".to_string())
-        })?;
+        // Non-OCI rootfs boots from `config.rootfs`; only an OCI image needs the
+        // bundle from `create`. `runtime.create` derives the rootfs path.
+        let bundle_path = self.bundle.as_ref().map(|b| b.path.as_path());
 
         let create_timeout = Duration::from_secs(300);
         let start_timeout = Duration::from_secs(600);
@@ -319,7 +318,7 @@ impl Sandbox {
         debug!("Creating VM via runtime");
         timeout(
             create_timeout,
-            runtime.create(&self.id, &self.config, Some(&bundle.path)),
+            runtime.create(&self.id, &self.config, bundle_path),
         )
         .await
         .map_err(|_| {
@@ -378,10 +377,7 @@ impl Sandbox {
             self.runtime.as_ref().expect("runtime was just assigned")
         };
 
-        let bundle = self.bundle.as_ref().ok_or_else(|| {
-            error!(sandbox_id = %self.id, "No bundle available for sandbox start");
-            Error::SandboxCreationFailed("No bundle available".to_string())
-        })?;
+        let bundle_path = self.bundle.as_ref().map(|b| b.path.as_path());
 
         // --- Create and start the VM ---
 
@@ -393,7 +389,7 @@ impl Sandbox {
         debug!("Creating VM via runtime");
         timeout(
             create_timeout,
-            runtime.create(&self.id, &self.config, Some(&bundle.path)),
+            runtime.create(&self.id, &self.config, bundle_path),
         )
         .await
         .map_err(|_| {
@@ -464,10 +460,7 @@ impl Sandbox {
             )));
         }
 
-        let bundle = self.bundle.as_ref().ok_or_else(|| {
-            error!(sandbox_id = %self.id, "No bundle available for sandbox restart");
-            Error::SandboxCreationFailed("No bundle available".to_string())
-        })?;
+        let bundle_path = self.bundle.as_ref().map(|b| b.path.as_path());
 
         info!("Restarting sandbox {}", self.id);
 
@@ -480,7 +473,7 @@ impl Sandbox {
         // Create and start the container again
         debug!("Creating container via runtime");
         runtime
-            .create(&self.id, &self.config, Some(&bundle.path))
+            .create(&self.id, &self.config, bundle_path)
             .await?;
 
         debug!("Starting container via runtime");

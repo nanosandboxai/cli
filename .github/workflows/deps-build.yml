@@ -178,7 +178,7 @@ jobs:
           cd runtime/deps/gvproxy
           if command -v go &>/dev/null; then
             echo "Go version: $(go version)"
-            CGO_ENABLED=0 go build -buildvcs=false -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
+            GOWORK=off CGO_ENABLED=0 go build -buildvcs=false -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
             echo "gvproxy built: $(ls -la gvproxy)"
           else
             echo "Go not available — skipping gvproxy build"
@@ -295,7 +295,7 @@ jobs:
       - name: Build gvproxy
         run: |
           cd runtime/deps/gvproxy
-          CGO_ENABLED=0 go build -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
+          GOWORK=off CGO_ENABLED=0 go build -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
           echo "gvproxy built: $(ls -la gvproxy)"
 
       # Build nanosandbox (libkrun linked as static library)

@@ -49,6 +49,39 @@ containerd/CRI integration on Linux/KVM.
 - The **supervisor** for a sandbox is a separate process; control flows over
   `$NANOSB_HOME/<sandbox>/control.sock` (see `supervisor::client`).
 
+### 3.1 Supported supervisor entrypoint — `nanosb supervise`
+
+`nanosb supervise --name <n> --spec <SandboxSpec.json|->` is the supported,
+stable way for a host-side consumer (the shim) to spawn a supervisor. It performs
+the same pre-spawn wiring as the helper:
+
+- stages the guest `exec-agent` into `<sandbox_dir>/agent` (virtiofs read-write at
+  `/agent`),
+- sets `vsock_socket = <sandbox_dir>/exec.sock` and `vsock_port = 1024`
+  (`EXEC_VSOCK_PORT`),
+- defaults the PID-1 command to the exec-agent when the spec has no `command`.
+
+**`--foreground`** spawns the supervisor as a **live child of the caller** (no
+`setsid`, not re-parented) so the caller owns and reaps it:
+
+- It reports only once the sandbox reaches `Running` (readiness handshake; typed
+  failure on `Error`/timeout), removing the create→start race.
+- It writes `<sandbox_dir>/supervisor.pid` (the child pid) and prints the pid.
+- When the supervisor exits, the command exits with the **same code**; a signal
+  death maps to `128 + signal` (the #164 contract).
+
+Without `--foreground` the supervisor is spawned **detached** (`setsid`; the child
+is re-parented to init) and the command prints the pid and returns immediately —
+use this when the caller does not need to own the process.
+
+### 3.2 Non-OCI rootfs (containerd snapshotter mounts)
+
+A `SandboxSpec.rootfs` of `{ "kind": "local_dir", "path": "<dir>" }` (or
+`"kind": "disk_image"` with `path`/`format`) boots **directly from that host path** — no
+OCI image pull and no OCI bundle. This is how a containerd snapshotter mount is
+handed to the VM. `start`, `start_next`, and `restart` all support it; an OCI
+rootfs still uses the bundle prepared by `create`.
+
 ## 4. Dependency contract (layering)
 
 A host-side consumer must be able to depend on the **thin host layer** without
@@ -76,8 +109,11 @@ Target consumer dependencies: **`nanosb-protocol` + `nanosb-host` only**.
   engine-coupled `sandbox` (`AgentSandbox`, `runtime::Sandbox`) stays in the CLI.
 - ✅ **H4** — TUI deps gated behind the optional `tui` feature; the `runtime-host`
   profile builds with no TUI dependencies.
-- ✅ **H5** — `nanosb supervise --foreground --name <n> --spec <file|->` spawns the
-  supervisor in the caller's process tree and prints the child pid.
+- ✅ **H5** (completed by Epic 11 M2/M3) — `nanosb supervise --foreground
+  --name <n> --spec <file|->` spawns the supervisor as an **ownable, reapable**
+  child of the caller, performs the readiness handshake, writes
+  `<sandbox_dir>/supervisor.pid`, and stages the exec-agent + vsock wiring. See
+  §3.1.
 - ✅ **H7** — CI (`host-layer` job) asserts `nanosb-host` and the slim helper build
   without the engine or TUI dependencies.
 

@@ -1332,30 +1332,7 @@ impl LibkrunRuntime {
             self.destroy(id).await?;
         }
 
-        // Derive rootfs path from the bundle, or from the configured
-        // non-OCI rootfs (local dir / disk image) when present.
-        let bundle = bundle_path;
-        let mut rootfs_path = match config.rootfs.as_ref() {
-            Some(rf)
-                if rf.source == RootfsSource::LocalDir || rf.source == RootfsSource::DiskImage =>
-            {
-                PathBuf::from(rf.path.as_deref().ok_or_else(|| {
-                    Error::SandboxCreationFailed(format!(
-                        "rootfs source {:?} requires a path",
-                        rf.source
-                    ))
-                })?)
-            }
-            _ => {
-                let bundle = bundle.ok_or_else(|| {
-                    Error::SandboxCreationFailed(
-                        "LibkrunRuntime requires a bundle path with rootfs (handles_image_pull=false)"
-                            .to_string(),
-                    )
-                })?;
-                bundle.join("rootfs")
-            }
-        };
+        let mut rootfs_path = resolve_rootfs_path(config, bundle_path)?;
 
         if !rootfs_path.exists() {
             return Err(Error::SandboxCreationFailed(format!(
@@ -2351,6 +2328,89 @@ impl LibkrunRuntime {
     /// and create the rootfs, then passes the bundle_path to `create()`.
     pub fn handles_image_pull(&self) -> bool {
         false
+    }
+}
+
+/// Resolve the rootfs directory for a sandbox: the configured non-OCI rootfs
+/// (local dir / disk image) when present, otherwise `<bundle>/rootfs`. A typed
+/// error is returned when neither is available.
+fn resolve_rootfs_path(config: &SandboxConfig, bundle_path: Option<&Path>) -> Result<PathBuf> {
+    match config.rootfs.as_ref() {
+        Some(rf) if rf.source == RootfsSource::LocalDir || rf.source == RootfsSource::DiskImage => {
+            Ok(PathBuf::from(rf.path.as_deref().ok_or_else(|| {
+                Error::SandboxCreationFailed(format!(
+                    "rootfs source {:?} requires a path",
+                    rf.source
+                ))
+            })?))
+        }
+        _ => {
+            let bundle = bundle_path.ok_or_else(|| {
+                Error::SandboxCreationFailed(
+                    "LibkrunRuntime requires a bundle path with rootfs (handles_image_pull=false)"
+                        .to_string(),
+                )
+            })?;
+            Ok(bundle.join("rootfs"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod rootfs_resolution_tests {
+    use super::*;
+    use crate::config::RootfsConfig;
+
+    fn cfg(source: RootfsSource, path: Option<&str>) -> SandboxConfig {
+        let mut c = SandboxConfig::default();
+        c.rootfs = Some(RootfsConfig {
+            source,
+            path: path.map(str::to_string),
+            fstype: None,
+            format: None,
+            read_only: false,
+        });
+        c
+    }
+
+    #[test]
+    fn local_dir_rootfs_needs_no_bundle() {
+        let c = cfg(RootfsSource::LocalDir, Some("/tmp/rootfs-dir"));
+        assert_eq!(
+            resolve_rootfs_path(&c, None).unwrap(),
+            PathBuf::from("/tmp/rootfs-dir")
+        );
+    }
+
+    #[test]
+    fn disk_image_rootfs_needs_no_bundle() {
+        let c = cfg(RootfsSource::DiskImage, Some("/tmp/rootfs.img"));
+        assert_eq!(
+            resolve_rootfs_path(&c, None).unwrap(),
+            PathBuf::from("/tmp/rootfs.img")
+        );
+    }
+
+    #[test]
+    fn non_oci_rootfs_without_path_is_typed_error() {
+        let c = cfg(RootfsSource::LocalDir, None);
+        assert!(resolve_rootfs_path(&c, None).is_err());
+    }
+
+    #[test]
+    fn oci_rootfs_uses_bundle_rootfs() {
+        let c = cfg(RootfsSource::Oci, None);
+        assert_eq!(
+            resolve_rootfs_path(&c, Some(Path::new("/bundle"))).unwrap(),
+            PathBuf::from("/bundle/rootfs")
+        );
+    }
+
+    #[test]
+    fn oci_rootfs_without_bundle_is_typed_error() {
+        let c = cfg(RootfsSource::Oci, None);
+        let err = resolve_rootfs_path(&c, None).unwrap_err();
+        assert!(err.to_string().contains("requires a bundle path"), "{err}");
     }
 }
 

@@ -125,7 +125,7 @@ jobs:
         run: |
           mkdir -p "$HOME/.nanosandbox/bin"
           cd runtime/deps/gvproxy
-          CGO_ENABLED=0 go build -o "$HOME/.nanosandbox/bin/gvproxy" ./cmd/gvproxy
+          GOWORK=off CGO_ENABLED=0 go build -o "$HOME/.nanosandbox/bin/gvproxy" ./cmd/gvproxy
 
       - name: Build nanosb CLI (release)
         run: cargo build --release -p nanosb-cli

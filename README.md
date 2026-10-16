@@ -121,10 +121,29 @@ cargo build -p nanosb-conformance
 
 ### containerd / CRI
 
-The runtime exposes a shim-facing surface over the same protocol: `exec` with an optional
-PTY (tty/cols/rows), a blocking `wait` returning the exit code, and `kill` with a signal.
-This is the substrate for containerd/CRI integration on Linux/KVM. See
-[`docs/protocol/protocol.md`](docs/protocol/protocol.md).
+The runtime exposes a shim-facing surface over the same protocol: `exec` with an
+optional PTY (tty/cols/rows), a blocking `wait` returning the exit code, and
+`kill` with a signal. This is the substrate for containerd/CRI integration on
+Linux/KVM. See [`docs/protocol/protocol.md`](docs/protocol/protocol.md) and the
+shim contract [`docs/runtime-capability-contract.md`](docs/runtime-capability-contract.md).
+
+The supported supervisor entrypoint is `nanosb supervise`:
+
+```bash
+# Own + reap the supervisor as a child of the caller (shim entrypoint): reports
+# only once the sandbox is Running and exits with the task exit code.
+nanosb supervise --foreground --name my-sandbox --spec spec.json
+
+# Detached (default): prints the child pid and returns immediately.
+nanosb supervise --name my-sandbox --spec spec.json
+```
+
+A sandbox can boot a **non-OCI rootfs** directly from a host directory (no image
+pull, no OCI bundle) — how a containerd snapshotter mount is handed to the VM:
+
+```json
+{ "image": "alpine", "name": "s", "rootfs": { "kind": "local_dir", "path": "/var/lib/containerd/snapshots/..." } }
+```
 
 ### Testing the TUI
 
@@ -166,6 +185,7 @@ nanosb projects                # List registered projects
 nanosb projects-forget <path>  # Forget a registered project
 nanosb gc [--dry-run]          # Reclaim dead supervisor state
 nanosb cache prune [--all]     # Reclaim disk space from image cache
+nanosb supervise [--foreground] --name <n> --spec <spec.json>  # Spawn a supervisor (host/shim entrypoint)
 ```
 
 ### Global Flags

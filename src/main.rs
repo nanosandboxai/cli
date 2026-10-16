@@ -106,6 +106,9 @@ mod cli {
             /// Timeout in seconds
             #[arg(long, default_value = "3600")]
             timeout_secs: u64,
+            /// Run in the caller's process tree (no setsid / daemonize).
+            #[arg(long)]
+            foreground: bool,
         },
 
         /// Spawn a supervisor for a sandbox spec in the caller's process tree
@@ -2084,11 +2087,11 @@ mod cli {
         Ok(())
     }
 
-    /// Check runtime prerequisites and display status
+    /// Spawn a supervisor for a sandbox spec (host-side / shim entrypoint).
     async fn cmd_supervise(
         name: &str,
         spec_path: &str,
-        _foreground: bool,
+        foreground: bool,
     ) -> anyhow::Result<()> {
         let raw = if spec_path == "-" {
             use std::io::Read;
@@ -2098,22 +2101,40 @@ mod cli {
         } else {
             std::fs::read_to_string(spec_path)?
         };
-        let spec: nanosb_protocol::SandboxSpec = serde_json::from_str(&raw)?;
-        let config = nanosb_cli::helper::spec_to_config(&spec)?;
-        let (config_json, boot_env_json) =
-            nanosb_cli::deploy::extract_boot_env(&serde_json::to_string(&config)?)?;
-        let origin =
-            nanosb_cli::deploy::Origin::cli(spec.env.keys().cloned().collect(), Vec::new());
-        let pid = nanosb_cli::deploy::spawn_supervisor_with_pid(
-            name,
-            &config_json,
-            "[]",
-            &boot_env_json,
-            &origin.to_json(),
-            3600,
-        )?;
+        let mut spec: nanosb_protocol::SandboxSpec = serde_json::from_str(&raw)?;
+        // The CLI `--name` is authoritative for the sandbox identity.
+        spec.name = Some(name.to_string());
+        let sp = nanosb_cli::deploy::prepare_supervisor_spawn(&spec)?;
+
+        // Default: detached supervisor; report the pid immediately.
+        if !foreground {
+            let pid = nanosb_cli::deploy::spawn_supervisor_with_pid(
+                &sp.name,
+                &sp.config_json,
+                &sp.extra_mounts_json,
+                &sp.boot_env_json,
+                &sp.origin_json,
+                sp.timeout_secs,
+            )?;
+            println!("{}", pid);
+            return Ok(());
+        }
+
+        // Foreground: own + reap the supervisor in the caller's process tree.
+        let mut child = nanosb_cli::deploy::spawn_supervisor_foreground(&sp)?;
+        let pid = child.id();
+        // Readiness handshake: report only once the sandbox is Running.
+        if let Err(e) = nanosb_cli::deploy::wait_for_running(&sp.name, 60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+        // Stable ownership signal for an external parent (the shim).
+        std::fs::write(sp.sandbox_dir.join("supervisor.pid"), format!("{pid}\n"))?;
         println!("{}", pid);
-        Ok(())
+        // SIGCHLD-correct: reap and map the supervisor exit to the task exit.
+        let status = child.wait()?;
+        std::process::exit(nanosb_cli::deploy::exit_code_from_status(status));
     }
 
     async fn cmd_doctor(format: OutputFormat) -> anyhow::Result<()> {
@@ -2884,6 +2905,7 @@ fn main() -> anyhow::Result<()> {    // Handle internal subprocess commands BEFO
             config_json,
             extra_mounts_json,
             timeout_secs,
+            foreground,
         }) = parsed.command
         {
             crate::supervisor::run_supervisor(crate::supervisor::SuperviseArgs {
@@ -2891,6 +2913,7 @@ fn main() -> anyhow::Result<()> {    // Handle internal subprocess commands BEFO
                 config_json,
                 extra_mounts_json,
                 timeout_secs,
+                foreground,
             });
         }
         anyhow::bail!("__supervise requires sandbox_name and config_json arguments");

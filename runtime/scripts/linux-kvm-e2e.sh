@@ -104,6 +104,69 @@ fi
 
 "$BINARY" rm -f "$NAME" >/dev/null 2>&1 || true
 
+# ── Epic 11 · M4: non-OCI (local_dir) rootfs + ownable entrypoint ───────────
+echo "-- non-OCI (local_dir) rootfs via 'nanosb supervise --foreground' --"
+EPIC11_TMP="$(mktemp -d)"
+EPIC11_OK=true
+
+cat > "$EPIC11_TMP/init.c" <<'C'
+int main(void) { return 42; }
+C
+ROOTFS="$EPIC11_TMP/rootfs"
+mkdir -p "$ROOTFS" "$EPIC11_TMP/guest-bin"
+printf '#!/bin/sh\n' > "$EPIC11_TMP/guest-bin/exec-agent"
+
+if gcc -static -o "$ROOTFS/init" "$EPIC11_TMP/init.c" 2>/dev/null; then
+  cat > "$EPIC11_TMP/spec.json" <<JSON
+{"image":"alpine","name":"$NAME-localdir","rootfs":{"kind":"local_dir","path":"$ROOTFS"},"command":"/init"}
+JSON
+  "$BINARY" rm -f "$NAME-localdir" >/dev/null 2>&1 || true
+  NANOSB_GUEST_BIN_DIR="$EPIC11_TMP/guest-bin" "$BINARY" supervise --foreground \
+    --name "$NAME-localdir" --spec "$EPIC11_TMP/spec.json"
+  LOCALDIR_CODE=$?
+  if [ "$LOCALDIR_CODE" != "42" ]; then
+    echo "FAIL: local_dir rootfs exit code $LOCALDIR_CODE != 42" >&2
+    cat "$NANOSB_HOME/sandboxes/$NAME-localdir/state.json" 2>/dev/null || true
+    EPIC11_OK=false
+  else
+    echo "PASS: local_dir rootfs booted (no OCI bundle) and propagated exit 42"
+  fi
+  PIDFILE="$NANOSB_HOME/sandboxes/$NAME-localdir/supervisor.pid"
+  if [ -s "$PIDFILE" ]; then
+    echo "PASS: supervisor.pid written ($(cat "$PIDFILE"))"
+  else
+    echo "FAIL: supervisor.pid not written at $PIDFILE" >&2
+    EPIC11_OK=false
+  fi
+  "$BINARY" rm -f "$NAME-localdir" >/dev/null 2>&1 || true
+else
+  echo "SKIP: gcc -static unavailable; cannot build a local_dir rootfs fixture"
+fi
+
+# Exec-channel wiring through the supported entrypoint (needs a real host-arch
+# guest exec-agent; otherwise covered by unit tests + the verbs E2E).
+if [ -x "$NANOSB_HOME/guest-bin/exec-agent" ]; then
+  cat > "$EPIC11_TMP/spec2.json" <<JSON
+{"image":"alpine","name":"$NAME-exec","rootfs":{"kind":"local_dir","path":"$ROOTFS"}}
+JSON
+  "$BINARY" rm -f "$NAME-exec" >/dev/null 2>&1 || true
+  "$BINARY" supervise --name "$NAME-exec" --spec "$EPIC11_TMP/spec2.json" >/dev/null 2>&1
+  EXEC_SOCK="$NANOSB_HOME/sandboxes/$NAME-exec/exec.sock"
+  for _ in $(seq 1 60); do [ -S "$EXEC_SOCK" ] && break; sleep 0.5; done
+  if [ -S "$EXEC_SOCK" ]; then
+    echo "PASS: exec channel (exec.sock) wired through 'nanosb supervise'"
+  else
+    echo "FAIL: exec.sock not present at $EXEC_SOCK" >&2
+    EPIC11_OK=false
+  fi
+  "$BINARY" rm -f "$NAME-exec" >/dev/null 2>&1 || true
+else
+  echo "SKIP: no real guest exec-agent staged; exec wiring covered by unit tests"
+fi
+
+rm -rf "$EPIC11_TMP"
+$EPIC11_OK || ok=false
+
 if ! $ok; then
   echo "state.json:"; cat "$STATE_JSON" 2>/dev/null
   echo "console.log:"; cat "$CONSOLE_LOG" 2>/dev/null
