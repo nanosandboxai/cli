@@ -76,8 +76,8 @@ use this when the caller does not need to own the process.
 
 ### 3.2 Non-OCI rootfs (containerd snapshotter mounts)
 
-A `SandboxSpec.rootfs` of `{ "source": "local_dir", "path": "<dir>" }` (or
-`"disk_image"` with `path`/`format`) boots **directly from that host path** — no
+A `SandboxSpec.rootfs` of `{ "kind": "local_dir", "path": "<dir>" }` (or
+`"kind": "disk_image"` with `path`/`format`) boots **directly from that host path** — no
 OCI image pull and no OCI bundle. This is how a containerd snapshotter mount is
 handed to the VM. `start`, `start_next`, and `restart` all support it; an OCI
 rootfs still uses the bundle prepared by `create`.

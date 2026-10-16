@@ -142,7 +142,7 @@ A sandbox can boot a **non-OCI rootfs** directly from a host directory (no image
 pull, no OCI bundle) — how a containerd snapshotter mount is handed to the VM:
 
 ```json
-{ "image": "alpine", "name": "s", "rootfs": { "source": "local_dir", "path": "/var/lib/containerd/snapshots/..." } }
+{ "image": "alpine", "name": "s", "rootfs": { "kind": "local_dir", "path": "/var/lib/containerd/snapshots/..." } }
 ```
 
 ### Testing the TUI

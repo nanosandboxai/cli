@@ -118,7 +118,7 @@ printf '#!/bin/sh\n' > "$EPIC11_TMP/guest-bin/exec-agent"
 
 if gcc -static -o "$ROOTFS/init" "$EPIC11_TMP/init.c" 2>/dev/null; then
   cat > "$EPIC11_TMP/spec.json" <<JSON
-{"image":"alpine","name":"$NAME-localdir","rootfs":{"source":"local_dir","path":"$ROOTFS"},"command":"/init"}
+{"image":"alpine","name":"$NAME-localdir","rootfs":{"kind":"local_dir","path":"$ROOTFS"},"command":"/init"}
 JSON
   "$BINARY" rm -f "$NAME-localdir" >/dev/null 2>&1 || true
   NANOSB_GUEST_BIN_DIR="$EPIC11_TMP/guest-bin" "$BINARY" supervise --foreground \
@@ -147,7 +147,7 @@ fi
 # guest exec-agent; otherwise covered by unit tests + the verbs E2E).
 if [ -x "$NANOSB_HOME/guest-bin/exec-agent" ]; then
   cat > "$EPIC11_TMP/spec2.json" <<JSON
-{"image":"alpine","name":"$NAME-exec","rootfs":{"source":"local_dir","path":"$ROOTFS"}}
+{"image":"alpine","name":"$NAME-exec","rootfs":{"kind":"local_dir","path":"$ROOTFS"}}
 JSON
   "$BINARY" rm -f "$NAME-exec" >/dev/null 2>&1 || true
   "$BINARY" supervise --name "$NAME-exec" --spec "$EPIC11_TMP/spec2.json" >/dev/null 2>&1
