@@ -154,7 +154,7 @@ jobs:
         run: |
           cd runtime/deps/gvproxy
           CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.go_arch }} \
-            go build -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
+            GOWORK=off go build -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
 
       - name: Build runtime (zigbuild)
         run: cargo zigbuild --release -p runtime --target ${{ matrix.rust_target }}
@@ -249,7 +249,7 @@ jobs:
       - name: Build gvproxy
         run: |
           cd runtime/deps/gvproxy
-          CGO_ENABLED=0 go build -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
+          GOWORK=off CGO_ENABLED=0 go build -ldflags="-s -w" -o gvproxy ./cmd/gvproxy
 
       - name: Sign helper binaries (Developer ID, gated)
         if: env.HAS_SIGNING == 'true'
