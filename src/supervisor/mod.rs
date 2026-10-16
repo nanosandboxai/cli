@@ -180,6 +180,8 @@ pub struct SuperviseArgs {
     pub config_json: String,
     pub extra_mounts_json: String,
     pub timeout_secs: u64,
+    /// Keep the supervisor in the caller's process tree (no `setsid`).
+    pub foreground: bool,
 }
 
 /// Run the supervisor process. This function:
@@ -194,9 +196,12 @@ pub struct SuperviseArgs {
 pub fn run_supervisor(args: SuperviseArgs) -> ! {
     let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
-    // Detach from parent process group
-    unsafe {
-        libc::setsid();
+    // Detach from the parent process group unless the caller owns us
+    // (`nanosb supervise --foreground` keeps us in the caller's tree).
+    if !args.foreground {
+        unsafe {
+            libc::setsid();
+        }
     }
 
     let sandbox_dir = sandboxes_root().join(&args.sandbox_name);

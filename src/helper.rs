@@ -4,10 +4,9 @@
 use std::collections::HashMap;
 
 use nanosb_protocol::SandboxSpec;
-use runtime::config::{ExtraMount, Mount, SandboxConfig};
+use runtime::config::{Mount, SandboxConfig};
 
-use crate::deploy::{self, Origin};
-use crate::supervisor::client::SupervisorClient;
+use crate::deploy;
 pub use nanosb_host::spec::{mount_spec_to_mount, spec_to_config, MountError};
 
 /// Append a runtime mount to a stopped sandbox's config so it applies on the
@@ -57,82 +56,19 @@ fn ensure_image_policy_with(spec: &SandboxSpec, mgr: &runtime::ImageManager) -> 
 
 /// Create, boot, and wait for a sandbox to reach the running state.
 pub fn create_sandbox(spec: &SandboxSpec) -> anyhow::Result<()> {
-    let name = spec
-        .name
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("spec.name is required"))?;
     ensure_image_policy(spec)?;
-    let mut config = spec_to_config(spec)?;
-
-    let client = SupervisorClient::new(&name);
-    let sandbox_dir = client.sandbox_dir().to_path_buf();
-
-    let agent_dir = sandbox_dir.join("agent");
-    let guest_path = deploy::stage_exec_agent(&agent_dir)?;
-    let exec_sock = sandbox_dir.join("exec.sock");
-    let _ = std::fs::remove_file(&exec_sock);
-    let extra_mounts = vec![ExtraMount {
-        tag: "agent".to_string(),
-        host_path: agent_dir.to_string_lossy().to_string(),
-        target: "/agent".to_string(),
-        readonly: false,
-    }];
-    config.vsock_socket = Some(exec_sock.to_string_lossy().to_string());
-    config.vsock_port = Some(deploy::EXEC_VSOCK_PORT);
-    if config.command.is_none() {
-        config.command = Some(guest_path);
-        config.command_args = vec![deploy::EXEC_VSOCK_PORT.to_string()];
-    }
-
-    let extra_mounts_json = serde_json::to_string(&extra_mounts)?;
-    let config_json = serde_json::to_string(&config)?;
-    let (config_json, boot_env_json) = deploy::extract_boot_env(&config_json)?;
-    let origin = Origin::cli(Vec::new(), Vec::new()).to_json();
-
+    let sp = deploy::prepare_supervisor_spawn(spec)?;
     deploy::spawn_supervisor(
-        &name,
-        &config_json,
-        &extra_mounts_json,
-        &boot_env_json,
-        &origin,
-        config.timeout_secs,
+        &sp.name,
+        &sp.config_json,
+        &sp.extra_mounts_json,
+        &sp.boot_env_json,
+        &sp.origin_json,
+        sp.timeout_secs,
     )?;
-
-    wait_until_running(&client, 60)?;
-    wait_for_exec_channel(&client, 20)?;
+    deploy::wait_for_running(&sp.name, 60)?;
+    deploy::wait_for_exec_channel(&sp.name, 20)?;
     Ok(())
-}
-
-fn wait_for_exec_channel(client: &SupervisorClient, timeout_secs: u64) -> anyhow::Result<()> {
-    let exec_sock = client.sandbox_dir().join("exec.sock");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    while !exec_sock.exists() {
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for the guest exec channel to come up");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    Ok(())
-}
-
-fn wait_until_running(client: &SupervisorClient, timeout_secs: u64) -> anyhow::Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    loop {
-        if let Some(state) = client.read_state() {
-            match state.state {
-                crate::supervisor::SandboxState::Running => return Ok(()),
-                crate::supervisor::SandboxState::Stopped
-                | crate::supervisor::SandboxState::Error => {
-                    anyhow::bail!("sandbox failed to start (state: {:?})", state.state);
-                }
-                crate::supervisor::SandboxState::Starting => {}
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for sandbox to start");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
 }
 
 /// Default label map helper (kept for SDK parity in future verbs).

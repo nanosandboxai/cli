@@ -44,11 +44,13 @@ fn main() -> anyhow::Result<()> {
         let timeout_secs = named_arg(&args, "--timeout-secs")
             .and_then(|s| s.parse().ok())
             .unwrap_or(3600);
+        let foreground = args.iter().any(|a| a == "--foreground");
         nanosb_cli::supervisor::run_supervisor(nanosb_cli::supervisor::SuperviseArgs {
             sandbox_name,
             config_json,
             extra_mounts_json,
             timeout_secs,
+            foreground,
         });
     }
 
