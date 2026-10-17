@@ -571,6 +571,12 @@ impl Session {
             cmd.env(k, v);
         }
 
+        // Announce acceptance *before* spawning the child. The host retries a
+        // new exec while the agent is still binding (the vsock socket exists
+        // before the guest listener does); if a reset arrives after the host has
+        // read `Started`, it will not retry, so a command is never run twice.
+        writer.event(&ExecEvent::Started { pid: 0 })?;
+
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("spawn {}: {}", program, e))?;
@@ -579,8 +585,6 @@ impl Session {
         if let Some(slave) = pty_slave {
             unsafe { libc::close(slave) };
         }
-
-        writer.event(&ExecEvent::Started { pid: child.id() })?;
 
         let pid = child.id();
 
