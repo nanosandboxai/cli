@@ -160,6 +160,13 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub command_args: Vec<String>,
 
+    /// Path to the in-guest exec agent to run *alongside* the PID-1 workload
+    /// (next mode only). When set, the runtime exports `KRUN_EXEC_AGENT` so the
+    /// guest init backgrounds the agent at that path, keeping `command` as the
+    /// workload. Set by the host layer when the exec channel is enabled.
+    #[serde(default)]
+    pub exec_agent: Option<String>,
+
     /// Runtime mode: Legacy (default) or Next (zero-image-customization).
     #[serde(default)]
     pub runtime_mode: RuntimeMode,
@@ -286,6 +293,7 @@ impl Default for SandboxConfig {
             ssh_pubkey: None,
             command: None,
             command_args: Vec::new(),
+            exec_agent: None,
             runtime_mode: RuntimeMode::default(),
             workspace_mode: WorkspaceMode::default(),
             max_inodes: 0,

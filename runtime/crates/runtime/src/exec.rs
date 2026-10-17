@@ -142,6 +142,33 @@ impl From<std::io::Error> for ExecError {
 /// Result alias for exec client operations.
 pub type ExecResultT<T> = Result<T, ExecError>;
 
+impl ExecError {
+    /// Whether retrying the same request may succeed once the guest agent is up.
+    ///
+    /// The host exec socket exists from VM start (libkrun's vsock acceptor), so
+    /// a connection can succeed before the guest agent binds its port; the first
+    /// frame then fails with a reset/EOF. Those are retryable.
+    fn is_transient(&self) -> bool {
+        match self {
+            ExecError::NotAvailable(_) => true,
+            ExecError::Io(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            ),
+            ExecError::Protocol(_) | ExecError::Agent(_) => false,
+        }
+    }
+}
+
+/// How long to keep retrying a new exec while the resident guest agent finishes
+/// coming up (the exec socket precedes the agent's vsock listener).
+const EXEC_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const EXEC_READY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const EXEC_READY_READ_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// A live streaming execution handle.
 ///
 /// Feed control with [`ExecHandle::write_stdin`] / [`ExecHandle::signal`] /
@@ -149,6 +176,9 @@ pub type ExecResultT<T> = Result<T, ExecError>;
 pub struct ExecHandle {
     stream: UnixStream,
     applied_timeout: Option<Duration>,
+    /// Event read during the readiness probe in [`ExecClient::start`], replayed
+    /// to the caller before any further reads.
+    pending: Option<ExecEvent>,
 }
 
 /// A write-only clone of an [`ExecHandle`]. Shares the underlying exec socket
@@ -319,7 +349,6 @@ impl ExecClient {
         args: &[&str],
         options: ExecOptions,
     ) -> ExecResultT<ExecHandle> {
-        let stream = self.connect()?;
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let req = ExecRequestWire {
             command,
@@ -333,15 +362,61 @@ impl ExecClient {
             cols: options.cols,
             rows: options.rows,
         };
+        let wire = serde_json::to_vec(&req)
+            .map_err(|e| ExecError::Protocol(format!("serialize request: {}", e)))?;
+
+        // No socket means the VM is not up: fail fast. Retry only when the
+        // socket exists but the resident agent is not listening yet.
+        if !self.socket.exists() {
+            return Err(ExecError::NotAvailable(format!(
+                "no exec socket at {}",
+                self.socket.display()
+            )));
+        }
+
+        let deadline = Instant::now() + EXEC_READY_TIMEOUT;
+        loop {
+            match self.try_start(&wire) {
+                Ok(handle) => return Ok(handle),
+                Err(e) if e.is_transient() && Instant::now() < deadline => {
+                    std::thread::sleep(EXEC_READY_RETRY_INTERVAL);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// One attempt: connect, send the request, and await the agent's `Started`
+    /// event. A reset/EOF here means the resident agent has not bound its port
+    /// yet; the caller retries. A read timeout means the agent is up but has not
+    /// greeted yet (e.g. an interactive caller that writes stdin first), so the
+    /// handle is returned without consuming anything.
+    fn try_start(&self, wire: &[u8]) -> ExecResultT<ExecHandle> {
+        let stream = self.connect()?;
         let mut handle = ExecHandle {
             stream,
             applied_timeout: None,
+            pending: None,
         };
-        handle.write_frame(
-            &serde_json::to_vec(&req)
-                .map_err(|e| ExecError::Protocol(format!("serialize request: {}", e)))?,
-        )?;
-        Ok(handle)
+        handle.write_frame(wire)?;
+        match handle.next_event(Some(EXEC_READY_READ_TIMEOUT)) {
+            Ok(Some(ev)) => {
+                handle.pending = Some(ev);
+                Ok(handle)
+            }
+            Ok(None) => Err(ExecError::NotAvailable(
+                "exec agent closed the connection before starting".to_string(),
+            )),
+            Err(ExecError::Io(ref e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(handle)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Connect to the host exec socket, retrying while the VM finishes booting.
@@ -366,6 +441,9 @@ impl ExecHandle {
     /// `set_read_timeout` returns `EINVAL` if called again after the socket has
     /// already delivered data, so re-applying it per frame is not safe.
     pub fn next_event(&mut self, timeout: Option<Duration>) -> ExecResultT<Option<ExecEvent>> {
+        if let Some(ev) = self.pending.take() {
+            return Ok(Some(ev));
+        }
         let want = timeout.unwrap_or(Duration::ZERO);
         if self.applied_timeout != Some(want) {
             let res = if want.is_zero() {

@@ -85,6 +85,9 @@ pub struct BootVmRequest {
     /// Guest vsock port the host socket is bridged to.
     #[serde(default)]
     pub vsock_port: Option<u32>,
+    /// Guest path to the exec agent to run alongside the PID-1 workload.
+    #[serde(default)]
+    pub exec_agent: Option<String>,
     /// Rootfs source: "oci", "local_dir", or "disk_image".
     #[serde(default = "default_rootfs_source")]
     pub rootfs_source: String,
@@ -564,6 +567,7 @@ pub fn handle_boot_vm_subprocess() -> ! {
             &config.extra_mounts,
             config.vsock_socket.as_deref(),
             config.vsock_port,
+            config.exec_agent.as_deref(),
             &config.rootfs_source,
             config.rootfs_format.as_deref(),
             config.rootfs_read_only,
@@ -830,6 +834,8 @@ struct SandboxState {
     vsock_socket: Option<String>,
     /// Guest vsock port for the exec channel.
     vsock_port: Option<u32>,
+    /// Guest path to the exec agent run alongside the PID-1 workload.
+    exec_agent: Option<String>,
     /// Epic 5 boot-time configuration (rootfs source, disk mounts, patches,
     /// scripts, guest env metadata).
     boot: BootConfig,
@@ -1038,6 +1044,7 @@ impl LibkrunRuntime {
         extra_mounts: &[ExtraMount],
         vsock_socket: Option<&str>,
         vsock_port: Option<u32>,
+        exec_agent: Option<&str>,
         rootfs_source: &str,
         rootfs_format: Option<&str>,
         rootfs_read_only: bool,
@@ -1139,6 +1146,12 @@ impl LibkrunRuntime {
 
         // Next-mode env vars for the patched init (see runtime/scripts/patches/README.md)
         env_vars.push("KRUN_NEXT_MODE=1".to_string());
+
+        // Resident exec agent: the guest init backgrounds this binary so it
+        // serves the host vsock exec channel *alongside* the PID-1 workload.
+        if let (Some(agent), Some(port)) = (exec_agent, vsock_port) {
+            env_vars.push(format!("KRUN_EXEC_AGENT={}:{}", agent, port));
+        }
 
         // Serialize extra mounts for the init patch
         if !extra_mounts.is_empty() {
@@ -1495,6 +1508,7 @@ impl LibkrunRuntime {
             home: config.home.clone(),
             vsock_socket: config.vsock_socket.clone(),
             vsock_port: config.vsock_port,
+            exec_agent: config.exec_agent.clone(),
             boot: BootConfig {
                 rootfs_source: match config.rootfs.as_ref() {
                     Some(rf) if rf.source == RootfsSource::DiskImage => "disk_image".to_string(),
@@ -1726,6 +1740,7 @@ impl LibkrunRuntime {
         extra_mounts: Vec<ExtraMount>,
         vsock_socket: Option<&str>,
         vsock_port: Option<u32>,
+        exec_agent: Option<&str>,
         boot: BootConfig,
         exit_code_slot: Arc<Mutex<Option<i32>>>,
     ) -> std::result::Result<i32, String> {
@@ -1750,6 +1765,7 @@ impl LibkrunRuntime {
             env: env.clone(),
             vsock_socket: vsock_socket.map(|s| s.to_string()),
             vsock_port,
+            exec_agent: exec_agent.map(|s| s.to_string()),
             rootfs_source: boot.rootfs_source,
             rootfs_format: boot.rootfs_format,
             rootfs_read_only: boot.rootfs_read_only,
@@ -1930,6 +1946,7 @@ impl LibkrunRuntime {
             env: env.clone(),
             vsock_socket: None,
             vsock_port: None,
+            exec_agent: None,
             rootfs_source: boot.rootfs_source,
             rootfs_format: boot.rootfs_format,
             rootfs_read_only: boot.rootfs_read_only,
@@ -2094,6 +2111,7 @@ impl LibkrunRuntime {
             home,
             vsock_socket,
             vsock_port,
+            exec_agent,
             boot,
             exit_code_slot,
         ) = {
@@ -2118,6 +2136,7 @@ impl LibkrunRuntime {
                 state.home.clone(),
                 state.vsock_socket.clone(),
                 state.vsock_port,
+                state.exec_agent.clone(),
                 state.boot.clone(),
                 state.exit_code.clone(),
             )
@@ -2146,6 +2165,7 @@ impl LibkrunRuntime {
                 extra_mounts,
                 vsock_socket.as_deref(),
                 vsock_port,
+                exec_agent.as_deref(),
                 boot,
                 exit_code_slot,
             )

@@ -55,10 +55,21 @@ pub struct Ctx<'a> {
 
 const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn capabilities() -> Vec<Capability> {
-    vec![
+/// Whether this sandbox was started with the resident exec agent wired up.
+///
+/// Exec is advertised only when the exec channel is configured (the guest agent
+/// is resident), so a client can fail loudly instead of hitting a reset.
+fn exec_configured(ctx: &Ctx) -> bool {
+    std::fs::read_to_string(ctx.sandbox_dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("vsock_socket").and_then(|s| s.as_str()).map(String::from))
+        .is_some_and(|s| !s.is_empty())
+}
+
+fn capabilities(ctx: &Ctx) -> Vec<Capability> {
+    let mut caps = vec![
         Capability::Lifecycle,
-        Capability::Exec,
         Capability::Fs,
         Capability::Logs,
         Capability::Metrics,
@@ -69,8 +80,12 @@ fn capabilities() -> Vec<Capability> {
         Capability::Volumes,
         Capability::Signal,
         Capability::Wait,
-        Capability::ExecPty,
-    ]
+    ];
+    if exec_configured(ctx) {
+        caps.push(Capability::Exec);
+        caps.push(Capability::ExecPty);
+    }
+    caps
 }
 
 /// Serve a "new mode" connection: `hello` already parsed from the first frame.
@@ -96,7 +111,7 @@ pub fn serve(
     let hello_ok = Response::HelloOk(HelloResponse {
         protocol: PROTOCOL_VERSION.to_string(),
         helper_version: HELPER_VERSION.to_string(),
-        capabilities: capabilities(),
+        capabilities: capabilities(ctx),
     });
     if send(&mut stream, &hello_ok).is_err() {
         return;
@@ -178,7 +193,7 @@ fn handle(
             let resp = Response::HelloOk(HelloResponse {
                 protocol: PROTOCOL_VERSION.to_string(),
                 helper_version: HELPER_VERSION.to_string(),
-                capabilities: capabilities(),
+                capabilities: capabilities(ctx),
             });
             send(stream, &resp)
         }

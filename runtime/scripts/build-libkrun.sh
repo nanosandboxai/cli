@@ -29,9 +29,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # The fork's `nanosandbox` branch carries the customizations as commits:
 #   - next-mode init (extra virtiofs mounts + static network)
 #   - macOS virtiofs raw-FUSE traversal hardening
+#   - background workload exec agent (KRUN_EXEC_AGENT)
 # Base upstream tag: v1.19.5.
 LIBKRUN_TAG="nanosandbox"
-LIBKRUN_SHA="a148cff426923e5a646392a00b2163d80560c964"
+LIBKRUN_SHA="0a2cfd467660756096774f748e74fc72106c8df0"
 
 # Nanosandbox libkrun fork (source of truth)
 LIBKRUN_REPO="https://github.com/nanosandboxai/libkrun.git"
