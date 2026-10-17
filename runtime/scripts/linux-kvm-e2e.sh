@@ -143,25 +143,37 @@ else
   echo "SKIP: gcc -static unavailable; cannot build a local_dir rootfs fixture"
 fi
 
-# Exec-channel wiring through the supported entrypoint (needs a real host-arch
-# guest exec-agent; otherwise covered by unit tests + the verbs E2E).
+# Epic 178 / RG-5: exec a real command in a *workload* sandbox end-to-end.
+# `nanosb run --exec <image> <workload>` keeps the workload as PID 1 and (now)
+# runs the exec agent resident alongside it, so `nanosb exec` must return the
+# command's stdout while the workload is still running.
 if [ -x "$NANOSB_HOME/guest-bin/exec-agent" ]; then
-  cat > "$EPIC11_TMP/spec2.json" <<JSON
-{"image":"alpine","name":"$NAME-exec","rootfs":{"kind":"local_dir","path":"$ROOTFS"}}
-JSON
-  "$BINARY" rm -f "$NAME-exec" >/dev/null 2>&1 || true
-  "$BINARY" supervise --name "$NAME-exec" --spec "$EPIC11_TMP/spec2.json" >/dev/null 2>&1
-  EXEC_SOCK="$NANOSB_HOME/sandboxes/$NAME-exec/exec.sock"
-  for _ in $(seq 1 60); do [ -S "$EXEC_SOCK" ] && break; sleep 0.5; done
-  if [ -S "$EXEC_SOCK" ]; then
-    echo "PASS: exec channel (exec.sock) wired through 'nanosb supervise'"
+  WID="$NAME-exec"
+  EXEC_MARKER="linux-kvm-exec-ok-$$"
+  "$BINARY" rm -f "$WID" >/dev/null 2>&1 || true
+  "$BINARY" run --name "$WID" --exec "$IMAGE" /bin/sleep 30 >/dev/null 2>&1 &
+  RUN_PID=$!
+  EXEC_OK=false
+  for _ in $(seq 1 120); do
+    if "$BINARY" ps 2>/dev/null | grep -q "$WID"; then
+      if OUT="$("$BINARY" exec "$WID" /bin/echo "$EXEC_MARKER" 2>/dev/null)" \
+        && printf '%s' "$OUT" | grep -q "$EXEC_MARKER"; then
+        EXEC_OK=true
+        break
+      fi
+    fi
+    sleep 0.5
+  done
+  if [ "$EXEC_OK" = true ]; then
+    echo "PASS: exec into a workload sandbox ran /bin/echo ($EXEC_MARKER)"
   else
-    echo "FAIL: exec.sock not present at $EXEC_SOCK" >&2
+    echo "FAIL: exec into a workload sandbox did not return the marker" >&2
     EPIC11_OK=false
   fi
-  "$BINARY" rm -f "$NAME-exec" >/dev/null 2>&1 || true
+  kill "$RUN_PID" >/dev/null 2>&1 || true
+  "$BINARY" rm -f "$WID" >/dev/null 2>&1 || true
 else
-  echo "SKIP: no real guest exec-agent staged; exec wiring covered by unit tests"
+  echo "SKIP: no real guest exec-agent staged; exec covered by unit tests"
 fi
 
 rm -rf "$EPIC11_TMP"
