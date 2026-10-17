@@ -142,8 +142,13 @@ pub fn prepare_supervisor_spawn(
     config.vsock_socket = Some(exec_sock.to_string_lossy().to_string());
     config.vsock_port = Some(EXEC_VSOCK_PORT);
     if config.command.is_none() {
+        // No workload: the agent itself is PID 1 and serves exec directly.
         config.command = Some(guest_path);
         config.command_args = vec![EXEC_VSOCK_PORT.to_string()];
+    } else {
+        // Workload present: keep it as PID 1 (exit/stdio/signal contract) and
+        // run the agent resident alongside it so exec still works.
+        config.exec_agent = Some(guest_path);
     }
 
     let extra_mounts_json = serde_json::to_string(&extra_mounts)?;
@@ -204,8 +209,13 @@ pub fn wait_for_exec_channel(name: &str, timeout_secs: u64) -> anyhow::Result<()
 mod tests {
     use super::*;
 
+    /// `prepare_supervisor_spawn` reads process-global env vars, so the tests
+    /// that exercise it must not run concurrently.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn prepare_spawn_stages_exec_agent_and_wires_vsock() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("nanosb-host-deploy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let guest_bin = tmp.join("guest-bin");
@@ -233,6 +243,37 @@ mod tests {
         assert_eq!(mounts[0].tag, "agent");
         assert_eq!(mounts[0].target, "/agent");
         assert!(sp.sandbox_dir.join("agent/exec-agent").exists());
+
+        std::env::remove_var("NANOSB_GUEST_BIN_DIR");
+        std::env::remove_var("NANOSB_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prepare_spawn_keeps_workload_and_runs_agent_resident() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!(
+            "nanosb-host-deploy-resident-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let guest_bin = tmp.join("guest-bin");
+        std::fs::create_dir_all(&guest_bin).unwrap();
+        std::fs::write(guest_bin.join("exec-agent"), b"#!/bin/sh\n").unwrap();
+
+        std::env::set_var("NANOSB_GUEST_BIN_DIR", &guest_bin);
+        std::env::set_var("NANOSB_HOME", tmp.join("home"));
+
+        let mut spec = nanosb_protocol::SandboxSpec::new("alpine");
+        spec.name = Some("host-deploy-resident-test".to_string());
+        spec.command = Some("/bin/sleep".to_string());
+        spec.command_args = vec!["60".to_string()];
+        let sp = prepare_supervisor_spawn(&spec).unwrap();
+
+        let cfg: runtime_config::SandboxConfig = serde_json::from_str(&sp.config_json).unwrap();
+        assert_eq!(cfg.command.as_deref(), Some("/bin/sleep"));
+        assert_eq!(cfg.command_args, vec!["60".to_string()]);
+        assert_eq!(cfg.exec_agent.as_deref(), Some("/agent/exec-agent"));
 
         std::env::remove_var("NANOSB_GUEST_BIN_DIR");
         std::env::remove_var("NANOSB_HOME");

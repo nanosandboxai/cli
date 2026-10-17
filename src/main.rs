@@ -1522,11 +1522,13 @@ mod cli {
             config.vsock_socket = Some(exec_sock.to_string_lossy().to_string());
             config.vsock_port = Some(nanosb_cli::deploy::EXEC_VSOCK_PORT);
             // With no user command, PID 1 is the agent itself; otherwise the
-            // agent runs alongside and exec is unused for this run.
+            // workload stays PID 1 and the agent runs resident alongside it.
             if command.is_empty() {
                 config.command = Some(guest_path);
                 config.command_args =
                     vec![nanosb_cli::deploy::EXEC_VSOCK_PORT.to_string()];
+            } else {
+                config.exec_agent = Some(guest_path);
             }
         }
         let extra_mounts_json = serde_json::to_string(&extra_mounts)?;
