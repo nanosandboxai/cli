@@ -41,6 +41,10 @@ must check that a capability is present before calling the verbs it gates
 `ExecPty`, `Signal`, and `Wait` are the shim-facing surface used by
 containerd/CRI integration on Linux/KVM.
 
+`exec` and `exec_pty` are advertised **only when the exec channel is configured**
+(the resident agent is up); a consumer should treat their absence as "no exec
+here" rather than retrying. See §3.3.
+
 ## 3. Process contract
 
 - The runtime helper binary is **`nanosb-runtime`** (`src/bin/nanosb_runtime.rs`).
@@ -59,7 +63,11 @@ the same pre-spawn wiring as the helper:
   `/agent`),
 - sets `vsock_socket = <sandbox_dir>/exec.sock` and `vsock_port = 1024`
   (`EXEC_VSOCK_PORT`),
-- defaults the PID-1 command to the exec-agent when the spec has no `command`.
+- runs the guest `exec-agent` **resident alongside the workload** (Epic 178):
+  when the spec has no `command` the agent itself is PID 1; when it has a
+  workload command the workload stays PID 1 and the runtime exports
+  `KRUN_EXEC_AGENT=/agent/exec-agent:<port>` so the guest init backgrounds the
+  agent. Either way `exec` / `exec_pty` work. See §3.3.
 
 **`--foreground`** spawns the supervisor as a **live child of the caller** (no
 `setsid`, not re-parented) so the caller owns and reaps it:
@@ -81,6 +89,28 @@ A `SandboxSpec.rootfs` of `{ "kind": "local_dir", "path": "<dir>" }` (or
 OCI image pull and no OCI bundle. This is how a containerd snapshotter mount is
 handed to the VM. `start`, `start_next`, and `restart` all support it; an OCI
 rootfs still uses the bundle prepared by `create`.
+
+### 3.3 Resident exec agent and workload stdin (Epic 178)
+
+The exec channel is served by the guest `exec-agent` (a vsock server on port
+1024, bridged to `<sandbox_dir>/exec.sock`). It runs **resident alongside the
+PID-1 workload**, so exec works for a normal container that supplies a command
+(`/bin/echo`, `/bin/sleep`, …), not only for the no-command case:
+
+- The runtime exports `KRUN_EXEC_AGENT=/agent/exec-agent:<port>` in the next-mode
+  env; the libkrun fork's init backgrounds the agent (it detaches from PID 1's
+  session and silences its stdio) and PID 1 reaps it if it dies.
+- `hello` advertises `exec` / `exec_pty` **only when the exec channel is
+  configured** (`SandboxConfig.vsock_socket`), so a client can fail loudly instead
+  of hitting a reset.
+- The host exec client retries a new exec while the socket exists and the agent is
+  still binding, so a freshly booted sandbox is reliable.
+
+**Workload stdin** (the main process, not `exec`) is fed to the guest console:
+write `attach_input` frames on the `attach` stream — the supervisor forwards them
+to the guest console stdin (`Ctx.stdin_writer`), which the guest init wires to
+PID 1's stdin. A consumer that needs container stdin (e.g. `ctr run --with-stdin`
+or `-t`) bridges containerd's stdin FIFO to `attach_input`.
 
 ## 4. Dependency contract (layering)
 
@@ -116,6 +146,9 @@ Target consumer dependencies: **`nanosb-protocol` + `nanosb-host` only**.
   §3.1.
 - ✅ **H7** — CI (`host-layer` job) asserts `nanosb-host` and the slim helper build
   without the engine or TUI dependencies.
+- ✅ **Epic 178** — the guest exec agent runs **resident alongside the workload**
+  (`KRUN_EXEC_AGENT`); `exec` / `exec_pty` are advertised only when the channel is
+  configured and the host client retries while the agent binds. See §3.3.
 
 A host-side consumer (the shim) can depend on **`nanosb-protocol` +
 `nanosb-host` only** — for spec→config conversion, exec-agent staging, and

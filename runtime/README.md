@@ -124,6 +124,13 @@ through the `nanosb-runtime` helper over the versioned NDJSON protocol (`exec`,
 `wait`, `kill`, PTY). See [`../docs/protocol/protocol.md`](../docs/protocol/protocol.md)
 and the [`../sdk`](../sdk) clients.
 
+The in-guest exec agent runs **resident alongside the PID-1 workload** (Epic 178):
+when a workload command is set the runtime exports `KRUN_EXEC_AGENT` so the
+libkrun fork's init backgrounds the agent, keeping the workload as PID 1. So
+`nanosb exec` and the containerd shim's `exec` work for a normal container, not
+only for the no-command case. See
+[`../docs/runtime-capability-contract.md`](../docs/runtime-capability-contract.md) §3.3.
+
 ## This Crate Does NOT Contain
 
 | Concern | Where to find it |
