@@ -126,6 +126,38 @@ grep -rn "<the symbol/command/field you changed>" --include='*.md' . \
 
 Vendored content under `runtime/deps/**` is out of scope.
 
+## libkrun fork — check for new changes on every runtime change (MANDATORY)
+
+The runtime boots via a **fork** of libkrun — `nanosandboxai/libkrun`, branch
+`nanosandbox` — whose revision is pinned by `LIBKRUN_SHA` in
+[`runtime/scripts/build-libkrun.sh`](runtime/scripts/build-libkrun.sh) and built
+into `libkrun.a` (linked by `runtime/crates/libkrun-sys`). The fork carries
+nanosandbox commits on top of a pinned upstream tag: the guest-init hooks
+(`KRUN_NEXT_MODE`, `KRUN_EXTRA_MOUNTS`, `KRUN_NET_CONFIG`, `KRUN_EXEC_AGENT`) and
+macOS virtiofs hardening. The fork's `main` tracks upstream and has diverged from
+`nanosandbox` — never build from or push customizations to `main`.
+
+Before you touch the VM boot path, the guest init, vsock/console/networking FFI,
+or any pinned-libkrun feature, you MUST:
+
+1. **Check the fork for newer work** — compare the pinned SHA against the fork's
+   `nanosandbox` branch and upstream:
+   ```bash
+   gh api "repos/nanosandboxai/libkrun/commits?sha=nanosandbox&per_page=20" \
+     --jq '.[] | "\(.sha[0:8]) \(.commit.message | split("\n")[0])"'
+   ```
+   to see whether the feature you need already exists, or a change you depend on
+   moved. Validate the new feature against our changes before adopting it.
+2. **Keep the init-hook contract in sync.** Our runtime sets the init env vars in
+   `runtime/crates/runtime/src/runtime/libkrun.rs`; the fork's init reads them in
+   `src/init_blob/init/init.c` on the `nanosandbox` branch. A rename or format
+   change on either side must move both sides together.
+3. **Bump deliberately.** When you bump `LIBKRUN_SHA`, commit on the fork's
+   `nanosandbox` branch, rebuild with `runtime/scripts/build-libkrun.sh`, record
+   the new commit in
+   [`runtime/scripts/patches/README.md`](runtime/scripts/patches/README.md), and
+   re-verify boot/exec on the Linux/KVM host.
+
 ## Sources of truth (for keeping docs accurate)
 
 | Concern | Source of truth |
@@ -138,6 +170,7 @@ Vendored content under `runtime/deps/**` is out of scope.
 | Environment variables | `src/deploy.rs`, `src/supervisor/mod.rs`, `src/tui/run.rs`, `sandbox/crates/sandbox/src/agents_registry.rs`, `scripts/install.sh` |
 | Install paths / bundles | `scripts/install.sh`, `install-deps/install.sh`, `scripts/package-sdk.sh` |
 | Host/shim supervisor entrypoint (`nanosb supervise`) | `src/main.rs` (`cmd_supervise`), `crates/host/src/deploy.rs`, `docs/runtime-capability-contract.md` |
+| libkrun fork (pin, commits, init-hook env) | `runtime/scripts/build-libkrun.sh` (`LIBKRUN_SHA`), `runtime/scripts/patches/README.md`, `nanosandboxai/libkrun`@`nanosandbox` |
 
 ## License
 
