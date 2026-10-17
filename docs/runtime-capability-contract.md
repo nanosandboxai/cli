@@ -112,6 +112,11 @@ to the guest console stdin (`Ctx.stdin_writer`), which the guest init wires to
 PID 1's stdin. A consumer that needs container stdin (e.g. `ctr run --with-stdin`
 or `-t`) bridges containerd's stdin FIFO to `attach_input`.
 
+> **Limitation:** there is no stdin **EOF/close** verb. A consumer can feed bytes
+> but cannot signal end-of-input, so a workload that reads until EOF (e.g.
+> `cat`) does not terminate. Closing the guest console stdin needs a new
+> console-stdin close frame.
+
 ## 4. Dependency contract (layering)
 
 A host-side consumer must be able to depend on the **thin host layer** without
